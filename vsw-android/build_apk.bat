@@ -46,8 +46,18 @@ mkdir "%OUT%\assets\mobile" 2>nul
 mkdir "%OUT%\gen" 2>nul
 
 echo === 1/8 sync web app from ..\vsw\static\mobile ===
+REM Ship the page twice on purpose:
+REM   assets/mobile/index.html  - normal path
+REM   res/raw/page.html         - indexed by aapt2, used as fallback when the asset
+REM                               index cannot find the entry on a real device
+REM                               (seen on a Xiaomi / Android 15: getAssets().open()
+REM                               threw FileNotFoundException although the entry WAS
+REM                               in the APK, and resources.arsc had no asset paths)
 copy /y "..\vsw\static\mobile\index.html" "%OUT%\assets\mobile\index.html" >nul
-if errorlevel 1 ( echo [ERROR] copy mobile page failed & exit /b 1 )
+if errorlevel 1 ( echo [ERROR] copy mobile page to assets failed & exit /b 1 )
+if not exist "res\raw" mkdir "res\raw"
+copy /y "..\vsw\static\mobile\index.html" "res\raw\page.html" >nul
+if errorlevel 1 ( echo [ERROR] copy mobile page to res/raw failed & exit /b 1 )
 
 echo === 2/8 aapt2 compile resources ===
 "%BT%\aapt2.exe" compile --dir res -o "%OUT%\res.zip" > "%OUT%\aapt2-compile.log" 2>&1

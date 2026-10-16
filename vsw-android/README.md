@@ -90,9 +90,39 @@ node ../scripts/vsw-probe-apk-page.js --apk ../vsw-workbench.apk --origin http:/
 
 所以 APK 不需要 service worker，也不需要把页面挂到 HTTP 上才能联网。
 
+### 真机踩到的坑：内置页面读不出来（已修）
+
+第一版装到小米（Android 15 / WebView 131）上打开是 `net::ERR_FILE_NOT_FOUND`。
+后来做了启动诊断屏，拿到确切原因：
+
+```
+资产 assets/mobile/index.html → 0 字节
+失败：读取内置页面失败：FileNotFoundException mobile/index.html
+```
+
+**条目明明在 APK 里**（电脑上解包能看到 81,445 字节，且是 STORED），但
+`getAssets().open("mobile/index.html")` 在真机上抛 `FileNotFoundException`。
+进一步的证据是 `resources.arsc` 里**查不到任何 assets 路径记录** ——
+也就是"条目在包里，但 AssetManager 按名字索引不到它"。
+
+修法是**三级兜底**，三条都失败才显示诊断页，并把每条的错误写在屏幕上：
+
+| 顺序 | 路径 | 说明 |
+| --- | --- | --- |
+| 1 | `getAssets().open()` | 正常路径 |
+| 2 | **ZipFile 直接读 APK** | 把 APK 当 zip，按 `assets/mobile/index.html` 抠出来。不经过 AssetManager 的名字索引，所以"索引有洞"也照样能拿到内容 |
+| 3 | `res/raw/page.html` | 资源表索引的资源，aapt2 一定会为它建索引 |
+
+构建脚本现在把页面**同时打进** `assets/` 与 `res/raw/`（两份都是未压缩，共约 81 KB × 2），
+启动屏会写明这一次实际走的是哪条路（`来源 assets 索引` / `APK zip 直读` / `res/raw`）。
+
+`scripts/vsw-verify-apk.py` 也补了对应断言：兜底资源必须在包里、两份内容必须一致、
+资源表里必须查得到条目名 —— 这个坑不能再靠人眼发现。
+
 ### ⚠ 还没验证到的（真机才能确认）
 
-1. **装完点开能不能正常显示** —— 没真机，只能确认同一 Blink 内核下页面正常启动；
+1. **装完点开能不能正常显示** —— 没真机调试环境，只能确认同一 Blink 内核下页面正常启动；
+   （上面那个 assets 问题就是真机反馈才发现的，所以这一条以真机为准）
 2. **拍照 / 相册选择** —— `onShowFileChooser` 与系统相机/相册的交互只能在设备上试；
 3. **扫码** —— ZXing 解码逻辑无法在没有摄像头的环境里跑；
 4. **系统返回键** —— `onBackPressed` → 页面钩子的往返只在真机上才有意义；

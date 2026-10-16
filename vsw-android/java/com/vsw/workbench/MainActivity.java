@@ -50,10 +50,11 @@ public class MainActivity extends Activity {
      * 用在应用名和启动屏里的构建标识。每次改 APK 都要改它 —— 这样"我装了新版吗"
      * 这个问题不需要靠猜（真机上真的发生过"装的是旧包"）。
      */
-    static final String BUILD_TAG = "r2";
+    static final String BUILD_TAG = "r3";
 
     private int assetBytes = 0;
     private long pageFileLength = 0;
+    private String sourceUsed = "";
 
     private static final int REQ_FILE = 1001;
     private static final int REQ_WEB_CAMERA = 1002;
@@ -195,6 +196,7 @@ public class MainActivity extends Activity {
         sb.append("资产 assets/").append(ASSET_PAGE).append(" → ").append(assetBytes)
           .append(" 字节\n");
         if (problem == null) {
+            sb.append("来源 ").append(sourceUsed).append("\n");
             sb.append("落盘 ").append(pageUrl).append("\n");
             sb.append("文件 ").append(pageFileLength).append(" 字节 · 可读=")
               .append(isPageReadable()).append("\n");
@@ -224,28 +226,50 @@ public class MainActivity extends Activity {
      * 把内置页面复制到 /data/data/<pkg>/files/mobile/index.html，返回可加载的 URL；
      * 出问题则返回一句人话说明（会显示在页面上，方便没有 logcat 的人直接截图反馈）。
      *
-     * 为什么值得多这一步：`file:///android_asset/…` 在真机上会报 ERR_FILE_NOT_FOUND
-     * （见类注释）。用私有目录里的真实文件就没有这个不确定性，而且版本升级时可以靠
-     * 文件长度比对来刷新缓存。
+     * 为什么要三级兜底：真机（小米 / Android 15）上 `getAssets().open("mobile/index.html")`
+     * 抛 FileNotFoundException，而同一个 APK 在电脑上解包**明明有**这个条目，
+     * 而且 `resources.arsc` 里查不到任何 assets 路径记录 —— 也就是"条目在包里，
+     * 但 AssetManager 按名字索引不到它"。所以不能只依赖 assets：
+     *
+     *   1. `getAssets().open()`            —— 正常路径；
+     *   2. 直接 ZipFile 打开 APK 抠条目     —— assets 索引失效时的兜底（和读 SQLite 一个道理，
+     *                                          绕开那层虚拟目录，自己按路径找）；
+     *   3. `res/raw/page.html`             —— 资源表索引的资源，aapt2 一定会建索引。
+     *
+     * 三条都失败才会显示诊断页，并在上面写清每一条的错误。
      */
     private String preparePage() {
-        java.io.InputStream input = null;
+        byte[] payload = null;
+        String source = "";
+
+        try {
+            payload = readAsset(ASSET_PAGE);
+            source = "assets 索引";
+        } catch (Exception first) {
+            trail.append("assets 失败: ").append(brief(first)).append('\n');
+            try {
+                payload = readFromApkZip(ASSET_PAGE);
+                source = "APK zip 直读";
+            } catch (Exception second) {
+                trail.append("zip 直读失败: ").append(brief(second)).append('\n');
+                try {
+                    payload = readRawResource();
+                    source = "res/raw";
+                } catch (Exception third) {
+                    trail.append("res/raw 失败: ").append(brief(third)).append('\n');
+                    return "三条读取路径都失败（详见下方诊断）";
+                }
+            }
+        }
+
+        assetBytes = payload == null ? 0 : payload.length;
+        sourceUsed = source;
+        if (payload == null || payload.length < 1024) {
+            return "内置页面只有 " + assetBytes + " 字节，打包不完整（来源：" + source + "）";
+        }
+
         java.io.FileOutputStream output = null;
         try {
-            byte[] payload;
-            input = getAssets().open(ASSET_PAGE);
-            java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
-            byte[] chunk = new byte[8192];
-            int read;
-            while ((read = input.read(chunk)) > 0) {
-                buffer.write(chunk, 0, read);
-            }
-            payload = buffer.toByteArray();
-            assetBytes = payload.length;
-            if (payload.length < 1024) {
-                return "内置页面只有 " + payload.length + " 字节，打包不完整";
-            }
-
             java.io.File dir = new java.io.File(getFilesDir(), "mobile");
             if (!dir.isDirectory() && !dir.mkdirs()) {
                 return "无法创建目录 " + dir.getAbsolutePath();
@@ -265,11 +289,86 @@ public class MainActivity extends Activity {
             pageUrl = "file://" + target.getAbsolutePath();
             return null;
         } catch (Exception exc) {
-            return "读取内置页面失败：" + exc.getClass().getSimpleName() + " " + exc.getMessage();
+            return "落盘失败：" + brief(exc);
         } finally {
-            try { if (input != null) input.close(); } catch (Exception ignored) { /* 忽略 */ }
             try { if (output != null) output.close(); } catch (Exception ignored) { /* 忽略 */ }
         }
+    }
+
+    /** 路径 1：正常走 AssetManager。 */
+    private byte[] readAsset(String name) throws Exception {
+        java.io.InputStream input = getAssets().open(name);
+        try {
+            return drain(input);
+        } finally {
+            try { input.close(); } catch (Exception ignored) { /* 忽略 */ }
+        }
+    }
+
+    /**
+     * 路径 2：把 APK 当一个 zip 打开，按条目名直接读。
+     *
+     * 为什么可行：APK 本身就是 zip，我们自己的进程一定能读到自己的安装包
+     * （ApplicationInfo.sourceDir）。这条路不经过 AssetManager 的名字索引，
+     * 所以"索引里有洞"也照样能拿到内容。缺点是启动时多一次 zip 解析（几十毫秒）。
+     */
+    private byte[] readFromApkZip(String name) throws Exception {
+        String apkPath = getApplicationInfo().sourceDir;
+        java.util.zip.ZipFile zip = new java.util.zip.ZipFile(apkPath);
+        try {
+            java.util.zip.ZipEntry entry = zip.getEntry("assets/" + name);
+            if (entry == null) {
+                // 有些打包方式把 assets 放在别的层级，退一步做一次包含匹配
+                java.util.Enumeration<? extends java.util.zip.ZipEntry> all = zip.entries();
+                while (all.hasMoreElements()) {
+                    java.util.zip.ZipEntry candidate = all.nextElement();
+                    if (candidate.getName().endsWith("/" + name)) {
+                        entry = candidate;
+                        break;
+                    }
+                }
+            }
+            if (entry == null) {
+                throw new java.io.FileNotFoundException("APK 里没有 assets/" + name);
+            }
+            java.io.InputStream input = zip.getInputStream(entry);
+            try {
+                return drain(input);
+            } finally {
+                try { input.close(); } catch (Exception ignored) { /* 忽略 */ }
+            }
+        } finally {
+            try { zip.close(); } catch (Exception ignored) { /* 忽略 */ }
+        }
+    }
+
+    /** 路径 3：资源表索引的 raw 资源（aapt2 一定会为它建索引）。 */
+    private byte[] readRawResource() throws Exception {
+        int id = getResources().getIdentifier("page", "raw", getPackageName());
+        if (id == 0) {
+            throw new java.io.FileNotFoundException("没有 res/raw/page.html");
+        }
+        java.io.InputStream input = getResources().openRawResource(id);
+        try {
+            return drain(input);
+        } finally {
+            try { input.close(); } catch (Exception ignored) { /* 忽略 */ }
+        }
+    }
+
+    private static byte[] drain(java.io.InputStream input) throws java.io.IOException {
+        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+        byte[] chunk = new byte[16384];
+        int read;
+        while ((read = input.read(chunk)) > 0) {
+            buffer.write(chunk, 0, read);
+        }
+        return buffer.toByteArray();
+    }
+
+    private static String brief(Exception exc) {
+        String message = exc.getMessage();
+        return exc.getClass().getSimpleName() + (message == null ? "" : " " + message);
     }
 
     /** 出错时显示的信息页：把关键事实摊开说，省得只能看到一句 ERR_FILE_NOT_FOUND。 */

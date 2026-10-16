@@ -40,6 +40,10 @@ EXPECTED_CLASSES = [
     "QrScanActivity",
     "QrScanActivity$GraySource",
     "MainActivity$Bridge",
+    # 三条读取内置页面的路径都要在（assets / APK zip 直读 / res/raw）
+    "readAsset",
+    "readFromApkZip",
+    "readRawResource",
     "com.google.zxing.MultiFormatReader",
     "com.google.zxing.qrcode.QRCodeReader",
     "com.google.zxing.common.HybridBinarizer",
@@ -123,6 +127,22 @@ def main(argv: List[str]) -> int:
                       'id="intro"' in html and "introServer" in html and "introImport" in html)
         checker.check("内置页面不依赖外部 JS/CSS（离线可用）",
                       "<style>" in html and 'src="./app.js"' not in html)
+
+        # 真机上踩过的坑：条目在 zip 里，但 AssetManager 按名字索引不到它
+        # （小米 / Android 15 上 getAssets().open() 抛 FileNotFoundException，
+        # 而 resources.arsc 里查不到任何 assets 路径）。所以这里钉两条：
+        #   (a) res/raw 这条由 aapt2 建索引的兜底路径必须在；
+        #   (b) resources.arsc 里必须真的能看到它的条目名。
+        raw = "res/raw/page.html"
+        checker.check("兜底路径 res/raw/page.html 在包里", raw in names)
+        if raw in names:
+            raw_size = zf.getinfo(raw).file_size
+            checker.check("res/raw 的页面与 assets 的页面内容一致",
+                          raw_size == len(html.encode("utf-8")),
+                          f"raw={raw_size} assets={len(html.encode('utf-8'))}")
+        arsc = zf.read("resources.arsc")
+        checker.check("资源表里能查到 raw 条目的名字（否则索引可能失效）",
+                      b"page" in arsc, f"resources.arsc {len(arsc)} 字节")
 
     # ---------------------------------------------------------------- 2. 身份
     print("\n--- 2) 身份与权限 ---")
