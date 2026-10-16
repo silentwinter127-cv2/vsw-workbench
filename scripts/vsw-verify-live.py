@@ -17,9 +17,24 @@ from typing import Any, Dict, List
 
 import requests
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8799"
-FOLDER_ROOT = sys.argv[2] if len(sys.argv) > 2 else r"D:\images"
-LIMIT = int(sys.argv[3]) if len(sys.argv) > 3 else 8
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _cli import image_dir, positional, usage, wants_help  # noqa: E402
+
+_ARGS = positional()
+BASE = _ARGS[0] if len(_ARGS) > 0 else "http://127.0.0.1:8799"
+FOLDER_ROOT = _ARGS[1] if len(_ARGS) > 1 else r"D:\images"
+LIMIT = int(_ARGS[2]) if len(_ARGS) > 2 and _ARGS[2].isdigit() else 8
+
+USAGE = [
+    "python scripts/vsw-verify-live.py [工作台地址] [素材根目录] [每个子目录取几张]",
+    "",
+    "对**正在运行**的工作台做真实链路验证：导入真实图片 → 变体/队列/语义向量 →",
+    "回填一份引擎结果页 → 校验三层去重与探索价值排序。",
+    "",
+    "默认：http://127.0.0.1:8799 · D:\\images · 8 张（都可用参数覆盖）",
+    "注意：需要一个装了图片的目录，它只读你的文件、不会改动原图。",
+]
 
 failures: List[str] = []
 
@@ -31,8 +46,22 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def main() -> int:
+    if wants_help():
+        return usage("vsw-verify-live.py", USAGE)
+    # 参数不对时给一句人话就退出，而不是等后面在 os.listdir 上抛栈
+    if not os.path.isdir(FOLDER_ROOT):
+        print(f"[错误] 素材根目录不存在：{FOLDER_ROOT}")
+        print("       它是装着若干子目录的文件夹，每个子目录放一些 .jpg/.png。")
+        print("       用法见 --help。")
+        return 2
+
     print(f"== 目标服务 {BASE} ==")
-    health = requests.get(f"{BASE}/api/health", timeout=30).json()
+    try:
+        health = requests.get(f"{BASE}/api/health", timeout=30).json()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[错误] 连不上 {BASE}：{exc}")
+        print("       先确认工作台已经在运行（例如双击 start_vsw.bat）。")
+        return 2
     check("服务健康且语义引擎就绪", health["vision"]["available"], health["vision"]["reason"])
     print(f"     模型：{health['vision']['model']}")
 
@@ -40,11 +69,12 @@ def main() -> int:
     check("WebUI 页面可访问", page.status_code == 200 and "视觉搜索工作台" in page.text)
 
     folder_names = [n for n in os.listdir(FOLDER_ROOT)
-                    if os.path.isdir(os.path.join(FOLDER_ROOT, n))] if os.path.isdir(FOLDER_ROOT) else []
+                    if os.path.isdir(os.path.join(FOLDER_ROOT, n))]
     folder_names.sort(key=lambda n: len(os.listdir(os.path.join(FOLDER_ROOT, n))), reverse=True)
     check(f"找到素材库 {FOLDER_ROOT}", bool(folder_names), FOLDER_ROOT)
     if not folder_names:
-        return 1
+        print(f"[错误] {FOLDER_ROOT} 下面没有子目录，放几个子目录（每个装图片）再跑。")
+        return 2
 
     def take(folder: str, count: int) -> List[str]:
         full = os.path.join(FOLDER_ROOT, folder)

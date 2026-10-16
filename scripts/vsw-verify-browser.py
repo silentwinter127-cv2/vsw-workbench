@@ -19,9 +19,28 @@ import sys
 import time
 import urllib.request
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8799"
-FOLDER = sys.argv[2] if len(sys.argv) > 2 else r"D:\images\和幸(春熙路群光广场店)"
-ENGINE = sys.argv[3] if len(sys.argv) > 3 else "baidu"
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _cli import image_dir, positional, usage, wants_help  # noqa: E402
+
+_ARGS = positional()
+BASE = _ARGS[0] if len(_ARGS) > 0 else "http://127.0.0.1:8799"
+FOLDER = _ARGS[1] if len(_ARGS) > 1 else ""
+ENGINE = _ARGS[2] if len(_ARGS) > 2 else "baidu"
+
+USAGE = [
+    "python scripts/vsw-verify-browser.py [工作台地址] [图片目录] [引擎]",
+    "",
+    "验证**自动识图**全链路：导入种子 → 生成变体 → 派发队列 → 无头浏览器驱动引擎的",
+    "上传控件 → 结果过三层去重/聚类/排序 → 校验可信度标注是否诚实。",
+    "",
+    "参数：",
+    "  工作台地址  默认 http://127.0.0.1:8799",
+    "  图片目录    必填，装着 .jpg/.png 的文件夹",
+    "  引擎        默认 baidu（也可用 so360）",
+    "",
+    "前置条件：Node 18+ 与本机 Edge/Chrome；跑一次约十几秒。",
+]
 
 failures: list[str] = []
 
@@ -47,7 +66,18 @@ def get(path: str, timeout: float = 120) -> dict:
 
 
 def main() -> int:
-    health = get("/api/health")
+    if wants_help():
+        return usage("vsw-verify-browser.py", USAGE)
+    names = image_dir(FOLDER, label="图片目录")
+    if names is None:
+        print("       用法见 --help。")
+        return 2
+    try:
+        health = get("/api/health")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[错误] 连不上 {BASE}：{exc}")
+        print("       先确认工作台已经在运行（例如双击 start_vsw.bat）。")
+        return 2
     check("服务健康", health.get("vision") is not None)
     check("服务能定位 Node 运行时（自动识图依赖它）", bool(health.get("node")), str(health.get("node")))
     engines = {e["key"]: e for e in get("/api/engines")["engines"]}
