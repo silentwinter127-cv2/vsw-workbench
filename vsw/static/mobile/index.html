@@ -684,6 +684,67 @@ async function hydrateThumbs(rows, kind = 'thumb') {
   }
 }
 
+/**
+ * 补齐本地缺失的图片。
+ *
+ * 为什么必须有这个：图片是"同步时按需下载"的，而**回收站里的条目往往是之后才被清掉的**
+ * —— 上一次同步时它们还不是回收站条目，缩略图就没下过。结果就是列表里一片空白
+ * （用户反馈的"看图有点问题"）。
+ *
+ * 判定"缺图"只认本地库里有没有 Blob（assets 表），**不看内存里的 URL 映射** ——
+ * 内存映射会因为 objectURL 失效、或刚清库而失真，用它当判据会漏掉该补的。
+ */
+async function ensureThumbs(rows) {
+  if (!rows || !rows.length || !S.server) return 0;
+  const map = thumbSrcMap();
+
+  // 1) 先把本地已有的填进内存映射（不发请求）
+  for (const row of rows) {
+    if (map[row.id]) continue;
+    const url = (await assetUrl('thumb', row.id)) || (await assetUrl('full', row.id));
+    if (url) map[row.id] = url;
+  }
+
+  // 2) 找出本地库里连 Blob 都没有的那些
+  const missing = [];
+  for (const row of rows) {
+    if (map[row.id]) continue;
+    if (await local.get('assets', `thumb:${row.id}`)) {
+      const url = (await assetUrl('thumb', row.id)) || '';
+      if (url) { map[row.id] = url; continue; }
+    }
+    if (!row.thumb_path && !row.rel_path) continue;
+    missing.push(row);
+  }
+  if (!missing.length) return 0;
+
+  // 3) 去电脑上取。这里**不看 S.online**：那个标志是异步检查的结果，可能还没落定
+  //    （探测到过：快照明明拉下来了 S.online 仍是 false，结果一张都没补）。
+  let got = 0;
+  for (const row of missing) {
+    const rel = row.thumb_path || row.rel_path;
+    try {
+      const resp = await fetch(relToMediaServer(rel), { cache: 'force-cache' });
+      if (!resp.ok) continue;
+      const blob = await resp.blob();
+      if (!blob.size) continue;
+      await storeBlob('thumb', row.id, blob, { rel, kind: 'thumb' });
+      map[row.id] = URL.createObjectURL(blob);
+      got += 1;
+    } catch (e) { /* 单张失败不影响其它 */ }
+  }
+  return got;
+}
+
+/** 把列表里所有 <img data-want-thumb="id"> 补上真实 src（补图完成后调它）。 */
+function paintThumbs(rootSelector) {
+  const map = thumbSrcMap();
+  $$(`${rootSelector} [data-want-thumb]`).forEach((img) => {
+    const id = Number(img.getAttribute('data-want-thumb'));
+    if (map[id]) img.src = map[id];
+  });
+}
+
 function sourceCount(f) {
   if (Array.isArray(f.sources)) return f.sources.length;
   return f.source_count || 0;
@@ -1058,27 +1119,22 @@ function renderArchive() {
     };
   });
 
-  $('#trashHint').textContent = S.trash.length ? `${S.trash.length} 个` : '空的';
-  $('#trashList').innerHTML = S.trash.map((f) => `
+  $('#trashHint').textContent = S.trash.length ? `${S.trash.length} 个` : '空的';  $('#trashList').innerHTML = S.trash.map((f) => `
     <div class="fcard" data-tid="${f.id}">
-      ${thumbSrcMap()[`trash:${f.id}`] ? `<img src="${thumbSrcMap()[`trash:${f.id}`]}" alt="">` : '<img alt="" style="opacity:.25">'}
+      ${thumbSrcMap()[f.id]
+        ? `<img src="${thumbSrcMap()[f.id]}" alt="">`
+        : '<img alt="" style="opacity:.25" data-want-thumb="' + f.id + '">'}
       <div class="meta2">
         <div class="tt">${esc(f.title || f.image_url || `#${f.id}`)}</div>
-        <div class="ln">${esc(f.trash_reason || '')} · ${(f.sources || []).length} 源</div>
+        <div class="ln">${esc(f.trash_reason || '')} · ${sourceCount(f)} 源</div>
         ${S.online ? `<div class="row tight">
           <button class="btn sm" data-restore="${f.id}">恢复</button>
           <button class="btn sm danger" data-purge="${f.id}">彻底删除</button></div>` : ''}
       </div>
     </div>`).join('') || '<div class="empty">回收站是空的</div>';
-  hydrateThumbs(S.trash, 'thumb').then(() => {
-    S.trash.forEach((f) => { thumbSrcMap()[`trash:${f.id}`] = thumbSrcMap()[f.id]; });
-    $$('#trashList .fcard').forEach((el) => {
-      const id = Number(el.dataset.tid);
-      const src = thumbSrcMap()[`trash:${id}`];
-      const img = el.querySelector('img');
-      if (img && src) img.src = src;
-    });
-  });
+
+  // 缺图的补齐统一在 loadLocal() 里做（数据进内存的唯一入口），这里只负责把已有的填进 DOM
+  paintThumbs('#trashList');
   $$('#trashList [data-restore]').forEach((btn) => {
     btn.onclick = async (ev) => {
       ev.stopPropagation();
@@ -1752,6 +1808,19 @@ async function loadLocal() {
   await refreshPending();
   render();
   switchTab(S.tab);
+
+  // 加载完顺手补齐本地缺失的图片，然后只把 <img> 补上（不重画整棵树，避免滚动位置丢失）。
+  // 放在这里而不是"切到某个标签页时"：图片缺不缺和用户切到哪一页无关，而 loadLocal
+  // 是数据进内存的唯一入口（启动、同步完成、导入数据集都会走它）。
+  Promise.resolve()
+    .then(() => ensureThumbs(S.findings))
+    .then(() => ensureThumbs(S.trash))
+    .then((filled) => {
+      paintThumbs('#boardList');
+      paintThumbs('#trashList');
+      if (filled) console.log(`[vsw] 补齐了 ${filled} 张本地缺失的缩略图`);
+    })
+    .catch(() => { /* 离线或没有可补的图时静默跳过 */ });
 }
 
 async function boot() {
