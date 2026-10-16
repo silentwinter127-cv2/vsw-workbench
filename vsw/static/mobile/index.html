@@ -1103,11 +1103,12 @@ function renderArchive() {
 /* ---------------------------------------------------------------- 框选（触屏） */
 const CROP = { img: null, sel: null, drag: null, box: null, source: null, blob: null };
 
-function openCrop(source, title) {
+function openCrop(source, title, onDone) {
   CROP.source = source;
   CROP.sel = null;
   CROP.drag = null;
   CROP.blob = source.blob || null;
+  CROP.onDone = onDone || null;      // 走完之后回到哪（导入面板用它回到导入列表）
   $('#sheetTitle').textContent = title || '框选';
   $('#cropConfirm').classList.remove('hide');
   $('#cropStage').innerHTML = `<div class="cropwrap" id="cropWrap">
@@ -1267,26 +1268,32 @@ async function confirmCrop() {
   canvas.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
   const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.92));
   const name = `框选 ${canvas.width}×${canvas.height}`;
+  const dataUrl = await blobToDataUrl(blob);
+  const onDone = CROP.onDone;
   if (S.online) {
-    const dataUrl = await blobToDataUrl(blob);
     try {
       const res = await post('/api/mobile/sync', {
         imports: [{ name, data_url: dataUrl, note: `手机框选 ${Math.round(w * 100)}%×${Math.round(h * 100)}%`,
                     auto_enqueue: true, engines: ['baidu'] }],
       });
       const imported = (res.imported || [])[0];
-      toast(imported ? `已在电脑上建成种子 #${imported.seed_id} 并排队` : '同步失败');
-      closeSheet();
+      toast(imported ? `已建成种子 #${imported.seed_id} 并排队` : '同步失败，可重试');
       await syncSnapshot();
-    } catch (e) { toast(`同步失败：${e.message}`, true); }
+    } catch (e) {
+      toast(`同步失败：${e.message}`, true);
+    }
   } else {
-    const dataUrl = await blobToDataUrl(blob);
     await queuePending('import', {
       name, data_url: dataUrl, note: '手机离线框选', auto_enqueue: true, engines: ['baidu'],
     });
     toast('离线：已存进离线收件箱');
-    closeSheet();
   }
+  // 从导入面板进来的就回导入面板（继续处理剩下那些），不要把人丢回上一页
+  CROP.onDone = null;
+  $('#cropConfirm').classList.add('hide');
+  $('#cropStage').innerHTML = '';
+  if (typeof onDone === 'function') onDone();
+  else closeSheet();
 }
 
 /* 地址归一化。踩过的坑：在 file:// 页面里 location.origin 是字符串 "null"，
@@ -1401,67 +1408,181 @@ function bindImport() {
   $('#importFab').onclick = () => openImportSheet();
 }
 
-function openImportSheet() {
-  $('#sheetTitle').textContent = '导入图片';
-  $('#sheetBody').innerHTML = `
-    <p class="small">拍一张或从相册选图。选中后可以直接导入，也可以先在手机上框选一块再导入
-      —— 手机上框选不经过电脑，反而比鼠标顺手。</p>
-    <div class="row">
-      <button class="btn primary" id="pickCamera">拍照</button>
-      <button class="btn" id="pickGallery">从相册选</button>
-    </div>
-    <input type="file" id="fileCamera" accept="image/*" capture="environment" class="hide">
-    <input type="file" id="fileGallery" accept="image/*" multiple class="hide">
-    <div id="importPreview" style="margin-top:14px"></div>
-    <div id="importList"></div>`;
-  openSheet();
-  $('#pickCamera').onclick = () => $('#fileCamera').click();
-  $('#pickGallery').onclick = () => $('#fileGallery').click();
-  $('#fileCamera').onchange = (ev) => handleFiles(ev.target.files);
-  $('#fileGallery').onchange = (ev) => handleFiles(ev.target.files);
+/* 导入队列：一次可以选/拍多张，每张各自有状态。
+ *
+ * 之前的实现有两个真 bug（用户实测反馈）：
+ *   1. 导入成功后直接 closeSheet() —— 把整个导入面板关掉，人被弹回上一页；
+ *   2. 面板一关，列表里其它文件就再也不会被导入（它们只是按钮，没有队列）。
+ * 现在：面板不关，每张显示自己的状态，另外给一个「全部导入」把没做的都做掉。 */
+const IMPORT_QUEUE = [];
+
+function filesToQueue(fileList) {
+  const list = Array.from(fileList || []);
+  list.forEach((file, i) => {
+    IMPORT_QUEUE.push({
+      id: `${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`,
+      file,
+      name: file.name || `图片 ${IMPORT_QUEUE.length + 1}`,
+      size: file.size || 0,
+      status: 'idle',      // idle | sending | done | queued | failed
+      detail: '',
+    });
+  });
+  return list.length;
 }
 
-async function handleFiles(files) {
-  const list = Array.from(files || []);
-  if (!list.length) return;
-  $('#importList').innerHTML = list.map((f, i) => `
-    <div class="card" data-i="${i}">
-      <div class="row"><b>${esc(f.name || ('图片 ' + (i + 1)))}</b>
-        <div class="spacer"></div><span class="small">${Math.round(f.size / 1024)} KB</span></div>
-      <div class="row" style="margin-top:8px">
-        <button class="btn sm primary" data-do="send">直接导入</button>
-        <button class="btn sm" data-do="crop">先框选再导入</button>
+function importStatusLabel(entry) {
+  if (entry.status === 'sending') return '<span class="small">正在导入…</span>';
+  if (entry.status === 'done') return `<span class="small" style="color:var(--diff)">✓ ${esc(entry.detail || '已导入')}</span>`;
+  if (entry.status === 'queued') return `<span class="small" style="color:var(--track)">✓ ${esc(entry.detail || '已存进离线收件箱')}</span>`;
+  if (entry.status === 'failed') return `<span class="small" style="color:var(--danger)">✗ ${esc(entry.detail || '失败')}</span>`;
+  return '';
+}
+
+function renderImportList() {
+  const host = $('#importList');
+  if (!host) return;
+  if (!IMPORT_QUEUE.length) { host.innerHTML = ''; return; }
+  const done = IMPORT_QUEUE.filter((e) => e.status === 'done' || e.status === 'queued').length;
+  const failed = IMPORT_QUEUE.filter((e) => e.status === 'failed').length;
+  const pending = IMPORT_QUEUE.length - done - failed;
+  host.innerHTML = `
+    <div class="row" style="margin:14px 0 8px">
+      <span class="pill">共 ${IMPORT_QUEUE.length} 张</span>
+      <span class="pill on">已导入 ${done}</span>
+      ${pending ? `<span class="pill warn">待处理 ${pending}</span>` : ''}
+      ${failed ? `<span class="pill off">失败 ${failed}</span>` : ''}
+      <div class="spacer"></div>
+      ${pending > 1 ? '<button class="btn sm primary" id="importAll">全部导入</button>' : ''}
+    </div>
+    ${IMPORT_QUEUE.map((entry) => `
+    <div class="card" data-id="${entry.id}">
+      <div class="row"><b>${esc(entry.name)}</b>
+        <div class="spacer"></div><span class="small">${Math.round(entry.size / 1024)} KB</span></div>
+      <div class="row tight" style="margin-top:8px">
+        ${entry.status === 'idle' || entry.status === 'failed' ? `
+          <button class="btn sm primary" data-do="send" data-id="${entry.id}">直接导入</button>
+          <button class="btn sm" data-do="crop" data-id="${entry.id}">先框选再导入</button>` : ''}
+        ${importStatusLabel(entry)}
       </div>
-    </div>`).join('');
-  $$('#importList .card').forEach((card) => {
-    const file = list[Number(card.dataset.i)];
-    $$('[data-do]', card).forEach((btn) => {
-      btn.onclick = async () => {
-        if (btn.dataset.do === 'crop') {
-          openCrop({ url: URL.createObjectURL(file), blob: file }, `框选：${file.name || ''}`);
-        } else {
-          await importOne(file, file.name);
-        }
-      };
-    });
+    </div>`).join('')}`;
+
+  const all = $('#importAll');
+  if (all) all.onclick = () => importAllPending();
+  $$('#importList [data-do]').forEach((btn) => {
+    btn.onclick = async () => {
+      const entry = IMPORT_QUEUE.find((e) => e.id === btn.dataset.id);
+      if (!entry || entry.status === 'sending') return;
+      if (btn.dataset.do === 'crop') {
+        // 框选：走完回导入面板继续处理剩下的，而不是把人丢回上一页
+        openCrop({ url: URL.createObjectURL(entry.file), blob: entry.file },
+                 `框选：${entry.name}`, () => { closeSheet(); openImportSheet(); });
+      } else {
+        await importOne(entry);
+        renderImportList();
+      }
+    };
   });
 }
 
-async function importOne(file, name) {
-  const dataUrl = await blobToDataUrl(file);
-  const payload = { name: name || '手机导入', data_url: dataUrl, auto_enqueue: true, engines: ['baidu'] };
+/** 把还没处理的按顺序做完（串行，避免同时发几十个请求）。 */
+async function importAllPending() {
+  const pending = IMPORT_QUEUE.filter((e) => e.status === 'idle' || e.status === 'failed');
+  if (!pending.length) return toast('没有待导入的图片');
+  if (!S.online) {
+    // 离线也能"全部导入"：只是都进离线收件箱
+    for (const entry of pending) { await importOne(entry); renderImportList(); }
+    toast(`已放进离线收件箱 ${pending.length} 张，回连后一键推回`);
+    return;
+  }
+  let ok = 0;
+  for (const entry of pending) {
+    await importOne(entry);
+    if (entry.status === 'done') ok += 1;
+    renderImportList();
+  }
+  toast(`导入完成：${ok}/${pending.length} 张成功`);
+}
+
+function openImportSheet() {
+  $('#sheetTitle').textContent = '导入图片';
+  $('#cropConfirm').classList.add('hide');
+  $('#cropStage').innerHTML = '';
+  $('#sheetBody').innerHTML = `
+    <p class="small">拍一张或从相册选图（可多选）。选中后可以直接导入，也可以先在手机上框选一块
+      再导入 —— 手机上框选不经过电脑，反而比鼠标顺手。</p>
+    <div class="row">
+      <button class="btn primary" id="pickCamera">拍照</button>
+      <button class="btn" id="pickGallery">从相册选</button>
+      ${IMPORT_QUEUE.length ? '<button class="btn ghost" id="clearImport">清空列表</button>' : ''}
+    </div>
+    <input type="file" id="fileCamera" accept="image/*" capture="environment" class="hide">
+    <input type="file" id="fileGallery" accept="image/*" multiple class="hide">
+    <div id="importList"></div>
+    <p class="small" id="importHint" style="margin-top:12px"></p>`;
+  openSheet();
+  $('#pickCamera').onclick = () => $('#fileCamera').click();
+  $('#pickGallery').onclick = () => $('#fileGallery').click();
+  const clear = $('#clearImport');
+  if (clear) clear.onclick = () => { IMPORT_QUEUE.length = 0; renderImportList(); openImportSheet(); };
+  $('#fileCamera').onchange = (ev) => {
+    const added = filesToQueue(ev.target.files);
+    ev.target.value = '';           // 允许再次选同一个文件
+    if (added) openImportSheet();
+  };
+  $('#fileGallery').onchange = (ev) => {
+    const added = filesToQueue(ev.target.files);
+    ev.target.value = '';
+    if (added) openImportSheet();
+  };
+  const hint = $('#importHint');
+  if (hint) {
+    hint.textContent = S.online
+      ? '连上电脑时：导入即在工作台建成种子，并按你设置的引擎入队。'
+      : '当前离线：导入的图片会先存进「离线收件箱」，回到同一 WiFi 后点「推回电脑」一次提交。';
+  }
+  renderImportList();
+}
+
+/** 导入单张。**不关面板** —— 关面板这个动作留给用户（返回按钮）。 */
+async function importOne(entry) {
+  const payload = {
+    name: entry.name || '手机导入',
+    data_url: await blobToDataUrl(entry.file),
+    auto_enqueue: true,
+    engines: ['baidu'],
+  };
+  entry.status = 'sending';
+  entry.detail = '';
+  renderImportList();
   if (S.online) {
     try {
       const res = await post('/api/mobile/sync', { imports: [payload] });
       const imported = (res.imported || [])[0];
-      toast(imported ? `已导入为种子 #${imported.seed_id}（电脑端已入队）` : '导入失败');
-      await syncSnapshot();
-    } catch (e) { toast(`导入失败：${e.message}`, true); }
+      if (imported && imported.seed_id) {
+        entry.status = 'done';
+        entry.detail = `已建成种子 #${imported.seed_id}`;
+      } else {
+        const why = (res.errors && res.errors[0] && res.errors[0].error) || '电脑端没有接受这张图';
+        entry.status = 'failed';
+        entry.detail = why;
+      }
+    } catch (e) {
+      entry.status = 'failed';
+      entry.detail = e.message;
+    }
   } else {
-    await queuePending('import', payload);
-    toast('离线：已存进离线收件箱，回连后一键推回');
-    closeSheet();
+    // 离线：进收件箱，等回连再推。这也算"处理完了"，所以标成 queued 而不是 idle。
+    try {
+      await queuePending('import', payload);
+      entry.status = 'queued';
+      entry.detail = '已存进离线收件箱';
+    } catch (e) {
+      entry.status = 'failed';
+      entry.detail = e.message;
+    }
   }
+  return entry;
 }
 
 /* ---------------------------------------------------------------- 我的页 */
