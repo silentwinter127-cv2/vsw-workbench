@@ -1,0 +1,16 @@
+# 换行符统一用 LF 存进仓库。
+#
+# 为什么要在意：`.bat` 脚本在 Windows 上必须能双击运行。如果 git 在检出时把
+# 换行换成 CRLF 又没配好，批处理里的续行（`^`）与 `for /f` 会因为行尾多一个 CR
+# 而行为异常 —— 而安卓构建脚本正是靠这些语法拼起来的。
+* text=auto eol=lf
+
+# 二进制资源不要做任何转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.jar binary
+*.apk binary
+*.keystore binary

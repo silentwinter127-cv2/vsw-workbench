@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  视觉搜索工作台 · 手机版
+
+  权限只留必须的：
+    INTERNET      连局域网里的工作台（明文 HTTP —— 见 usesCleartextTraffic）
+    CAMERA        导入图片时拍照
+    READ_MEDIA_IMAGES (Android 13+) / READ_EXTERNAL_STORAGE 从相册选图
+
+  没有定位、没有通讯录、没有后台服务。工作台地址由用户自己填，不写死任何服务器地址。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.vsw.workbench">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:allowBackup="true"
+        android:hardwareAccelerated="true"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="true">
+
+        <!-- 说明：这里**故意不需要 FileProvider**。
+             WebView 的 onShowFileChooser 会把相机/相册返回的 content URI 交给页面读取，
+             我们不在 Java 侧碰文件，所以省掉了 androidx 依赖（也少一个可能下载失败的环节）。 -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/AppTheme">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>横向视觉搜索工作台 — Visual Search Workbench</title>
+<style>
+/* 为了方便单文件托管，样式表也从 /app.css 引入；这里保留一份内联兜底。 */
+body { margin: 0; background: #0e1116; color: #e6ecf3; }
+</style>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><b>横向视觉搜索工作台</b><span>Visual Search Workbench</span></div>
+  <nav class="tabs">
+    <span class="tab active" data-view="seeds">种子图片池</span>
+    <span class="tab" data-view="queue">批处理队列</span>
+    <span class="tab" data-view="board">结果板</span>
+    <span class="tab" data-view="corpus">语料检索</span>
+    <span class="tab" data-view="sources">来源与聚类</span>
+    <span class="tab" data-view="graph">搜索图谱</span>
+    <span class="tab" data-view="metrics">指标与公式</span>
+  </nav>
+  <div class="spacer"></div>
+  <span class="pill" id="enginePill">检测语义引擎…</span>
+  <span class="pill" id="statPill">—</span>
+</header>
+
+<main>
+
+  <!-- ============================================================ 种子图片池 -->
+  <section class="view active" id="view-seeds">
+    <div class="grid-2">
+      <div class="card">
+        <div class="head"><h2>导入种子图</h2></div>
+        <p class="hint">种子 = 一次横向搜索的起点：真实旧图、局部裁剪、不同分辨率版本，或 AI 仿真索引。
+          导入后自动生成可独立检索的查询变体，每个变体有独立 ID 并保留父图关系。</p>
+
+        <div class="drop" id="drop">
+          <div style="font-size:15px;margin-bottom:4px">拖拽图片到这里，或点击选择文件</div>
+          <div class="small">支持批量；每张都会生成变体并记录哈希与语义向量</div>
+          <input type="file" id="fileInput" accept="image/*" multiple hidden>
+        </div>
+
+        <div class="sep"></div>
+        <h3>从本地路径 / 目录导入</h3>
+        <div class="row">
+          <input type="text" id="importPath" placeholder="D:\images\三只耳冷锅鱼火锅(玉林店)  或 单个文件路径">
+          <button class="btn" id="importPathBtn">导入</button>
+        </div>
+
+        <h3>从图片 URL 导入</h3>
+        <textarea id="importUrls" placeholder="每行一个图片 URL"></textarea>
+        <div class="row"><button class="btn" id="importUrlBtn">导入 URL</button></div>
+
+        <div class="sep"></div>
+        <h3>查询变体（导入时生成）</h3>
+        <div id="importVariants"></div>
+        <p class="hint">变体是「换了检索视角」的同一张图：裁剪、局部放大、灰度/亮度/对比度、边缘。
+          记录哪种处理有效，比囤积修改后的文件更重要。</p>
+
+        <h3>派发到哪些引擎</h3>
+        <div id="importEngines"></div>
+        <label class="row" style="margin-top:10px">
+          <input type="checkbox" id="autoEnqueue" checked>
+          <span>导入后自动排入搜索队列（减少重复上传与页面切换）</span>
+        </label>
+      </div>
+
+      <div class="card">
+        <div class="head"><h2>种子池</h2><span class="small" id="seedCount"></span></div>
+        <div class="list" id="seedList"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 批处理队列 -->
+  <section class="view" id="view-queue">
+    <div class="grid-2">
+      <div class="card">
+        <div class="head"><h2>队列</h2><div class="spacer"></div>
+          <span class="pill" id="browserState">自动识图：空闲</span>
+          <div class="row tight" id="queueCounts"></div></div>
+        <p class="hint">「自动识图」由工作台开一个无头浏览器，把变体文件交给引擎自己的上传框（CDP），
+          再把结果页里的相似图/来源页读回来入库——百度与 360 支持这条；其余引擎仍可「打开识图」手动跑。
+          浏览器任务要跑十几秒，跑完会自动刷新结果板。</p>
+        <div class="qbar">
+          <span class="tab active" data-status="todo">待处理</span>
+          <span class="tab" data-status="pending">待搜索</span>
+          <span class="tab" data-status="running">搜索中</span>
+          <span class="tab" data-status="review">待复查</span>
+          <span class="tab" data-status="done">已完成</span>
+          <span class="tab" data-status="failed">失败</span>
+          <span class="tab" data-status="all">全部</span>
+        </div>
+        <div class="row tight" style="margin-bottom:10px">
+          <button class="btn" id="queueEnqueueBtn">把全部种子按选中变体入队</button>
+          <button class="btn danger" id="queueClearBtn">清空待搜索</button>
+        </div>
+
+        <details class="filter-box" id="queueFilterBox" open>
+          <summary>队列筛选 <span class="small" id="queueFilterSummary"></span></summary>
+          <div class="filter-grid">
+            <label class="field"><span>种子</span>
+              <select id="queueSeed"><option value="">全部种子</option></select></label>
+            <label class="field"><span>关键词</span>
+              <input type="text" id="queueText" placeholder="种子标题 / 变体 / 备注"></label>
+            <label class="field"><span>产出</span>
+              <select id="queueResults">
+                <option value="">全部</option>
+                <option value="with">只看到有产出的</option>
+                <option value="without">只看还没产出的</option>
+              </select></label>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <span class="small">引擎：</span>
+            <div class="chips" id="queueFilterEngines"></div>
+          </div>
+          <div class="row" style="margin-top:6px">
+            <span class="small">变体类型：</span>
+            <div class="chips" id="queueFilterKinds"></div>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <button class="btn" id="queueFilterClear">清空筛选</button>
+            <span class="small" id="queueFilterHint">筛选只影响列表显示，不会改动队列本身。</span>
+          </div>
+        </details>
+
+        <div class="chips" id="queueEngines"></div>
+        <p class="hint">同一变体可以同时派发到多个引擎：索引互不重合，交叉验证才能判断「全网独一份」还是「只是某家没收录」。</p>
+        <div class="list" id="queueList"><div class="empty">加载中…</div></div>
+      </div>
+
+      <div class="card">
+        <div class="head"><h2>回填结果</h2><div class="spacer"></div><span class="small" id="ingestTarget">未选择队列项</span></div>
+        <p class="hint">
+          工作流：① 点队列项的「打开识图」→ 浏览器打开引擎入口（或直接带图 URL 的深链）；
+          ② 上传本地变体文件（打开时会复制路径）→ 看结果；
+          ③ 把结果页整页内容（Ctrl+A / Ctrl+C）或结果页 URL 粘到下面 → 回填。
+          工作台负责下载、三层去重、聚类、排序与来源聚合，不依赖脆弱的网页抓取脚本。
+        </p>
+        <label class="field"><span>结果页 URL（可选，工作台会自行抓取解析）</span>
+          <input type="text" id="ingestPageUrl" placeholder="https://graph.baidu.com/s?... 或结果页地址"></label>
+        <label class="field"><span>结果页内容 / JSON / URL 列表</span>
+          <textarea id="ingestPayload" style="min-height:150px" placeholder="把结果页整页粘进来，或粘 JSON，或每行一个图片 URL [空格] 来源页 URL"></textarea></label>
+        <div class="row">
+          <label class="field" style="margin:0"><span>最多取多少张</span>
+            <input type="number" id="ingestLimit" value="60" min="1" max="500" style="width:110px"></label>
+          <div class="spacer"></div>
+          <button class="btn" id="parseBtn">只解析不写库</button>
+          <button class="btn primary" id="ingestBtn">回填并去重</button>
+        </div>
+        <div class="sep"></div>
+        <div id="parseResult"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================== 结果板 -->
+  <section class="view" id="view-board">
+    <div class="card">
+      <div class="head">
+        <h2>结果板</h2>
+        <span class="small" id="boardCount"></span>
+        <div class="spacer"></div>
+        <div class="row tight" id="triageCounts"></div>
+      </div>
+      <div class="qbar" id="triageTabs">
+        <span class="tab active" data-triage="all">全部</span>
+        <span class="tab" data-triage="tracking" title="高视觉相似：找原图、不同分辨率、裁剪版、转载页">A 来源追踪</span>
+        <span class="tab" data-triage="diffusion" title="中等相似：同期、同场景、同风格">B 主题扩散</span>
+        <span class="tab" data-triage="bridge" title="新颖性优先：通向新平台/新主题簇">C 桥接探索</span>
+      </div>
+      <div class="row" style="margin-bottom:10px">
+        <label class="field" style="margin:0"><span>排序</span>
+          <select id="orderSel" style="width:210px">
+            <option value="value">探索价值 E（推荐）</option>
+            <option value="similarity">视觉相似度</option>
+            <option value="novelty">新颖性</option>
+            <option value="newest">最新入库</option>
+          </select></label>
+        <label class="row" style="margin:0"><input type="checkbox" id="dupsToggle"><span>显示被判为重复的项</span></label>
+        <div class="spacer"></div>
+        <span class="small" id="promoteCount">已选 0 个结果准备回流</span>
+        <div class="chips" id="promoteEngines"></div>
+        <button class="btn primary" id="promoteBtn">新种子回流 →入队</button>
+        <button class="btn danger" id="trashSelectedBtn" title="把选中的结果移进回收站（可恢复）">选中 → 回收站</button>
+        <button class="btn danger" id="trashUnpromotedBtn"
+                title="把「还没被选为下一轮种子」的结果全部移进回收站；已回流的成果受保护">清理未选为种子</button>
+        <button class="btn" id="archiveBtn"
+                title="把当前这批结果入库归档：留一份快照记录，并从活动结果板上收起来（可恢复）">入库归档</button>
+        <button class="btn" id="rescoreBtn">按当前权重重算</button>
+      </div>
+      <p class="hint">同一张图被转载 100 次只算 1 个视觉对象；卡片上的「N 源」就是它的转载数。排序不只看相似度，还看新颖性、来源潜力、桥接价值与元数据完整度。</p>
+      <div class="board" id="board"><div class="empty">加载中…</div></div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 语料检索 -->
+  <section class="view" id="view-corpus">
+    <div class="card">
+      <div class="head"><h2>本地语料语义检索（文字 → 图）</h2>
+        <div class="spacer"></div>
+        <button class="btn" id="reindexBtn">重算语义索引</button>
+        <span class="small" id="reindexNote">空闲</span>
+        <button class="btn" id="reindexBtn2" hidden></button>
+      </div>
+      <p class="hint">用本机 SigLIP2 的文本塔给已经收集到的图片做语义检索：完全本机、0 成本。
+        这不是搜互联网，而是搜「自己攒下来的语料」——用来发现语义邻居、判断哪个主题簇已经够厚。</p>
+      <div class="row">
+        <input type="text" id="semQuery" placeholder="例如：夜市 摊位 招牌 / 老式公交车 / 胶片颗粒 街景">
+        <button class="btn primary" id="semBtn">检索</button>
+      </div>
+      <div class="small" id="semNote" style="margin:8px 0"></div>
+      <div class="board" id="semResults"></div>
+    </div>
+  </section>
+
+  <!-- ========================================================== 来源与聚类 -->
+  <section class="view" id="view-sources">
+    <div class="card" style="margin-bottom:16px">
+      <div class="head">
+        <h2>入库归档</h2>
+        <span class="small" id="archiveCurrent"></span>
+        <div class="spacer"></div>
+        <button class="btn primary" id="archiveNowBtn">归档当前批次</button>
+        <button class="btn" id="archiveRestoreAllBtn">全部取消归档</button>
+        <button class="btn" id="repairLabelsBtn"
+                title="修掉历史数据里被错贴成「百度识图结果页」的标题（只处理确实有外部来源页的对象）">修来源标注</button>
+      </div>
+      <p class="hint">归档**不是删除**：它给这批结果留一份快照（对象数、来源数、平台数、队列分布、时间跨度、体积），
+        然后把它们从活动结果板上收起来，让结果板重新变短、指标只反映"正在查的"这一轮。
+        归档的图片和来源都还在磁盘上，随时可以整体恢复；引擎下次检索也不会把它们当成重复基准。
+        <br>★ **只归档选中的图片**：先到「结果板」勾选卡片（「选为种子」就是勾选），再回来点这里 —— 选了几个就只归档几个，其余留在板上继续查。</p>
+      <div class="metrics" id="archivePreview"></div>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="archiveName" placeholder="批次名（留空自动用日期时间）" style="max-width:320px">
+        <input type="text" id="archiveNote" placeholder="备注（这一轮在查什么、结论是什么）">
+      </div>
+      <div class="table-wrap" style="margin-top:12px">
+        <table class="matrix">
+          <thead><tr><th>批次</th><th>时间</th><th>对象</th><th>来源</th><th>平台</th><th>队列分布</th><th>覆盖日期</th><th>体积</th><th></th></tr></thead>
+          <tbody id="archiveTable"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:16px" id="archiveDetailCard" hidden>
+      <div class="head"><h2 id="archiveDetailTitle">归档详情</h2>
+        <div class="spacer"></div>
+        <button class="btn" id="archiveDetailClose">收起</button></div>
+      <div class="board" id="archiveBoard"></div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="head">
+        <h2>回收站</h2>
+        <span class="small" id="trashCount"></span>
+        <div class="spacer"></div>
+        <button class="btn" id="trashRestoreAllBtn">全部恢复</button>
+        <button class="btn danger" id="trashPurgeAllBtn" title="连图片文件一起彻底删除，不可恢复">清空回收站</button>
+      </div>
+      <p class="hint">移进回收站是**软删除**：记录、来源页和图片文件都还在，随时可以恢复。
+        结果板、图谱、语义检索都不会再看到它们。只有「清空回收站」才会真正删掉文件。</p>
+      <div class="board" id="trashBoard"><div class="empty">回收站是空的</div></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="head"><h2>视觉簇</h2></div>
+      <p class="hint">簇 = 语义上互相靠近的一组视觉对象。簇的数量与平台分布，就是「搜索网络扩到多宽」的直接证据。</p>
+      <div class="grid-3" id="clusters"></div>
+    </div>
+    <div class="card">
+      <div class="head"><h2>平台分布</h2></div>
+      <p class="hint">同一视觉对象可能出现在多个网页：这些都被合并到同一个对象下，同时保留全部发现记录（URL、标题、发现时间、引擎、可信度、是否找到更早来源）。</p>
+      <table class="matrix"><thead><tr><th>平台</th><th>来源记录数</th></tr></thead>
+        <tbody id="platformTable"></tbody></table>
+    </div>
+  </section>
+
+  <!-- ============================================================== 图谱 -->
+  <section class="view" id="view-graph">
+    <div class="card">
+      <div class="head"><h2>搜索图谱</h2><div class="spacer"></div>
+        <span class="small" id="graphNote"></span>
+        <button class="btn" id="graphReload">重新加载</button></div>
+      <p class="hint">种子 → 变体 → 结果 → 来源页 → 回流的新种子。哪一步带来了新来源、哪一步只是重复转载，在图上一眼能看出。</p>
+      <div class="canvas-wrap"><canvas id="graph"></canvas></div>
+      <div class="legend">
+        <span><i style="background:#4ea1ff"></i>种子图</span>
+        <span><i style="background:#ffb454"></i>检索变体</span>
+        <span><i style="background:#59d9a4"></i>结果图</span>
+        <span><i style="background:#c58cff"></i>来源页</span>
+        <span class="small">滚轮缩放 · 拖动平移 · 双击复位 · 点击结果图打开详情</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================================== 指标与公式 -->
+  <section class="view" id="view-metrics">
+    <div class="card" style="margin-bottom:16px">
+      <div class="head"><h2>衡量成功的指标</h2></div>
+      <p class="hint">不看搜索次数，看「每 100 次搜索操作换来多少真正扩网的东西」。操作 = 一次派发到引擎的检索。</p>
+      <div class="metrics" id="metricCards"></div>
+      <p class="small" id="dupRatio" style="margin-top:10px"></p>
+    </div>
+
+    <div class="grid-2" style="margin-bottom:16px">
+      <div class="card">
+        <div class="head"><h2>探索价值公式</h2><div class="spacer"></div><span class="small">权重合计 <b id="weightSum"></b></span></div>
+        <div class="formula">E(i) = wN·N<sub>i</sub> + wP·P<sub>i</sub> + wB·B<sub>i</sub> + wM·M<sub>i</sub></div>
+        <p class="hint">N 新颖性（与已有结果差异）· P 来源潜力（能否找到可追溯原始页）· B 桥接价值（能否连到未探索的簇/平台）· M 元数据价值（日期、站点、尺寸等线索）。各指标归一化到 0–1。</p>
+        <div class="wgrid" id="weightForm"></div>
+        <div class="row" style="margin-top:10px"><button class="btn primary" id="saveWeights">保存权重并重算排序</button></div>
+        <p class="small">权重只是初始假设，应按下你自己筛出的高价值结果调整，而不是找通用最优值。</p>
+      </div>
+
+      <div class="card">
+        <div class="head"><h2>三层去重与分队列阈值</h2></div>
+        <p class="hint">文件层 SHA-256 → 视觉副本层 pHash（汉明距离）→ 语义层 SigLIP 余弦。三层都过不了才算是「新的一张图」。</p>
+        <div class="wgrid" id="threshForm" style="grid-template-columns:repeat(2,1fr)"></div>
+        <div class="row" style="margin-top:10px"><button class="btn" id="saveThresh">保存阈值</button></div>
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-bottom:16px">
+      <div class="card">
+        <div class="head"><h2>按引擎看产出</h2></div>
+        <table class="matrix"><thead><tr><th>引擎</th><th>操作</th><th>新增图</th><th>折叠重复</th><th>新来源</th></tr></thead>
+          <tbody id="engineYield"></tbody></table>
+      </div>
+      <div class="card">
+        <div class="head"><h2>哪种变体处理最有效</h2></div>
+        <table class="matrix"><thead><tr><th>变体</th><th>操作</th><th>新增图</th><th>折叠重复</th></tr></thead>
+          <tbody id="variantYield"></tbody></table>
+        <p class="small">这张表直接回答「哪一种裁剪/色调处理值得继续用」——它把经验操作变成可复现的研究流程。</p>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="head"><h2>逐日产出</h2></div>
+      <table class="matrix"><thead><tr><th>日期</th><th>操作</th><th>新增图</th><th>折叠重复</th><th>新来源</th><th>新平台</th></tr></thead>
+        <tbody id="dayYield"></tbody></table>
+    </div>
+
+    <div class="card">
+      <div class="head"><h2>操作台账</h2></div>
+      <table class="matrix"><thead><tr><th>引擎</th><th>新增图</th><th>重复</th><th>新来源</th><th>新平台</th><th>用时</th><th>备注</th></tr></thead>
+        <tbody id="ledgerTable"></tbody></table>
+    </div>
+  </section>
+
+</main>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer">
+  <button class="btn close" id="drawerClose">关闭</button>
+  <div id="drawerBody"></div>
+</aside>
+
+<!-- ============================================================ 框选搜索 -->
+<div class="scrim" id="cropScrim"></div>
+<aside class="drawer crop-drawer" id="cropDrawer">
+  <button class="btn close" id="cropClose">关闭</button>
+  <h2 style="margin:0 0 4px">框选搜索</h2>
+  <p class="hint" id="cropSeedTitle">在图上拖出一个矩形，只拿这一块去检索。</p>
+
+  <div class="lens-stage" id="cropStage">
+    <img id="cropImg" alt="">
+    <svg class="lens-veil" id="cropVeil" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <mask id="cropHoleMask">
+          <rect x="0" y="0" width="100%" height="100%" fill="white"></rect>
+          <rect id="cropHole" x="0" y="0" width="0" height="0" rx="2" fill="black"></rect>
+        </mask>
+      </defs>
+      <rect x="0" y="0" width="100%" height="100%" fill="rgba(6,10,16,.66)" mask="url(#cropHoleMask)"></rect>
+    </svg>
+    <div class="lens-selection" id="cropSelection" hidden>
+      <span class="cnr tl"></span><span class="cnr tr"></span>
+      <span class="cnr bl"></span><span class="cnr br"></span>
+      <span class="edge n"></span><span class="edge s"></span>
+      <span class="edge w"></span><span class="edge e"></span>
+      <span class="lens-size" id="cropSizeTag"></span>
+    </div>
+    <div class="lens-magnifier" id="cropMagnifier" hidden><canvas id="cropMagnifierCanvas" width="108" height="108"></canvas></div>
+    <div class="lens-tip" id="cropTip">拖动鼠标框选要检索的范围 · 拖动边角可微调 · 双击清空</div>
+  </div>
+
+  <div class="lens-bar">
+    <button class="lens-btn" id="cropClearBtn" title="清空选区（Esc）">✕</button>
+    <button class="lens-btn" id="cropCenterBtn" title="重置为居中选区">⤢</button>
+    <span class="lens-div"></span>
+    <button class="lens-btn primary" id="cropRunBtn" title="拿这一块去自动识图">框选识图</button>
+    <button class="lens-btn" id="cropQueueBtn" title="只入队，稍后手动跑">仅入队</button>
+    <span class="spacer"></span>
+    <span class="lens-dims" id="cropBoxInfo">未框选</span>
+  </div>
+
+  <div class="row" style="margin-top:12px">
+    <span class="small">比例：</span>
+    <div class="chips" id="cropRatios">
+      <span class="chip on" data-ratio="free">自由</span>
+      <span class="chip" data-ratio="1">1:1</span>
+      <span class="chip" data-ratio="0.75">4:3</span>
+      <span class="chip" data-ratio="1.3333">3:4</span>
+      <span class="chip" data-ratio="0.5625">16:9</span>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:8px">
+    <span class="small">外扩内边距（引擎常需要一点周边上下文才能匹配到原图）：</span>
+    <div class="chips" id="cropPadding">
+      <span class="chip on" data-pad="0">不外扩</span>
+      <span class="chip" data-pad="0.15">+15%</span>
+      <span class="chip" data-pad="0.35">+35%</span>
+      <span class="chip" data-pad="0.6">+60%</span>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:6px">
+    <label class="row" style="margin:0"><input type="checkbox" id="cropUpscale" checked>
+      <span class="small">小选区放大 2× 再检索（提高引擎命中率）</span></label>
+    <div class="spacer"></div>
+    <span class="small">派发到：</span>
+    <div class="chips" id="cropEngines"></div>
+    <span class="pill" id="cropState"></span>
+  </div>
+
+  <p class="hint">每次框选都会生成一个独立的 crop 变体（含矩形坐标），所以它会和其他变体一样进入队列、
+  参与去重排序，并在「搜索链回放」和「按变体看产出」里被单独统计 —— 这样你才知道**哪一种框法**真的有效。</p>
+
+  <h3>这个种子已有的框选</h3>
+  <div class="crop-history" id="cropHistory"></div>
+</aside>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* 内联引导脚本：外链脚本加载失败时也能给出提示。 */
+window.addEventListener('error', function (ev) {
+  if (ev && ev.target && ev.target.tagName === 'SCRIPT') {
+    document.body.insertAdjacentHTML('beforeend',
+      '<div class="toast show bad">前端脚本加载失败，请刷新页面</div>');
+  }
+}, true);
+</script>
+<script src="/app.js"></script>
+</body>
+</html>

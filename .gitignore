@@ -1,0 +1,42 @@
+# ============================================================================
+#  视觉搜索工作台 —— 只提交源码，不提交运行数据与产物
+# ============================================================================
+
+# 运行数据：本机真实抓取的内容（SQLite + 58 MB 图片），是"用出来的"不是"写出来的"。
+# 别人 clone 后跑自测会自己造数据，或导入 demo/ 里的演示数据集。
+vsw/data/
+vsw/data.*/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# 安卓构建产物与签名密钥（密钥库放在仓库外的构建目录，这里再兜一层）
+vsw-android/build/
+*.apk
+*.aab
+*.idsig
+*.keystore
+*.jks
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp
+
+# 本机探针临时产物
+probe-*.bin
+probe-*.log
+*.tmp
+
+# 工作区里其它项目的敏感文件（本仓库不该包含它们，防止误加）
+album_password.txt
+ngrok.yml
+tools/ngrok-config/
