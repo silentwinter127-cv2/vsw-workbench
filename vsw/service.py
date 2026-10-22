@@ -179,12 +179,19 @@ class Workbench:
                   "tags": [t["name"] for t in tags], "caption": caption}
         if created:
             result["variants"] = self.generate_variants(seed_id, kinds=variants)
-            if auto_enqueue:
-                job_ids = self.enqueue_seed(seed_id, engines=engines or ["baidu", "bing_cn"],
-                                            kinds=variants)
-                result["job_ids"] = job_ids
         else:
-            result["variants"] = self.store.variants(seed_id)
+            # 同一张图再次导入（像素哈希命中）：变体补一下（早期导入的数据可能没有），
+            # **但入队不能跳过** —— 这正是"手机上导入的图没进队列"的原因：
+            # 之前只有 created 为真才入队，于是重新导一张已存在的图就静默什么都不做。
+            result["variants"] = self.store.variants(seed_id) or \
+                self.generate_variants(seed_id, kinds=variants)
+        if auto_enqueue:
+            # store.enqueue 对 (变体, 引擎) 是幂等的：已存在就复用（失败状态还会被重置为待搜索），
+            # 所以重复导入不会制造重复任务。
+            job_ids = self.enqueue_seed(seed_id, engines=engines or ["baidu", "bing_cn"],
+                                        kinds=variants)
+            result["job_ids"] = job_ids
+            result["enqueued_new"] = bool(created)
         return result
 
     def import_path(self, path: str, **kwargs: Any) -> Dict[str, Any]:
@@ -1737,13 +1744,20 @@ class Workbench:
             item["thumb"] = f"api/variant/{int(variant['id'])}/thumb"
             variants.append(item)
 
+        # 队列的条数往往比结果多得多（一次导入就会生成十几个变体 × 引擎），
+        # 所以队列单独用更大的上限，而且**同状态下新任务排在前面** —— 手机上刚导入的
+        # 图，它的任务应该立刻出现在队列顶部，而不是被几百条老任务挤到截断之外。
+        job_cap = max(1200, findings_limit * 4)
         jobs = []
-        for job in store.jobs(status="all", limit=findings_limit):
+        for job in store.jobs(status="all", limit=job_cap):
             item = dict(job)
             if mode == "none":
                 item["variant_path"] = ""
                 item["seed_thumb"] = ""
             jobs.append(item)
+        priority = {"running": 0, "pending": 1, "review": 2, "done": 3}
+        jobs.sort(key=lambda row: (priority.get(row.get("status") or "", 4),
+                                   -(row.get("id") or 0)))
 
         payload: Dict[str, Any] = {
             "version": 1,

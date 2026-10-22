@@ -223,6 +223,48 @@ async function main() {
     check('每个筛选条件都真的生效（且可叠加）', fOk, JSON.stringify(filters));
     check('筛选摘要会显示当前条件', ui && /共 \d+ 条|筛出/.test(ui.summary || ''), ui && ui.summary);
 
+    // D. 按引擎批量删的预设按钮：只清该引擎的待处理，别的引擎不动
+    const preset = await evaluate(`(async () => {
+      window.confirm = () => true;
+      // 造几条 so360 的待处理任务（这个引擎常年被验证码挡着，正是"整批清掉"的典型场景）
+      const seed = S.jobs.find(j => j.seed_id) || null;
+      if (!seed) return { skipped: '队列里没有可用种子' };
+      await post('/api/queue/enqueue', { seed_ids: [seed.seed_id], engines: ['so360'], kinds: ['full'] });
+      await refreshQueueFromServer({ silent: true });
+      S.queueSelectMode = false;
+      S.queueSeed = ''; S.queueText = ''; S.queueResults = '';
+      S.queueEngines.clear(); S.queueKinds.clear();
+      S.queueStatus = 'all';
+      renderQueue();
+      const btn = Array.from(document.querySelectorAll('#queueActions [data-preset-engine]'))
+        .find(b => b.dataset.presetEngine === 'so360');
+      if (!btn) return { skipped: '没有 so360 的预设按钮' };
+      const before = S.jobs.filter(j => j.engine === 'so360'
+        && ['pending','running','review'].includes(j.status)).length;
+      const othersBefore = S.jobs.filter(j => j.engine !== 'so360'
+        && ['pending','running','review'].includes(j.status)).length;
+      btn.click();
+      await new Promise(r => setTimeout(r, 3000));
+      return {
+        before, othersBefore,
+        afterSo360: S.jobs.filter(j => j.engine === 'so360'
+          && ['pending','running','review'].includes(j.status)).length,
+        othersAfter: S.jobs.filter(j => j.engine !== 'so360'
+          && ['pending','running','review'].includes(j.status)).length,
+        hasPreset: true,
+      };
+    })()`);
+    if (preset && preset.skipped) {
+      console.log(`      （跳过按引擎清理断言：${preset.skipped}）`);
+    } else {
+      check('存在「按引擎清理」的预设按钮', preset && preset.hasPreset);
+      check('点预设只清掉该引擎的待处理任务',
+            preset && preset.before > 0 && preset.afterSo360 === 0,
+            JSON.stringify(preset));
+      check('预设不影响其它引擎的任务',
+            preset && preset.othersAfter === preset.othersBefore, JSON.stringify(preset));
+    }
+
     // B/C/D. 删除：只删自己造的测试项，并确认结果与种子不受影响
     const del = await evaluate(`(async () => {
       window.confirm = () => true;                  // 探针里不需要真人确认

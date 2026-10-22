@@ -442,6 +442,7 @@ const S = {
   queueResults: '',           // '' | 'with'（只看到有产出的） | 'without'
   queueSelectMode: false,     // 是否处于多选（删除）模式
   queueSelected: new Set(),   // 已选中的队列项 id
+  queueDirty: false,          // 队列是否需要在切回队列页时从电脑重拉
   search: '',
   findings: [],
   trash: [],
@@ -1230,8 +1231,34 @@ function renderQueueActions(rows) {
     <button class="btn sm" id="queueSelBtn">选择</button>
     <button class="btn sm danger" id="queueDeleteFiltered"
       ${rows.length ? '' : 'disabled'}>删除筛选结果（${rows.length}）</button>`;
+
+  // 按引擎批量删的预设：某个引擎的「待处理」全部清掉（一个引擎往往整批没结果，
+  // 比如被验证码挡着的那种）。只列确实有待处理任务的引擎。
+  const pendingByEngine = {};
+  for (const j of S.jobs) {
+    if (!['pending', 'running', 'review'].includes(j.status)) continue;
+    pendingByEngine[j.engine] = (pendingByEngine[j.engine] || 0) + 1;
+  }
+  const presets = Object.entries(pendingByEngine)
+    .sort((a, b) => b[1] - a[1])
+    .map(([engine, n]) => `<button class="btn sm ghost" data-preset-engine="${esc(engine)}">
+        清 ${esc(engine)} 待处理 ${n}</button>`).join('');
+  if (presets) {
+    host.innerHTML += `<div class="row tight" style="margin-top:8px;flex-basis:100%">
+      <span class="small">按引擎清理：</span>${presets}</div>`;
+  }
+
   $('#queueSelBtn').onclick = () => { S.queueSelectMode = true; renderQueue(); };
   $('#queueDeleteFiltered').onclick = () => deleteQueueJobs(rows.map((j) => j.id), '当前筛选下的');
+  $$('#queueActions [data-preset-engine]').forEach((btn) => {
+    btn.onclick = () => {
+      const engine = btn.dataset.presetEngine;
+      const ids = S.jobs
+        .filter((j) => j.engine === engine && ['pending', 'running', 'review'].includes(j.status))
+        .map((j) => j.id);
+      deleteQueueJobs(ids, `「${engine}」的待处理`);
+    };
+  });
 }
 
 /** 删除队列项（只删队列记录，已产出的结果不动）。 */
@@ -1252,18 +1279,24 @@ async function deleteQueueJobs(ids, label) {
 }
 
 /** 从电脑重拉队列（删除后用它同步本地库，避免界面与电脑不一致）。 */
-async function refreshQueueFromServer() {
+async function refreshQueueFromServer(opts) {
+  const silent = !!(opts && opts.silent);
   try {
-    const data = await api('/api/queue?status=all&limit=800');
+    const data = await api('/api/queue?status=all&limit=1200');
     const rows = data.jobs || [];
+    // 手机端的排序跟快照一致：先按状态（搜索中→待搜索→待复查→已完成），同状态**最新在前**。
+    // 桌面的 /api/queue 是 id 升序（FIFO 派发语义），手机上更关心"刚导入的那几条"。
+    const priority = { running: 0, pending: 1, review: 2, done: 3 };
+    rows.sort((a, b) => (priority[a.status] ?? 4) - (priority[b.status] ?? 4)
+      || (b.id - a.id));
     await local.clear('jobs');
     for (const row of rows) await local.put('jobs', row);
     S.jobs = rows;
-    renderQueue();
+    S.queueDirty = false;
+    if (S.tab === 'queue') renderQueue();
   } catch (e) {
-    // 拉不到就先把删掉的那些从本地剔掉，至少界面是对的
-    toast(`队列已删除，但刷新列表失败：${e.message}`, true);
-    renderQueue();
+    if (!silent) toast(`队列刷新失败：${e.message}`, true);
+    if (S.tab === 'queue') renderQueue();
   }
 }
 
@@ -1948,11 +1981,15 @@ async function importAllPending() {
     if (entry.status === 'done') ok += 1;
     renderImportList();
   }
-  toast(`导入完成：${ok}/${pending.length} 张成功`);
+  await refreshQueueFromServer({ silent: true });
+  const queued = S.jobs.filter((j) => ['pending', 'running', 'review'].includes(j.status)).length;
+  toast(`导入完成：${ok}/${pending.length} 张成功 · 待处理队列 ${queued} 条`);
 }
 
 function openImportSheet() {
   $('#sheetTitle').textContent = '导入图片';
+  // 记住上次选的入队变体，别每次都要重选
+  const kindsWanted = localStorage.getItem('vsw.importKinds') || 'full';
   $('#cropConfirm').classList.add('hide');
   $('#cropStage').innerHTML = '';
   $('#sheetBody').innerHTML = `
@@ -1963,6 +2000,11 @@ function openImportSheet() {
       <button class="btn" id="pickGallery">从相册选</button>
       ${IMPORT_QUEUE.length ? '<button class="btn ghost" id="clearImport">清空列表</button>' : ''}
     </div>
+    <label class="field" style="margin-top:10px"><span>入队变体（决定导入后往队列里加几条）</span>
+      <select id="importKinds">
+        <option value="full" selected>仅全图（每张 1 条，推荐）</option>
+        <option value="all">全部变体（每张约 16 条）</option>
+      </select></label>
     <input type="file" id="fileCamera" accept="image/*" capture="environment" class="hide">
     <input type="file" id="fileGallery" accept="image/*" multiple class="hide">
     <div id="importList"></div>
@@ -1982,6 +2024,11 @@ function openImportSheet() {
     ev.target.value = '';
     if (added) openImportSheet();
   };
+  const kindsSelect = $('#importKinds');
+  if (kindsSelect) {
+    kindsSelect.value = kindsWanted;
+    kindsSelect.onchange = () => localStorage.setItem('vsw.importKinds', kindsSelect.value);
+  }
   const hint = $('#importHint');
   if (hint) {
     hint.textContent = S.online
@@ -1993,11 +2040,14 @@ function openImportSheet() {
 
 /** 导入单张。**不关面板** —— 关面板这个动作留给用户（返回按钮）。 */
 async function importOne(entry) {
+  const kindsMode = localStorage.getItem('vsw.importKinds') || 'full';
   const payload = {
     name: entry.name || '手机导入',
     data_url: await blobToDataUrl(entry.file),
     auto_enqueue: true,
     engines: ['baidu'],
+    // 手机快拍通常只需要全图那一条；想要全套变体再切"全部变体"
+    variants: kindsMode === 'all' ? null : ['full'],
   };
   entry.status = 'sending';
   entry.detail = '';
@@ -2007,8 +2057,15 @@ async function importOne(entry) {
       const res = await post('/api/mobile/sync', { imports: [payload] });
       const imported = (res.imported || [])[0];
       if (imported && imported.seed_id) {
+        const queued = (imported.job_ids || []).length;
+        const existed = imported.created === false;
         entry.status = 'done';
-        entry.detail = `已建成种子 #${imported.seed_id}`;
+        entry.detail = queued
+          ? `${existed ? '已存在' : '已建成'}种子 #${imported.seed_id} · 入队 ${queued} 条`
+          : `${existed ? '已存在' : '已建成'}种子 #${imported.seed_id}（未入队）`;
+        // 关键：导入完必须把队列同步下来，否则队列页看不到刚生成的任务。
+        // 因为一次导入会为每个变体 × 引擎各建一条任务（默认 16 条），用户很容易以为"没进队列"。
+        await refreshQueueFromServer({ silent: true });
       } else {
         const why = (res.errors && res.errors[0] && res.errors[0].error) || '电脑端没有接受这张图';
         entry.status = 'failed';
@@ -2162,7 +2219,15 @@ function switchTab(tab) {
     archive: `<span class="pill">${S.archives.length} 个批次</span><span class="pill">回收站 ${S.trash.length}</span>`,
     me: '',
   }[tab];
-  if (tab === 'queue') renderQueue();
+  if (tab === 'queue') {
+    renderQueue();
+    // 离线期间导入的东西、或别的设备改了队列：切回来时静默重拉一次
+    if (S.online) {
+      refreshQueueFromServer({ silent: true }).then(() => {
+        if (S.tab === 'queue') renderQueue();
+      });
+    }
+  }
   if (tab === 'archive') renderArchive();
   if (tab === 'me') openSettings();
 }

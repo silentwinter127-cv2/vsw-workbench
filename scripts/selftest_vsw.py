@@ -1484,6 +1484,43 @@ def test_mobile_api(tmp: str, fixtures: FixtureServer, vision: bool) -> None:
           os.path.isfile(wb.abs_media((wb.store.seed(new_seed) or {}).get("rel_path") or "")),
           str((wb.store.seed(new_seed) or {}).get("rel_path")))
 
+    # 重复导入同一张图：必须仍然入队（这正是"手机上导入的图没进队列"的原因 ——
+    # 之前只有新种子才入队，重新导一张已存在的图就静默什么都不做）
+    repeat = wb.apply_mobile_sync({"imports": [{
+        "name": "手机拍的招牌",
+        "data_url": "data:image/jpeg;base64," + base64.b64encode(shot).decode(),
+        "auto_enqueue": True, "engines": ["baidu"], "variants": ["full"]}]})
+    again = (repeat.get("imported") or [{}])[0]
+    check("重复导入同一张图会被识别为已存在",
+          again.get("created") is False and again.get("seed_id") == new_seed,
+          json.dumps({"created": again.get("created"), "seed": again.get("seed_id"),
+                      "want": new_seed}, ensure_ascii=False))
+    check("重复导入仍然入队（不会静默跳过）", bool(again.get("job_ids")),
+          json.dumps(again.get("job_ids"), ensure_ascii=False))
+    # 首次导入用的是"全部变体"，已经建了 16 条；这次只指定 full，应该**复用**其中那条，
+    # 而不是又新建一条（store.enqueue 对 变体×引擎 幂等）。
+    all_before = {j["id"] for j in wb.queue_view("all")["jobs"] if j["seed_id"] == new_seed}
+    repeat_ids = set(again.get("job_ids") or [])
+    all_after = {j["id"] for j in wb.queue_view("all")["jobs"] if j["seed_id"] == new_seed}
+    check("重复导入复用了已有队列项，而不是新增",
+          all_after == all_before and repeat_ids <= all_before,
+          json.dumps({"before": sorted(all_before), "repeat": sorted(repeat_ids),
+                      "after": sorted(all_after)}, ensure_ascii=False))
+    check("重复导入后该种子的队列项数量没变", len(all_after) == len(all_before),
+          f"{len(all_before)} -> {len(all_after)}")
+
+    # 任务全部删掉之后，再导一次同一张图应该能回到队列
+    wb.store.delete_jobs(sorted(all_after))
+    check("删掉队列项后该种子没有任务",
+          not [j for j in wb.queue_view("all")["jobs"] if j["seed_id"] == new_seed])
+    back = wb.apply_mobile_sync({"imports": [{
+        "name": "手机拍的招牌",
+        "data_url": "data:image/jpeg;base64," + base64.b64encode(shot).decode(),
+        "auto_enqueue": True, "engines": ["baidu"], "variants": ["full"]}]})
+    back_jobs = (back.get("imported") or [{}])[0].get("job_ids") or []
+    check("重新导入能让它回到队列", bool(back_jobs),
+          json.dumps(back_jobs, ensure_ascii=False))
+
     bad = wb.apply_mobile_sync({"imports": [{"name": "坏数据", "data_url": "不是图片"}]})
     check("坏数据不会让整批同步失败，而是记进 errors",
           bad["ok"] is False and bad["errors"] and not bad["imported"],

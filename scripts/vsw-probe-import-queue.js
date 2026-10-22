@@ -205,6 +205,24 @@ async function main() {
           afterAll && afterAll.sheetOpen, JSON.stringify(afterAll && afterAll.sheetOpen));
 
     // 到工作台确认这三张真的入库了
+    // 导入之后队列里必须立刻能看到新任务（这正是用户反馈"没进队列"的那一点）
+    const queued = await evaluate(`(async () => {
+      const ids = IMPORT_QUEUE.map(e => (e.detail || '').match(/#(\\d+)/)).filter(Boolean).map(m => Number(m[1]));
+      return {
+        seedIds: ids,
+        jobsTotal: S.jobs.length,
+        jobsForSeeds: S.jobs.filter(j => ids.includes(j.seed_id)).length,
+        pending: S.jobs.filter(j => ['pending','running','review'].includes(j.status)).length,
+        topSeeds: S.jobs.slice(0, 5).map(j => j.seed_id),
+      };
+    })()`);
+    check('导入后队列里立刻能看到新任务（不用手动再同步）',
+          queued && queued.jobsForSeeds >= queued.seedIds.length && queued.seedIds.length > 0,
+          JSON.stringify(queued));
+    check('新任务排在队列前面（同状态按最新优先）',
+          queued && queued.topSeeds.some(id => queued.seedIds.includes(id)),
+          JSON.stringify(queued && queued.topSeeds));
+
     const seeded = await evaluate(`(async () => {
       const res = await fetch(${JSON.stringify(args.origin)} + '/api/seeds?limit=500', { cache: 'no-store' });
       const list = (await res.json()).seeds || [];
