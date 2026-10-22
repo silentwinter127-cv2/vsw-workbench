@@ -446,6 +446,7 @@ const S = {
   search: '',
   findings: [],
   trash: [],
+  archived: [],      // 归档对象（按 archive_id 归入批次）
   archives: [],
   jobs: [],
   seeds: [],
@@ -487,7 +488,7 @@ function toast(msg, bad = false) {
 
 /* ---------------------------------------------------------------- 本地库 */
 const DB_NAME = 'vsw-mobile';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let dbPromise = null;
 
 /* ---------------------------------------------------------------------------
@@ -509,6 +510,7 @@ const KEY = {
   trashThumb: (id) => `tthumb:${id}`,
   seedThumb: (id) => `sthumb:${id}`,
   variantThumb: (id) => `vthumb:${id}`,
+  archivedThumb: (id) => `athumb:${id}`,
 };
 
 function db() {
@@ -538,6 +540,8 @@ function db() {
       if (!d.objectStoreNames.contains('jobs')) d.createObjectStore('jobs', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('seeds')) d.createObjectStore('seeds', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('variants')) d.createObjectStore('variants', { keyPath: 'id' });
+      // v3：归档对象单独一仓（手机端要能点开某个批次看内容，离线也要能看）
+      if (!d.objectStoreNames.contains('archived')) d.createObjectStore('archived', { keyPath: 'id' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -677,10 +681,11 @@ async function syncSnapshot() {
       + `&trash=${withTrash ? 1 : 0}&archives=1`);
     $('#syncNote').textContent = '正在写入本地库…';
     fill.style.width = '35%';
-    await Promise.all(['findings', 'trash', 'archives', 'jobs', 'seeds', 'variants']
+    await Promise.all(['findings', 'trash', 'archived', 'archives', 'jobs', 'seeds', 'variants']
       .map((s) => local.clear(s)));
     for (const row of snap.findings || []) await local.put('findings', row);
     for (const row of snap.trash || []) await local.put('trash', row);
+    for (const row of snap.archived || []) await local.put('archived', row);
     for (const row of snap.archives || []) await local.put('archives', row);
     for (const row of snap.jobs || []) await local.put('jobs', row);
     for (const row of snap.seeds || []) await local.put('seeds', row);
@@ -698,6 +703,9 @@ async function syncSnapshot() {
     }
     for (const row of snap.trash || []) {
       await fetchInto(KEY.trashThumb(row.id), row.thumb_path || row.rel_path);
+    }
+    for (const row of snap.archived || []) {
+      await fetchInto(KEY.archivedThumb(row.id), row.thumb_path || row.rel_path);
     }
     // 种子缩略图（队列项的兜底图、以及种子池的样子都靠它）
     for (const seed of snap.seeds || []) {
@@ -785,6 +793,7 @@ const THUMB_SPEC = {
   trash: { key: (row) => KEY.trashThumb(row.id), rel: (row) => row.thumb_path || row.rel_path },
   seed: { key: (row) => KEY.seedThumb(row.id), rel: (row) => row.thumb_path || row.rel_path },
   variant: { key: (row) => KEY.variantThumb(row.id), rel: (row) => row.thumb || '' },
+  archived: { key: (row) => KEY.archivedThumb(row.id), rel: (row) => row.thumb_path || row.rel_path },
 };
 
 async function hydrateThumbs(rows, kind = 'finding') {
@@ -987,7 +996,8 @@ async function trashSelection() {
 
 /* ---------------------------------------------------------------- 详情 */
 async function openDetail(id) {
-  let f = S.findings.find((x) => x.id === id) || S.trash.find((x) => x.id === id);
+  let f = S.findings.find((x) => x.id === id) || S.trash.find((x) => x.id === id)
+    || S.archived.find((x) => x.id === id);
   if (!f) return;
   $('#cropConfirm').classList.add('hide');
   $('#cropStage').innerHTML = '';
@@ -1508,6 +1518,67 @@ async function ensureJobThumbs(rows) {
   return got;
 }
 
+
+/** 打开一个归档批次：列出它的对象（缩略图 + 标题 + 队列），点一条看详情。 */
+async function openArchiveBatch(archiveId) {
+  const batch = S.archives.find((a) => Number(a.id) === Number(archiveId)) || {};
+  let items = S.archived.filter((f) => Number(f.archive_id) === Number(archiveId));
+  // 本地没有（例如这次快照没带归档）就从电脑取一次，并缓存进本地库
+  if (!items.length && S.online) {
+    try {
+      const detail = await api(`/api/archive/${archiveId}?limit=300`);
+      const rows = (detail.findings || []).filter((f) => !f.dup_of);
+      for (const row of rows) await local.put('archived', row);
+      S.archived = await local.all('archived');
+      items = S.archived.filter((f) => Number(f.archive_id) === Number(archiveId));
+      ensureThumbs(items, 'archived').then(() => paintArchiveThumbs());
+    } catch (e) { /* 下面会给提示 */ }
+  }
+
+  $('#sheetTitle').textContent = `归档 · ${batch.name || ('批次 #' + archiveId)}`;
+  $('#cropConfirm').classList.add('hide');
+  $('#cropStage').innerHTML = '';
+  const map = thumbSrcMap();
+  $('#sheetBody').innerHTML = `
+    <div class="small">对象 ${batch.findings || items.length} · 来源 ${batch.sources || '-'}
+      · 平台 ${batch.platforms || '-'} · 覆盖 ${esc(batch.date_from || '-')} ~ ${esc(batch.date_to || '-')}</div>
+    ${batch.note ? `<div class="small">${esc(batch.note)}</div>` : ''}
+    <div class="flist" id="archiveBatchList" style="margin-top:12px">
+      ${items.map((f) => `
+        <div class="fcard" data-id="${f.id}">
+          ${map[f.id] ? `<img src="${map[f.id]}" alt="">`
+            : `<img alt="" style="opacity:.25" data-want-thumb="${f.id}">`}
+          <div class="meta2">
+            <div class="tt">${esc(f.title || `#${f.id}`)}</div>
+            <div class="ln"><span class="tbadge ${f.triage}">${TRIAGE[f.triage] || f.triage || ''}</span>
+              <span class="mono">E ${num(f.explore_value)}</span>
+              <span>${sourceCount(f)} 源</span></div>
+          </div>
+        </div>`).join('') || '<div class="empty">这个批次里没有可显示的对象</div>'}
+    </div>`;
+  openSheet();
+  $$('#archiveBatchList .fcard').forEach((card) => {
+    card.onclick = () => openDetail(Number(card.dataset.id));
+  });
+  // 缺图的补齐（同一个补图逻辑，只是键用 athumb:）
+  if (!S.online) return;
+  ensureThumbs(items, 'archived').then(() => {
+    const m2 = thumbSrcMap();
+    $$('#archiveBatchList [data-want-thumb]').forEach((img) => {
+      const id = Number(img.getAttribute('data-want-thumb'));
+      if (m2[id]) img.src = m2[id];
+    });
+  });
+}
+
+function paintArchiveThumbs() {
+  const map = thumbSrcMap();
+  $$('#archiveBatchList [data-want-thumb]').forEach((img) => {
+    const id = Number(img.getAttribute('data-want-thumb'));
+    if (map[id]) img.src = map[id];
+  });
+}
+
 /* ---------------------------------------------------------------- 归档 / 回收站 */
 function renderArchive() {
   const live = S.findings.filter((f) => !f.dup_of && !f.archived_at);
@@ -1524,15 +1595,54 @@ function renderArchive() {
     ['回收站', S.trash.length],
   ].map(([l, n]) => `<div class="metric"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
 
-  $('#archiveList').innerHTML = S.archives.map((a) => `
+  $('#archiveList').innerHTML = S.archives.map((a) => {
+    const items = S.archived.filter((f) => Number(f.archive_id) === Number(a.id));
+    return `
     <div class="card">
       <div class="row"><b>${esc(a.name)}</b><div class="spacer"></div>
         <span class="small">${new Date((a.created_at || 0) * 1000).toLocaleDateString('zh-CN')}</span></div>
       <div class="small">对象 ${a.findings} · 来源 ${a.sources} · 平台 ${a.platforms} ·
         ${esc(a.date_from || '-')} ~ ${esc(a.date_to || '-')}</div>
       ${a.note ? `<div class="small">${esc(a.note)}</div>` : ''}
-      ${S.online ? `<button class="btn sm" style="margin-top:8px" data-undo="${a.id}">取消归档</button>` : ''}
-    </div>`).join('') || '<div class="empty">还没有归档批次</div>';
+      <div class="row tight" style="margin-top:8px">
+        <button class="btn sm primary" data-open="${a.id}">查看（${items.length}）</button>
+        <button class="btn sm" data-folder="${a.id}">归档文件夹</button>
+        ${S.online ? `<button class="btn sm ghost" data-undo="${a.id}">取消归档</button>` : ''}
+      </div>
+      <div class="small" id="archivePath-${a.id}" style="margin-top:6px"></div>
+    </div>`;
+  }).join('') || '<div class="empty">还没有归档批次</div>';
+
+  // 查看：打开批次内容（离线也能看 —— 归档对象在快照里单独带了一份）
+  $$('#archiveList [data-open]').forEach((btn) => {
+    btn.onclick = () => openArchiveBatch(Number(btn.dataset.open));
+  });
+
+  // 归档文件夹：在电脑上生成并打开它；手机自己打不开电脑目录，所以是"让电脑弹出来"。
+  // 离线时退化为显示路径（可复制），用户回到电脑前照样找得到。
+  $$('#archiveList [data-folder]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = Number(btn.dataset.folder);
+      const host = $(`#archivePath-${id}`);
+      if (!S.online) {
+        if (host) host.textContent = '离线中：连上电脑后可以生成并打开这个批次的文件夹。';
+        return toast('离线中：需要连上电脑才能生成归档文件夹', true);
+      }
+      try {
+        btn.disabled = true;
+        const info = await api(`/api/archive/${id}/paths?export=1`);
+        if (host) host.textContent = `文件夹：${info.dir}`;
+        const opened = await post('/api/reveal', { path: info.dir });
+        toast(opened.opened
+          ? `已在电脑上打开（${info.count} 个文件）`
+          : `已生成，但电脑没能自动打开，路径见下方`);
+      } catch (e) {
+        toast(`打开失败：${e.message}`, true);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  });
   $$('#archiveList [data-undo]').forEach((btn) => {
     btn.onclick = async () => {
       try {
@@ -2252,6 +2362,7 @@ async function render() {
 async function loadLocal() {
   S.findings = await local.all('findings');
   S.trash = await local.all('trash');
+  S.archived = await local.all('archived');
   S.archives = await local.all('archives');
   S.jobs = await local.all('jobs');
   S.seeds = await local.all('seeds');
@@ -2260,6 +2371,7 @@ async function loadLocal() {
   S._thumbs = {};
   await hydrateThumbs(S.findings, 'finding');
   await hydrateThumbs(S.trash, 'trash');
+  await hydrateThumbs(S.archived, 'archived');
   const snap = await local.get('meta', 'snapshot');
   S.snap = snap ? snap.value : null;
   await refreshPending();
@@ -2272,6 +2384,8 @@ async function loadLocal() {
   Promise.resolve()
     .then(() => ensureThumbs(S.findings, 'finding'))
     .then(() => ensureThumbs(S.trash, 'trash'))
+    // 归档图**不在启动时补**：归档对象可能上百个，启动时全补会把补图排队堵死
+    // （实测拖到回收站那几张都补不出来）。等用户点开某个批次时再按需补（见 openArchiveBatch）。
     .then(() => ensureThumbs(S.seeds, 'seed'))
     .then(() => paintThumbs('#boardList') || paintThumbs('#trashList'))
     .catch(() => { /* 离线或没有可补的图时静默跳过 */ });

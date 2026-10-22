@@ -12,6 +12,7 @@ import mimetypes
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import traceback
@@ -423,7 +424,8 @@ class Router:
                 include_trash=self._first(query, "trash", "1") == "1",
                 include_archives=self._first(query, "archives", "1") == "1",
                 image_mode=mode,
-                with_sources=self._first(query, "sources", "0") == "1")
+                with_sources=self._first(query, "sources", "0") == "1",
+                include_archived=self._first(query, "archived", "1") == "1")
 
         @self.post("/api/mobile/sync")
         def mobile_sync(body: Dict[str, Any], **_kw: Any) -> Dict[str, Any]:
@@ -434,6 +436,27 @@ class Router:
             （自动识图）不在这里，由手机端在联网时直接调既有接口。
             """
             return svc.apply_mobile_sync(body or {})
+
+        @self.get("/api/archive/*/paths")
+        def archive_paths(wild: str, query: Dict[str, List[str]], **_kw: Any) -> Dict[str, Any]:
+            """批次在磁盘上的位置（带 export=1 时先把图片落到那个文件夹）。"""
+            export = self._first(query, "export", "0") == "1"
+            return svc.archive_paths(int(wild), export=export)
+
+        @self.post("/api/reveal")
+        def reveal(body: Dict[str, Any], **_kw: Any) -> Dict[str, Any]:
+            """在**服务器这台电脑**上打开一个文件夹 / 选中一个文件（资源管理器）。
+
+            手机端点了「在电脑上打开文件夹」也走这里 —— 手机自己打不开电脑的目录，
+            但可以让电脑弹出来。只允许打开数据目录以内的路径，避免变成任意程序启动器。
+            """
+            target = os.path.abspath(str(body.get("path") or ""))
+            root = os.path.abspath(svc.root)
+            if not target.startswith(root):
+                raise ServiceError("只允许打开工作台数据目录以内的路径")
+            if not os.path.exists(target):
+                raise ServiceError("路径不存在（可能还没导出，请先生成归档文件夹）")
+            return {"opened": open_in_file_manager(target), "path": target}
 
         @self.get("/api/archives")
         def archives(**_kw: Any) -> Dict[str, Any]:
@@ -738,6 +761,28 @@ class Handler(BaseHTTPRequestHandler):
             super().handle_one_request()
         except (ConnectionResetError, BrokenPipeError):
             self.close_connection = True
+
+
+def open_in_file_manager(path: str) -> bool:
+    """在服务器这台机器上打开文件管理器（Windows 用资源管理器）。
+
+    手机端没法直接打开电脑的目录，所以「在电脑上打开文件夹」这个动作只能由电脑执行 ——
+    这就是它存在的原因。失败不抛异常，只返回 False（服务可能跑在无桌面的环境里）。
+    """
+    try:
+        if os.name == "nt":
+            if os.path.isdir(path):
+                os.startfile(path)          # 打开文件夹
+            else:
+                subprocess.Popen(["explorer", "/select,", path])
+            return True
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+            return True
+        subprocess.Popen(["xdg-open", path])
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def build_server(service: Workbench, host: str = "127.0.0.1", port: int = 8787) -> ThreadingHTTPServer:

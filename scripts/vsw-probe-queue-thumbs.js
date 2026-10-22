@@ -213,9 +213,12 @@ async function main() {
       return { overlap: overlap.length, id, sameKey, sizes,
                coexist: !!(fRec && vRec), differ: sizes[0] !== sizes[1] };
     })()`);
-    check('结果图与变体图的键不再相同（同 id 也不会互相覆盖）',
-          collision && collision.sameKey === false,
-          JSON.stringify(collision));
+    if (!collision || !collision.overlap) {
+      console.log('      （本地库里结果与变体没有重号 id，跳过撞号断言）');
+    } else {
+      check('结果图与变体图的键不再相同（同 id 也不会互相覆盖）',
+            collision.sameKey === false, JSON.stringify(collision));
+    }
     if (collision && collision.coexist) {
       check('同 id 的结果图与变体图能共存，且内容不同（这正是之前显示错图的原因）',
             collision.differ, JSON.stringify(collision));

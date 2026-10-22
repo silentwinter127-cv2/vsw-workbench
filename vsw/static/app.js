@@ -1292,6 +1292,8 @@ async function loadArchives() {
       <td class="num">${fmtBytes(a.total_bytes)}</td>
       <td class="nowrap">
         <button class="btn" data-act="look" data-id="${a.id}">查看</button>
+        <button class="btn" data-act="folder" data-id="${a.id}"
+          title="把这一批的图片落盘到一个文件夹，并在资源管理器里打开">归档文件夹</button>
         <button class="btn" data-act="undo" data-id="${a.id}">取消归档</button>
       </td>
     </tr>`;
@@ -1301,6 +1303,15 @@ async function loadArchives() {
     btn.onclick = async () => {
       const archiveId = Number(btn.dataset.id);
       try {
+        if (btn.dataset.act === 'folder') {
+          // 落盘 + 在资源管理器里打开（图片用硬链接，不占额外空间）
+          const info = await api(`/api/archive/${archiveId}/paths?export=1`);
+          const opened = await api('/api/reveal', { method: 'POST', body: { path: info.dir } });
+          toast(opened.opened
+            ? `已打开归档文件夹（${info.count} 个文件）`
+            : `已生成 ${info.dir}，但没能自动打开`);
+          return;
+        }
         if (btn.dataset.act === 'undo') {
           const out = await api('/api/archives/unarchive', {
             method: 'POST', body: { archive_id: archiveId },

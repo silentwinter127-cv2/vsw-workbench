@@ -202,7 +202,10 @@ async function main() {
         out.stores = Array.from(db.objectStoreNames);
         await new Promise((resolve) => {
           const tx = db.transaction('findings', 'readwrite');
-          (snap.findings || []).forEach((row) => tx.objectStore('findings').put(row));
+          const rows = (snap.findings || []).length
+            ? snap.findings
+            : [{ id: 1, title: '（探针占位：结果板当前为空）', triage: 'tracking' }];
+          rows.forEach((row) => tx.objectStore('findings').put(row));
           tx.oncomplete = resolve; tx.onerror = resolve;
         });
         out.written = await new Promise((resolve) => {

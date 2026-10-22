@@ -174,6 +174,9 @@ async function main() {
     })()`);
     check('快照能拉下来并写进本地库', synced && synced.trash > 0, JSON.stringify(synced));
 
+    // 等补图链条跑完（loadLocal 里的补图是后台进行的，不等它就会删掉一张都没补上的空库）
+    await evaluate(`new Promise(r => setTimeout(r, 5000))`);
+
     // 故意把回收站那批的缩略图从本地删掉，模拟"同步时没下过"
     const wiped = await evaluate(`(async () => {
       let removed = 0;
@@ -186,8 +189,11 @@ async function main() {
     })()`);
     console.log(`      （清掉了 ${wiped && wiped.removed} 张本地缩略图，回收站共 ${wiped && wiped.trash} 条）`);
 
-    // 渲染回收站：应当自动补齐
+    // 渲染回收站：应当自动补齐。
+    // 这里再调一次 loadLocal() —— 相当于"重开一次应用"，这才是真实场景
+    // （图片丢了之后，用户重开时应当自动补回来）。
     const rendered = await evaluate(`(async () => {
+      await loadLocal();
       switchTab('archive');
       await new Promise((r) => setTimeout(r, 9000));   // 给补图留时间
       const cards = Array.from(document.querySelectorAll('#trashList .fcard'));

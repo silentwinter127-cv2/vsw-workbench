@@ -1099,6 +1099,26 @@ def test_trash(tmp: str, fixtures: FixtureServer, vision: bool) -> None:
     check("先把对象归档，活动板上应看不到它们",
           bool(archived_before) and not wb.store.findings(limit=99),
           json.dumps({"archived": archived_before[:5]}, ensure_ascii=False))
+    # 归档文件夹：每个批次落盘一个目录（图片用硬链接），手机/电脑都能直通它
+    exported = wb.export_archive(wb.store.archive_runs()[0]["id"])
+    exported_dir = exported["dir"]
+    check("归档批次能落盘成一个文件夹", os.path.isdir(exported_dir), exported_dir)
+    check("文件夹里有图片文件", exported["files"] > 0, str(exported["files"]))
+    manifest_file = os.path.join(exported_dir, "manifest.json")
+    check("文件夹里有 manifest.json", os.path.isfile(manifest_file), manifest_file)
+    manifest_data = json.loads(open(manifest_file, encoding="utf-8").read())
+    check("manifest 里记了每个对象的文件与来源",
+          manifest_data["items"] and all("file" in it and "sources" in it
+                                         for it in manifest_data["items"]),
+          str(len(manifest_data["items"])))
+    check("导出的图片用硬链接（同一卷不占额外空间）",
+          exported["images"]["linked"] + exported["images"]["copied"]
+          + exported["images"].get("reused", 0) == exported["files"],
+          json.dumps(exported["images"]))
+    paths = wb.archive_paths(wb.store.archive_runs()[0]["id"])
+    check("能取到批次的路径与文件清单",
+          paths["exists"] and paths["count"] > 0, f'{paths["count"]} 个文件')
+
     wb.store.trash_findings(archived_before[:2], reason="test")
     trashed_ids = [f["id"] for f in wb.store.findings(limit=99, trashed=True)]
     check("归档对象被移进回收站后，回收站里仍然看得见（不会被归档过滤掉）",

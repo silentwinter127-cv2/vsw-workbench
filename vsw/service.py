@@ -1712,7 +1712,8 @@ class Workbench:
 
     def mobile_snapshot(self, *, thumb_side: int = 240, findings_limit: int = 800,
                         include_trash: bool = True, include_archives: bool = True,
-                        image_mode: str = "thumbs", with_sources: bool = False) -> Dict[str, Any]:
+                        image_mode: str = "thumbs", with_sources: bool = False,
+                        include_archived: bool = True) -> Dict[str, Any]:
         """给手机端打一份可直接离线使用的快照。
 
         设计要点（都是被手机的限制逼出来的）：
@@ -1786,12 +1787,21 @@ class Workbench:
             for item in trash:
                 self._slim_for_mobile(item, mode, with_sources=with_sources)
             payload["trash"] = trash
+        if include_archived:
+            # 归档对象单独带一份：手机端要能点开某个批次看里面有什么，
+            # 而且最好离线也能看（归档本来就是"这一轮结束了，留着回看"）。
+            archived_rows = store.findings(limit=min(findings_limit, 800), archived=True,
+                                           include_dups=False, order="value")
+            for item in archived_rows:
+                self._slim_for_mobile(item, mode, with_sources=with_sources)
+            payload["archived"] = archived_rows
         payload["counts"] = {
             "findings": len(findings),
             "seeds": len(payload["seeds"]),
             "variants": len(variants),
             "jobs": len(jobs),
             "trash": len(payload.get("trash") or []),
+            "archived": len(payload.get("archived") or []),
             "archives": len(payload["archives"]),
         }
         return payload
@@ -1973,6 +1983,109 @@ class Workbench:
         objects = [f for f in items if not f.get("dup_of")]
         return {"archive": record, "findings": items, "count": len(objects),
                 "carriers": len(items) - len(objects)}
+
+    # --------------------------------------------------- 归档：落到磁盘的文件夹
+    def archive_dir(self, archive_id: int, record: Optional[Dict[str, Any]] = None) -> str:
+        """一个批次对应的磁盘目录：`data/archives/<id>-<名字>/`。
+
+        归档原来只打状态标记，文件散在 media/results 里 —— 想拿这批图只能自己去翻。
+        现在每个批次有一个独立目录（图片用**硬链接**放进 imgs/，同一卷上不占额外空间），
+        电脑上可以直接打开，手机上可以把路径复制出来或者让电脑打开它。
+        """
+        record = record or self.store.archive_run(archive_id) or {}
+        name = _safe_name(str(record.get("name") or f"batch-{archive_id}"))[:60]
+        return os.path.join(self.root, "archives", f"{int(archive_id)}-{name}")
+
+    def export_archive(self, archive_id: int) -> Dict[str, Any]:
+        """把批次落盘成文件夹：imgs/ 里是它的图片，manifest.json 是可读清单。
+
+        幂等：已经导出过的不会重复复制；图片用硬链接，失败才退回复制。
+        """
+        record = self.store.archive_run(archive_id)
+        if record is None:
+            raise ServiceError("归档记录不存在")
+        target = self.archive_dir(archive_id, record)
+        img_dir = os.path.join(target, "imgs")
+        os.makedirs(img_dir, exist_ok=True)
+
+        items = self.store.findings(limit=100000, archive_id=archive_id, include_dups=True,
+                                    order="value", archived=None)
+        objects = [f for f in items if not f.get("dup_of")]
+        linked = copied = reused = skipped = 0
+        manifest_items: List[Dict[str, Any]] = []
+        for finding in objects:
+            rel = finding.get("rel_path") or ""
+            source = self.abs_media(rel) if rel else ""
+            entry = {
+                "id": finding.get("id"),
+                "title": finding.get("title") or "",
+                "triage": finding.get("triage") or "",
+                "explore_value": finding.get("explore_value"),
+                "similarity": finding.get("similarity"),
+                "width": finding.get("width"), "height": finding.get("height"),
+                "bytes": finding.get("bytes"),
+                "engine": finding.get("engine") or "",
+                "image_url": Store._slim_url(finding.get("image_url") or ""),
+                "sources": [{"platform": s.get("platform") or "", "url": Store._slim_url(s.get("url") or "")}
+                            for s in (finding.get("sources") or [])],
+                "file": "",
+            }
+            if source and os.path.isfile(source):
+                ext = os.path.splitext(source)[1] or ".jpg"
+                name = f"{finding.get('id')}-{_safe_name(str(finding.get('title') or 'result'))[:48]}{ext}"
+                dest = os.path.join(img_dir, name)
+                entry["file"] = f"imgs/{name}"
+                if os.path.exists(dest):
+                    reused += 1                    # 上次已经导出过，直接复用
+                else:
+                    try:
+                        os.link(source, dest)          # 硬链接：同一卷上不占额外空间
+                        linked += 1
+                    except OSError:
+                        try:
+                            shutil.copy2(source, dest)
+                            copied += 1
+                        except OSError:
+                            skipped += 1
+                            entry["file"] = ""
+            else:
+                skipped += 1
+                entry["file"] = ""
+            manifest_items.append(entry)
+
+        manifest = {
+            "archive_id": int(archive_id),
+            "name": record.get("name") or "",
+            "note": record.get("note") or "",
+            "created_at": record.get("created_at"),
+            "findings": len(objects),
+            "carriers": len(items) - len(objects),
+            "sources": record.get("sources"),
+            "platforms": record.get("platforms"),
+            "date_from": record.get("date_from"),
+            "date_to": record.get("date_to"),
+            "exported_at": time.time(),
+            "items": manifest_items,
+        }
+        with open(os.path.join(target, "manifest.json"), "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, ensure_ascii=False, indent=2)
+        return {"dir": target, "images": {"linked": linked, "copied": copied,
+                                          "reused": reused, "skipped": skipped},
+                "findings": len(objects), "files": len(os.listdir(img_dir))}
+
+    def archive_paths(self, archive_id: int, export: bool = False) -> Dict[str, Any]:
+        """批次的磁盘路径（export=True 时先落盘）。"""
+        record = self.store.archive_run(archive_id)
+        if record is None:
+            raise ServiceError("归档记录不存在")
+        info = self.export_archive(archive_id) if export else None
+        target = (info or {}).get("dir") or self.archive_dir(archive_id, record)
+        files: List[str] = []
+        img_dir = os.path.join(target, "imgs")
+        if os.path.isdir(img_dir):
+            files = sorted(os.path.join(img_dir, n) for n in os.listdir(img_dir))
+        return {"dir": target, "exists": os.path.isdir(target), "files": files[:500],
+                "count": len(files), "exported": info}
 
     def unarchive(self, archive_id: Optional[int] = None) -> Dict[str, Any]:
         restored = self.store.unarchive(archive_id=archive_id)
