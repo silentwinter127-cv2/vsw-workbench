@@ -1606,7 +1606,10 @@ function renderArchive() {
       ${a.note ? `<div class="small">${esc(a.note)}</div>` : ''}
       <div class="row tight" style="margin-top:8px">
         <button class="btn sm primary" data-open="${a.id}">查看（${items.length}）</button>
-        <button class="btn sm" data-folder="${a.id}">归档文件夹</button>
+        <button class="btn sm" data-save="${a.id}"
+          ${S.online ? '' : 'disabled'}>保存到手机</button>
+        <button class="btn sm ghost" data-folder="${a.id}"
+          ${S.online ? '' : 'disabled'}>在电脑上打开</button>
         ${S.online ? `<button class="btn sm ghost" data-undo="${a.id}">取消归档</button>` : ''}
       </div>
       <div class="small" id="archivePath-${a.id}" style="margin-top:6px"></div>
@@ -1618,20 +1621,53 @@ function renderArchive() {
     btn.onclick = () => openArchiveBatch(Number(btn.dataset.open));
   });
 
-  // 归档文件夹：在电脑上生成并打开它；手机自己打不开电脑目录，所以是"让电脑弹出来"。
+  // 保存到手机：把这一批（图片 + manifest）打包成 zip 下载到手机的「下载」目录。
+  // 手机本地打不开电脑上的目录，所以"在手机上看到归档文件夹"只能靠把文件真正拿到手机上。
+  $$('#archiveList [data-save]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = Number(btn.dataset.save);
+      const host = $(`#archivePath-${id}`);
+      if (!S.online) return toast('离线中：需要连上电脑才能取这一批文件', true);
+      const url = S.server.replace(/\/+$/, '') + `/api/archive/${id}/zip`;
+      if (host) host.textContent = '正在打包下载…';
+      try {
+        // 先探一下服务端能不能打包（出错时给明确提示，而不是静默失败）
+        const head = await fetch(url, { method: 'HEAD' });
+        if (!head.ok) throw new Error(`HTTP ${head.status}`);
+        const size = Number(head.headers.get('content-length') || 0);
+        // 交给系统下载（APK 里有 DownloadListener，会存到「下载」并通知）
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `archive-${id}.zip`;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        if (host) host.textContent = size
+          ? `已开始下载（${(size / 1048576).toFixed(1)} MB）：完成后在手机的「下载」里打开`
+          : '已开始下载：完成后在手机的「下载」里打开';
+        toast('已开始下载，完成后在手机「下载」里打开');
+      } catch (e) {
+        if (host) host.textContent = '';
+        toast(`打包失败：${e.message}`, true);
+      }
+    };
+  });
+
+  // 在电脑上打开：让电脑生成并弹出那个目录（手机自己打不开电脑目录）。
   // 离线时退化为显示路径（可复制），用户回到电脑前照样找得到。
   $$('#archiveList [data-folder]').forEach((btn) => {
     btn.onclick = async () => {
       const id = Number(btn.dataset.folder);
       const host = $(`#archivePath-${id}`);
       if (!S.online) {
-        if (host) host.textContent = '离线中：连上电脑后可以生成并打开这个批次的文件夹。';
+        if (host) host.textContent = '离线中：连上电脑后才能生成文件夹或在电脑上打开。';
         return toast('离线中：需要连上电脑才能生成归档文件夹', true);
       }
       try {
         btn.disabled = true;
         const info = await api(`/api/archive/${id}/paths?export=1`);
-        if (host) host.textContent = `文件夹：${info.dir}`;
+        if (host) host.textContent = `电脑上的文件夹：${info.dir}`;
         const opened = await post('/api/reveal', { path: info.dir });
         toast(opened.opened
           ? `已在电脑上打开（${info.count} 个文件）`

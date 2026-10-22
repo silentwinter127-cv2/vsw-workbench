@@ -50,7 +50,7 @@ public class MainActivity extends Activity {
      * 用在应用名和启动屏里的构建标识。每次改 APK 都要改它 —— 这样"我装了新版吗"
      * 这个问题不需要靠猜（真机上真的发生过"装的是旧包"）。
      */
-    static final String BUILD_TAG = "r9";
+    static final String BUILD_TAG = "r10";
 
     private int assetBytes = 0;
     private long pageFileLength = 0;
@@ -169,6 +169,38 @@ public class MainActivity extends Activity {
         });
 
         web.addJavascriptInterface(new Bridge(), "AndroidBridge");
+
+        // 下载处理。没有它，页面里任何"下载"链接在 WebView 里都是**静默无效**的 ——
+        // 手机上"看不到归档文件夹"有一半是这个原因：点了什么都不发生。
+        // 这里交给系统的 DownloadManager：文件会落到「下载」，完成时给通知，
+        // 用户可以在任意文件管理器里打开（zip 里是图片 + manifest.json）。
+        web.setDownloadListener(new android.webkit.DownloadListener() {
+            @Override
+            public void onDownloadStart(String url, String userAgent, String contentDisposition,
+                                        String mimeType, long contentLength) {
+                try {
+                    String name = guessFileName(url, contentDisposition, mimeType);
+                    android.app.DownloadManager manager = (android.app.DownloadManager)
+                            getSystemService(DOWNLOAD_SERVICE);
+                    if (manager == null) {
+                        toast("系统没有下载服务，无法保存");
+                        return;
+                    }
+                    android.app.DownloadManager.Request request =
+                            new android.app.DownloadManager.Request(Uri.parse(url));
+                    request.setMimeType(mimeType);
+                    request.addRequestHeader("User-Agent", userAgent);
+                    request.setNotificationVisibility(
+                            android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                    request.setDestinationInExternalPublicDir(
+                            android.os.Environment.DIRECTORY_DOWNLOADS, name);
+                    manager.enqueue(request);
+                    toast("已开始下载：" + name + "\n完成后在系统的「下载」里打开");
+                } catch (Exception exc) {
+                    toast("下载失败：" + exc.getMessage());
+                }
+            }
+        });
 
         // 先把页面落到私有目录，再加载真实路径；失败也要说清原因，不要只给一个白屏
         String problem = preparePage();
@@ -552,6 +584,59 @@ public class MainActivity extends Activity {
                         }
                     }
                 });
+    }
+
+    /**
+     * 给下载的文件起个名字。
+     *
+     * 服务器按 RFC 5987 发的头是 `filename="archive-15.zip"; filename*=UTF-8''15-%E6%89%8B...zip`，
+     * 中文名在 `filename*` 里（URL 编码）。这里优先取它 —— 直接取 `filename=` 会拿到
+     * 无意义的 `archive-15.zip`，用户就分不清是哪一批了。
+     */
+    private String guessFileName(String url, String contentDisposition, String mimeType) {
+        String name = "";
+        if (contentDisposition != null) {
+            int star = contentDisposition.indexOf("filename*=");
+            if (star >= 0) {
+                String tail = contentDisposition.substring(star + "filename*=".length()).trim();
+                int semi = tail.indexOf(';');
+                if (semi >= 0) tail = tail.substring(0, semi);
+                tail = tail.trim().replace("\"", "");
+                int quote = tail.indexOf("''");
+                if (quote >= 0) tail = tail.substring(quote + 2);
+                try {
+                    name = Uri.decode(tail);
+                } catch (Exception exc) {
+                    name = "";
+                }
+            }
+            if (name.isEmpty()) {
+                int at = contentDisposition.indexOf("filename=");
+                if (at >= 0) {
+                    name = contentDisposition.substring(at + "filename=".length()).trim();
+                    int semi = name.indexOf(';');
+                    if (semi >= 0) name = name.substring(0, semi);
+                    name = name.replace("\"", "").trim();
+                }
+            }
+        }
+        if (name.isEmpty() && url != null) {
+            int slash = url.lastIndexOf('/');
+            if (slash >= 0 && slash + 1 < url.length()) {
+                name = Uri.decode(url.substring(slash + 1));
+                int q = name.indexOf('?');
+                if (q >= 0) name = name.substring(0, q);
+            }
+        }
+        if (name.isEmpty()) name = "vsw-download";
+        // 去掉文件名里不能出现在外置存储上的字符
+        name = name.replaceAll("[\\\\/:*?\"<>|]", "_");
+        if (!name.contains(".")) {
+            if ("application/zip".equals(mimeType)) name += ".zip";
+            else if ("image/jpeg".equals(mimeType)) name += ".jpg";
+            else name += ".bin";
+        }
+        return name;
     }
 
     private void toast(String text) {

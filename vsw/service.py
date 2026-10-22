@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import zipfile
 import urllib.parse
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -2072,6 +2073,39 @@ class Workbench:
         return {"dir": target, "images": {"linked": linked, "copied": copied,
                                           "reused": reused, "skipped": skipped},
                 "findings": len(objects), "files": len(os.listdir(img_dir))}
+
+    def archive_zip(self, archive_id: int) -> Dict[str, Any]:
+        """把一个批次打包成 zip，给手机端「保存到手机」用。
+
+        手机本地打不开电脑上的目录，所以"看到归档文件夹"这件事必须靠一份能落到手机存储里的
+        东西来完成 —— 一个 zip（图片 + manifest）就够了，相册/文件管理器都能直接打开。
+        打包结果缓存在 `data/archives/<id>-<名字>.zip`，文件比缓存新就重建。
+        """
+        record = self.store.archive_run(archive_id)
+        if record is None:
+            raise ServiceError("归档记录不存在")
+        info = self.export_archive(archive_id)
+        src_dir = info["dir"]
+        zip_path = src_dir.rstrip("\\/") + ".zip"
+        newest = 0.0
+        for root, _dirs, files in os.walk(src_dir):
+            for name in files:
+                try:
+                    newest = max(newest, os.path.getmtime(os.path.join(root, name)))
+                except OSError:
+                    pass
+        if not (os.path.isfile(zip_path) and os.path.getmtime(zip_path) >= newest):
+            tmp = zip_path + ".part"
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as bundle:
+                for root, dirs, files in os.walk(src_dir):
+                    dirs.sort()
+                    for name in sorted(files):
+                        full = os.path.join(root, name)
+                        rel = os.path.relpath(full, src_dir).replace(os.sep, "/")
+                        bundle.write(full, rel)
+            os.replace(tmp, zip_path)
+        return {"path": zip_path, "name": os.path.basename(zip_path),
+                "bytes": os.path.getsize(zip_path), "files": info["files"]}
 
     def archive_paths(self, archive_id: int, export: bool = False) -> Dict[str, Any]:
         """批次的磁盘路径（export=True 时先落盘）。"""

@@ -293,6 +293,34 @@ python -m vsw.server --host 0.0.0.0 --port 8799
 对应接口：`POST /api/queue/delete`，`{job_ids: [...]}` 批量删除，或 `{statuses: [...]}`
 按状态清空（等同于 `/api/queue/clear`）。
 
+### 手机上看不到"归档文件夹"怎么办：保存到手机
+
+真机反馈：归档卡片上点了「归档文件夹」，手机上什么也看不到。
+两个原因叠在一起：那个按钮只是**让电脑弹资源管理器**（手机本来就看不了电脑目录），
+而且 APK 里的 WebView **没有设 `DownloadListener`** —— 任何下载链接点下去都是静默无效。
+
+现在归档卡片有三个按钮，各管一件事：
+
+| 按钮 | 在哪生效 | 作用 |
+| --- | --- | --- |
+| 查看（N） | 手机本地 | 列出该批对象（缩略图 + 标题 + 来源数），离线也能看 |
+| **保存到手机** | 手机 | 把整批打包成 zip 下载到手机的「下载」目录 |
+| 在电脑上打开 | 电脑 | 落盘并在资源管理器里打开（路径会显示成"电脑上的文件夹：…"） |
+
+「保存到手机」拿到的是一个 zip：`imgs/` 里是该批图片，`manifest.json` 是清单。
+手机的文件管理器、解压 App、微信传文件都能直接用。
+
+配套改动：
+
+- 服务端 `GET /api/archive/{id}/zip`（`data/archives/<id>-<名字>.zip`，文件比缓存新就重建）。
+  中文文件名按 **RFC 5987** 放进 `filename*=UTF-8''…` —— HTTP 头只能是 latin-1，
+  直接写中文会让服务端在发响应头时抛 `UnicodeEncodeError`；
+- 服务端补了 **`HEAD`**（以前一律 501，于是"先探一下大小"的客户端直接失败），
+  并加了 `Access-Control-Expose-Headers`，让跨源的手机页面能读到 `Content-Length`
+  与 `Content-Disposition`；
+- APK 加了 `DownloadListener`：用系统 `DownloadManager` 存到「下载」，完成时给通知；
+  文件名优先取 `filename*` 里的中文名（否则会变成无意义的 `archive-15.zip`）。
+
 ### 归档现在有"自己的文件夹"，手机也能打开批次
 
 原来的问题：归档只打状态标记，图片仍散在 `media/results/`，**没有"这一批的文件在哪"这回事**；

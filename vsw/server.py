@@ -47,11 +47,13 @@ def bound_port(default: int = 8787) -> int:
 class _Raw:
     """Marker for a handler that wants to answer with bytes + an explicit content type."""
 
-    __slots__ = ("data", "content_type")
+    __slots__ = ("data", "content_type", "headers")
 
-    def __init__(self, data: bytes, content_type: str):
+    def __init__(self, data: bytes, content_type: str,
+                 headers: Optional[Dict[str, str]] = None):
         self.data = data
         self.content_type = content_type
+        self.headers = headers or {}
 
 
 class Router:
@@ -437,6 +439,19 @@ class Router:
             """
             return svc.apply_mobile_sync(body or {})
 
+        @self.get("/api/archive/*/zip")
+        def archive_zip(wild: str, **_kw: Any) -> Any:
+            """把归档批次打包成 zip —— 手机端「保存到手机」下载的就是它。"""
+            info = svc.archive_zip(int(wild))
+            with open(info["path"], "rb") as fh:
+                payload = fh.read()
+            # 文件名里可能有中文，HTTP 头只能是 latin-1：ASCII 兜底 + RFC 5987 的 filename*
+            ascii_name = f"archive-{int(wild)}.zip"
+            quoted = urllib.parse.quote(info["name"], safe="")
+            return _Raw(payload, "application/zip", {
+                "Content-Disposition":
+                    f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quoted}'})
+
         @self.get("/api/archive/*/paths")
         def archive_paths(wild: str, query: Dict[str, List[str]], **_kw: Any) -> Dict[str, Any]:
             """批次在磁盘上的位置（带 export=1 时先把图片落到那个文件夹）。"""
@@ -609,7 +624,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, status: int, payload: Any, content_type: str = "application/json; charset=utf-8",
               extra: Optional[Dict[str, str]] = None) -> None:
+        head_only = getattr(self, "_head_only", False)
+        extra = dict(extra or {})
         if isinstance(payload, _Raw):
+            # 先取头再换 payload —— 顺序反了就会变成 bytes.headers 直接 AttributeError
+            extra.update(payload.headers or {})
             content_type, payload = payload.content_type, payload.data
         if isinstance(payload, (dict, list)):
             data = json.dumps(payload, ensure_ascii=False, default=_json_default).encode("utf-8")
@@ -624,9 +643,16 @@ class Handler(BaseHTTPRequestHandler):
         # 手机端从 http://<电脑IP>:8799/m/ 打开时是同源；留 CORS 头是为了让
         # 「拖到手机上离线运行」的那份文件（file:// 或别的源）也能回连同一条 API。
         self.send_header("Access-Control-Allow-Origin", "*")
+        # 跨源脚本默认读不到这些头 —— 手机端要靠 Content-Length 显示大小、
+        # 靠 Content-Disposition 判断下载的文件名。
+        self.send_header("Access-Control-Expose-Headers",
+                         "Content-Disposition, Content-Length, Content-Type")
         for key, value in (extra or {}).items():
             self.send_header(key, value)
         self.end_headers()
+        if head_only:
+            # HEAD 请求：头照发（长度、类型、文件名都对），体不发
+            return
         try:
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
@@ -685,6 +711,18 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.unquote(parsed.path)
         status, payload = self.router.dispatch("DELETE", path, self._query(), {}, b"")
         self._send(status, payload)
+
+    def do_HEAD(self) -> None:
+        """HEAD = 走一遍 GET 的路由，但只回头不回体。
+
+        客户端（手机端「保存到手机」、下载器）常用 HEAD 先探大小与文件名；
+        以前没实现，一律 501，于是"先探一下"的代码直接失败。
+        """
+        self._head_only = True
+        try:
+            self.do_GET()
+        finally:
+            self._head_only = False
 
     def do_OPTIONS(self) -> None:
         self.send_response(204)

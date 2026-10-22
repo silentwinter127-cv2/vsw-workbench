@@ -126,7 +126,11 @@ async function main() {
     await send('Page.enable');
     const evaluate = async (expression) => {
       const res = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-      if (res.result && res.result.exceptionDetails) return { __error: res.result.exceptionDetails.text };
+      if (res.result && res.result.exceptionDetails) {
+        const det = res.result.exceptionDetails;
+        const desc = det.exception && (det.exception.description || det.exception.value);
+        return { __error: desc || det.text };
+      }
       return res.result && res.result.result ? res.result.result.value : null;
     };
 
@@ -185,13 +189,16 @@ async function main() {
         cards: cards.length,
         openButtons: document.querySelectorAll('#archiveList [data-open]').length,
         folderButtons: document.querySelectorAll('#archiveList [data-folder]').length,
+        saveButtons: document.querySelectorAll('#archiveList [data-save]').length,
         firstLabel: first ? (first.querySelector('[data-open]') || {}).textContent : '',
       };
     })()`);
     check('每个批次都有「查看」按钮', ui && ui.openButtons === ui.cards && ui.cards > 0,
           JSON.stringify(ui));
-    check('每个批次都有「归档文件夹」按钮', ui && ui.folderButtons === ui.cards && ui.cards > 0,
-          JSON.stringify(ui));
+    check('每个批次都有「在电脑上打开」（归档文件夹）按钮',
+          ui && ui.folderButtons === ui.cards && ui.cards > 0, JSON.stringify(ui));
+    check('每个批次都有「保存到手机」按钮（手机本地看不到电脑目录，只能把文件拿下来）',
+          ui && ui.saveButtons === ui.cards && ui.cards > 0, JSON.stringify(ui));
 
     // 点「查看」：应打开面板并列出对象（带缩略图）
     await evaluate("window.__probeBatch = " + JSON.stringify(String(probeBatch)));
@@ -253,6 +260,34 @@ async function main() {
     } else {
       check('文件夹里有可解析的 manifest.json（清单）', false, '没有目录');
     }
+
+    // 「保存到手机」下载的就是这个 zip：在页面里真的取一次，验它是完整压缩包。
+    // 用字符串拼接构造表达式，避免模板字面量在探针里再套一层插值（那样很容易写出坏代码）。
+    const zipExpr = [
+      '(async () => {',
+      '  const id = ' + Number(probeBatch) + ';',
+      "  const url = S.server.replace(/\\/+$/, '') + '/api/archive/' + id + '/zip';",
+      "  const head = await fetch(url, { method: 'HEAD' });",
+      '  const res = await fetch(url);',
+      '  const buf = await res.arrayBuffer();',
+      '  const bytes = new Uint8Array(buf.slice(0, 4));',
+      '  return { ok: res.ok, status: res.status,',
+      "    type: res.headers.get('content-type'),",
+      "    disposition: res.headers.get('content-disposition') || '',",
+      '    size: buf.byteLength,',
+      "    headSize: Number(head.headers.get('content-length') || 0),",
+      '    zipMagic: bytes[0] === 0x50 && bytes[1] === 0x4b,',
+      '  };',
+      '})()',
+    ].join('\n');
+    const zipInfo = await evaluate(zipExpr);
+    if (process.env.VSW_DEBUG) console.log('      zip 表达式:', JSON.stringify(zipExpr).slice(0, 200));
+    check('手机能真的把归档下载成 zip（保存到手机走的就是它）',
+          zipInfo && zipInfo.ok && zipInfo.size > 1000, JSON.stringify(zipInfo && { size: zipInfo.size }));
+    check('下载内容是合法 zip（含 PK 魔数）', zipInfo && zipInfo.zipMagic, JSON.stringify(zipInfo));
+    check('响应带了文件名（中文用 RFC 5987 编码，否则 HTTP 头写不进去）',
+          zipInfo && /filename\*=UTF-8''/.test(zipInfo.disposition),
+          zipInfo && zipInfo.disposition);
 
     // 越界路径必须被拒
     const guard = await evaluate(`(async () => {
