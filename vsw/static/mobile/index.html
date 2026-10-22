@@ -154,6 +154,8 @@ label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5
 .job img{width:52px;height:52px;object-fit:cover;border-radius:8px;background:#05080c}
 .job .t1{font-size:13px}
 .job .t2{font-size:11px;color:var(--mute);font-family:ui-monospace,monospace}
+/* 多选模式下被选中的队列项要一眼看出来 */
+.job.sel{border-color:var(--accent);background:var(--accent-soft)}
 .st{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
 .st.pending{color:var(--dim)} .st.running{color:var(--accent);border-color:var(--accent)}
 .st.review{color:var(--track);border-color:var(--track)}
@@ -237,8 +239,37 @@ label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5
       <button data-s="pending">待搜索</button>
       <button data-s="review">待复查</button>
       <button data-s="done">已完成</button>
+      <button data-s="failed">失败</button>
     </div>
-    <div class="row tight" id="queueFilterEngines" style="margin-bottom:10px"></div>
+
+    <details class="filter-box" id="queueFilterBox" open>
+      <summary>队列筛选 <span class="small" id="queueFilterSummary"></span></summary>
+      <div class="filter-grid">
+        <label class="field"><span>种子</span>
+          <select id="queueSeed"><option value="">全部种子</option></select></label>
+        <label class="field"><span>产出</span>
+          <select id="queueResults">
+            <option value="">全部</option>
+            <option value="with">只看到有产出的</option>
+            <option value="without">只看还没产出的</option>
+          </select></label>
+        <label class="field"><span>关键词</span>
+          <input type="text" id="queueText" placeholder="引擎 / 变体 / 种子标题"></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="small">引擎：</span>
+        <div class="chips" id="queueFilterEngines"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <span class="small">变体：</span>
+        <div class="chips" id="queueFilterKinds"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn sm" id="queueFilterClear">清空筛选</button>
+      </div>
+    </details>
+
+    <div class="row tight" id="queueActions" style="margin-bottom:10px"></div>
     <div id="queueList"></div>
   </section>
 
@@ -405,6 +436,12 @@ const S = {
   triage: 'all',
   queueStatus: 'todo',
   queueEngines: new Set(),
+  queueKinds: new Set(),      // 变体类型筛选（full / crop_center_50 / …）
+  queueSeed: '',              // 种子筛选（'' = 全部）
+  queueText: '',              // 关键词（引擎名 / 变体 / 种子标题 / 备注）
+  queueResults: '',           // '' | 'with'（只看到有产出的） | 'without'
+  queueSelectMode: false,     // 是否处于多选（删除）模式
+  queueSelected: new Set(),   // 已选中的队列项 id
   search: '',
   findings: [],
   trash: [],
@@ -1053,28 +1090,68 @@ async function buildLocalChain(f) {
 }
 
 /* ---------------------------------------------------------------- 队列 */
-function renderQueue() {
-  const gate = $('#queueGate');
-  if (!S.online) {
-    gate.innerHTML = `<div class="gate">离线中：队列操作需要电脑上的工作台。
-      <br>「自动识图」要靠电脑上的无头浏览器（手机跑不了），「打开识图」也走电脑派发的入口。
-      下面显示的是最近一次同步时的队列快照。</div>`;
-  } else if (!S.caps.available) {
-    gate.innerHTML = `<div class="gate">电脑端语义引擎不可用 —— 工作台会退化成文件层 + 感知哈希层，
-      去重与排序仍可用，但没有语义邻居检索。</div>`;
-  } else {
-    gate.innerHTML = '';
-  }
-  const counts = {};
-  for (const j of S.jobs) counts[j.status] = (counts[j.status] || 0) + 1;
-  const produced = S.jobs.filter((j) => (j.findings || 0) > 0).length;
-  $('#queueStats').innerHTML = [
-    ['待处理', (counts.pending || 0) + (counts.review || 0) + (counts.running || 0)],
-    ['已产出', produced],
-    ['已完成', counts.done || 0],
-    ['失败', counts.failed || 0],
-  ].map(([l, n]) => `<div class="metric"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
+/* ---------------------------------------------------------------- 队列：筛选 */
+const QUEUE_KIND_LABEL = {
+  full: '全图', crop: '框选', crop_center_50: '中心裁剪', quad_tl: '左上四分一',
+  quad_tr: '右上四分一', quad_bl: '左下四分一', quad_br: '右下四分一',
+  gray: '灰度', edges: '边缘', bright_up: '提亮', bright_down: '压暗',
+  contrast_up: '加对比', blur: '模糊', sharpen: '锐化', flip_h: '左右翻转',
+  rotate_90: '旋转90°', thumb_small: '小图',
+};
 
+function queueFilterActive() {
+  return Boolean(S.queueSeed || S.queueEngines.size || S.queueKinds.size
+    || S.queueText.trim() || S.queueResults);
+}
+
+/** 状态筛选（todo 是"还没结论的"三合一）。 */
+function queueStatusMatch(job) {
+  if (S.queueStatus === 'todo') return ['pending', 'running', 'review'].includes(job.status);
+  return job.status === S.queueStatus;
+}
+
+/** 除状态以外的筛选条件（列表与「删除筛选结果」共用同一套判定，避免两边不一致）。 */
+function queueMatchFilters(job) {
+  if (S.queueSeed && String(job.seed_id) !== String(S.queueSeed)) return false;
+  if (S.queueEngines.size && !S.queueEngines.has(job.engine)) return false;
+  if (S.queueKinds.size && !S.queueKinds.has(job.variant_kind)) return false;
+  if (S.queueResults === 'with' && !(job.findings > 0)) return false;
+  if (S.queueResults === 'without' && job.findings > 0) return false;
+  const q = S.queueText.trim().toLowerCase();
+  if (q) {
+    const hay = [job.engine, job.engine_name, job.variant_kind, job.variant_label,
+      job.seed_title, job.note].join(' ').toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+function queueRows() {
+  return S.jobs
+    .filter((j) => queueStatusMatch(j) && queueMatchFilters(j))
+    .sort((a, b) => (b.findings || 0) - (a.findings || 0) || a.id - b.id);
+}
+
+/** 筛选控件：种子下拉 + 引擎/变体芯片（都带基数，方便看出"哪个筛出来有东西"）。 */
+function renderQueueFilters(rows) {
+  // 种子下拉：只列队列里出现过的种子，按条数降序
+  const seedCount = {};
+  for (const j of S.jobs) {
+    const id = j.seed_id;
+    if (!id) continue;
+    seedCount[id] = seedCount[id] || { total: 0, with: 0, title: j.seed_title || '' };
+    seedCount[id].total += 1;
+    if (j.findings) seedCount[id].with += 1;
+  }
+  const select = $('#queueSeed');
+  const wanted = String(S.queueSeed || '');
+  const options = Object.entries(seedCount)
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([id, v]) => `<option value="${id}" ${wanted === String(id) ? 'selected' : ''}>
+      #${id} ${esc((v.title || '').slice(0, 20))} · ${v.with}/${v.total}</option>`).join('');
+  select.innerHTML = `<option value="">全部种子</option>${options}`;
+
+  // 引擎芯片
   const engines = {};
   for (const j of S.jobs) {
     const e = j.engine || '?';
@@ -1085,7 +1162,8 @@ function renderQueue() {
   $('#queueFilterEngines').innerHTML = Object.entries(engines)
     .sort((a, b) => b[1].total - a[1].total)
     .map(([key, v]) => `<span class="chip ${S.queueEngines.has(key) ? 'on' : ''}" data-engine="${esc(key)}">
-      ${esc(key)} <span class="n">${v.with}/${v.total}</span></span>`).join('');
+      ${esc(key)} <span class="n">${v.with}/${v.total}</span></span>`).join('')
+    || '<span class="small">没有队列项</span>';
   $$('#queueFilterEngines .chip').forEach((chip) => {
     chip.onclick = () => {
       const key = chip.dataset.engine;
@@ -1094,31 +1172,151 @@ function renderQueue() {
     };
   });
 
-  let rows = S.jobs.filter((j) => {
-    if (S.queueStatus === 'todo' && !['pending', 'running', 'review'].includes(j.status)) return false;
-    if (S.queueStatus !== 'todo' && j.status !== S.queueStatus) return false;
-    if (S.queueEngines.size && !S.queueEngines.has(j.engine)) return false;
-    return true;
-  }).sort((a, b) => (b.findings || 0) - (a.findings || 0) || a.id - b.id);
+  // 变体类型芯片
+  const kinds = {};
+  for (const j of S.jobs) {
+    const k = j.variant_kind || '(未知)';
+    kinds[k] = kinds[k] || { total: 0, with: 0 };
+    kinds[k].total += 1;
+    if (j.findings) kinds[k].with += 1;
+  }
+  $('#queueFilterKinds').innerHTML = Object.entries(kinds)
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([key, v]) => `<span class="chip ${S.queueKinds.has(key) ? 'on' : ''}" data-kind="${esc(key)}">
+      ${esc(QUEUE_KIND_LABEL[key] || key)} <span class="n">${v.with}/${v.total}</span></span>`).join('')
+    || '<span class="small">-</span>';
+  $$('#queueFilterKinds .chip').forEach((chip) => {
+    chip.onclick = () => {
+      const key = chip.dataset.kind;
+      if (S.queueKinds.has(key)) S.queueKinds.delete(key); else S.queueKinds.add(key);
+      renderQueue();
+    };
+  });
+
+  // 摘要
+  const bits = [];
+  if (S.queueSeed) bits.push(`种子 #${S.queueSeed}`);
+  if (S.queueEngines.size) bits.push(`${S.queueEngines.size} 个引擎`);
+  if (S.queueKinds.size) bits.push(`${S.queueKinds.size} 种变体`);
+  if (S.queueText.trim()) bits.push(`“${S.queueText.trim()}”`);
+  if (S.queueResults) bits.push(S.queueResults === 'with' ? '有产出' : '无产出');
+  $('#queueFilterSummary').textContent = queueFilterActive()
+    ? `· 筛出 ${rows.length} 条（${bits.join(' + ')}）`
+    : `· 未筛选（共 ${S.jobs.length} 条）`;
+}
+
+/** 操作条：平常只给「选择」和「删除筛选结果」；多选模式下换成删除/全选/取消。 */
+function renderQueueActions(rows) {
+  const host = $('#queueActions');
+  const selected = S.queueSelected.size;
+  if (S.queueSelectMode) {
+    host.innerHTML = `
+      <span class="pill on">已选 ${selected}</span>
+      <button class="btn sm" id="queueSelAll">全选本页(${rows.length})</button>
+      <button class="btn sm danger" id="queueDeleteSel" ${selected ? '' : 'disabled'}>删除选中</button>
+      <button class="btn sm ghost" id="queueSelCancel">取消</button>`;
+    $('#queueSelAll').onclick = () => {
+      if (rows.every((j) => S.queueSelected.has(j.id))) S.queueSelected.clear();
+      else rows.forEach((j) => S.queueSelected.add(j.id));
+      renderQueue();
+    };
+    $('#queueDeleteSel').onclick = () => deleteQueueJobs(Array.from(S.queueSelected), '选中的');
+    $('#queueSelCancel').onclick = () => {
+      S.queueSelectMode = false; S.queueSelected.clear(); renderQueue();
+    };
+    return;
+  }
+  host.innerHTML = `
+    <button class="btn sm" id="queueSelBtn">选择</button>
+    <button class="btn sm danger" id="queueDeleteFiltered"
+      ${rows.length ? '' : 'disabled'}>删除筛选结果（${rows.length}）</button>`;
+  $('#queueSelBtn').onclick = () => { S.queueSelectMode = true; renderQueue(); };
+  $('#queueDeleteFiltered').onclick = () => deleteQueueJobs(rows.map((j) => j.id), '当前筛选下的');
+}
+
+/** 删除队列项（只删队列记录，已产出的结果不动）。 */
+async function deleteQueueJobs(ids, label) {
+  if (!ids.length) return toast('没有可删除的队列项');
+  if (!S.online) return toast('删除队列项需要连上电脑上的工作台', true);
+  const ok = confirm(`删除${label} ${ids.length} 个队列项？\n只删队列记录，已经产出的结果和种子都不受影响。`);
+  if (!ok) return;
+  try {
+    const out = await post('/api/queue/delete', { job_ids: ids });
+    S.queueSelectMode = false;
+    S.queueSelected.clear();
+    toast(`已删除 ${out.removed} 个队列项`);
+    await refreshQueueFromServer();
+  } catch (e) {
+    toast(`删除失败：${e.message}`, true);
+  }
+}
+
+/** 从电脑重拉队列（删除后用它同步本地库，避免界面与电脑不一致）。 */
+async function refreshQueueFromServer() {
+  try {
+    const data = await api('/api/queue?status=all&limit=800');
+    const rows = data.jobs || [];
+    await local.clear('jobs');
+    for (const row of rows) await local.put('jobs', row);
+    S.jobs = rows;
+    renderQueue();
+  } catch (e) {
+    // 拉不到就先把删掉的那些从本地剔掉，至少界面是对的
+    toast(`队列已删除，但刷新列表失败：${e.message}`, true);
+    renderQueue();
+  }
+}
+
+function renderQueue() {
+  const gate = $('#queueGate');
+  if (!S.online) {
+    gate.innerHTML = `<div class="gate">离线中：队列操作需要电脑上的工作台。
+      <br>「自动识图」要靠电脑上的无头浏览器（手机跑不了），「打开识图」也走电脑派发的入口。
+      筛选和浏览不受影响；删除队列项需要连上电脑。
+      下面显示的是最近一次同步时的队列快照。</div>`;
+  } else if (!S.caps.available) {
+    gate.innerHTML = `<div class="gate">电脑端语义引擎不可用 —— 工作台会退化成文件层 + 感知哈希层，
+      去重与排序仍可用，但没有语义邻居检索。</div>`;
+  } else {
+    gate.innerHTML = '';
+  }
+
+  const counts = {};
+  for (const j of S.jobs) counts[j.status] = (counts[j.status] || 0) + 1;
+  const produced = S.jobs.filter((j) => (j.findings || 0) > 0).length;
+  $('#queueStats').innerHTML = [
+    ['待处理', (counts.pending || 0) + (counts.review || 0) + (counts.running || 0)],
+    ['已产出', produced],
+    ['已完成', counts.done || 0],
+    ['失败', counts.failed || 0],
+  ].map(([l, n]) => `<div class="metric"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
+
+  const rows = queueRows();
+  renderQueueFilters(rows);
+  renderQueueActions(rows);
 
   $('#queueList').innerHTML = rows.map((j) => {
     const thumb = thumbSrcMap()[`job:${j.id}`] || '';
     const browser = j.engine === 'baidu' || j.engine === 'so360';
-    return `<div class="job">
+    const picked = S.queueSelected.has(j.id);
+    return `<div class="job ${picked ? 'sel' : ''}" data-id="${j.id}">
       ${thumb ? `<img src="${thumb}" alt="">`
         : `<img alt="" style="opacity:.25" data-want-job-thumb="${j.id}">`}
       <div>
-        <div class="t1">${esc(j.engine_name || j.engine)} · ${esc(j.variant_label || j.variant_kind || '')}
+        <div class="t1">${esc(j.engine_name || j.engine)} · ${esc(j.variant_label || QUEUE_KIND_LABEL[j.variant_kind] || j.variant_kind || '')}
           <span class="st ${j.status}">${STATUS[j.status] || j.status}</span>
           ${j.findings ? `<span class="st done">产出 ${j.findings}</span>` : ''}</div>
         <div class="t2">#${j.id} 种子「${esc((j.seed_title || '').slice(0, 18))}」</div>
         <div class="row tight" style="margin-top:6px">
-          ${browser
-            ? `<button class="btn sm ${S.online ? 'primary' : ''}" data-act="auto" data-id="${j.id}"
-                 ${S.online ? '' : 'disabled'}>自动识图</button>`
-            : `<button class="btn sm ${S.online ? '' : ''}" data-act="open" data-id="${j.id}"
-                 ${S.online ? '' : 'disabled'}>打开识图</button>`}
-          ${S.online ? `<button class="btn sm ghost" data-act="open" data-id="${j.id}">打开</button>` : ''}
+          ${S.queueSelectMode
+            ? `<button class="btn sm ${picked ? 'primary' : ''}" data-act="pick" data-id="${j.id}">${picked ? '✓ 已选' : '选它'}</button>`
+            : `${browser
+              ? `<button class="btn sm ${S.online ? 'primary' : ''}" data-act="auto" data-id="${j.id}"
+                   ${S.online ? '' : 'disabled'}>自动识图</button>`
+              : `<button class="btn sm" data-act="open" data-id="${j.id}"
+                   ${S.online ? '' : 'disabled'}>打开识图</button>`}
+               <button class="btn sm ghost" data-act="del" data-id="${j.id}"
+                 ${S.online ? '' : 'disabled'}>删除</button>`}
         </div>
       </div>
     </div>`;
@@ -1137,8 +1335,17 @@ function renderQueue() {
   });
 
   $$('#queueList [data-act]').forEach((btn) => {
-    btn.onclick = async () => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
       const jobId = Number(btn.dataset.id);
+      if (btn.dataset.act === 'pick') {
+        if (S.queueSelected.has(jobId)) S.queueSelected.delete(jobId); else S.queueSelected.add(jobId);
+        renderQueue();
+        return;
+      }
+      if (btn.dataset.act === 'del') {
+        return deleteQueueJobs([jobId], '这个');
+      }
       if (!S.online) return toast('离线中：这个操作要在电脑上执行', true);
       try {
         if (btn.dataset.act === 'auto') {
@@ -1152,7 +1359,53 @@ function renderQueue() {
       } catch (e) { toast(e.message, true); }
     };
   });
-  hydrateJobThumbs(rows);
+
+  // 长按卡片进入多选（手机上没有悬停，长按是最自然的"选中多个"手势）
+  $$('#queueList .job').forEach((card) => {
+    let timer = null;
+    card.addEventListener('touchstart', () => {
+      timer = setTimeout(() => {
+        if (!S.queueSelectMode) { S.queueSelectMode = true; }
+        S.queueSelected.add(Number(card.dataset.id));
+        renderQueue();
+      }, 550);
+    }, { passive: true });
+    const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    card.addEventListener('touchend', cancel, { passive: true });
+    card.addEventListener('touchmove', cancel, { passive: true });
+    card.oncontextmenu = (ev) => { ev.preventDefault(); };
+  });
+}
+
+/** 队列筛选控件的绑定（只绑一次，在 boot 里调用）。 */
+function bindQueueFilters() {
+  const txt = $('#queueText');
+  if (txt) {
+    txt.value = S.queueText;
+    let timer = null;
+    txt.oninput = (ev) => {
+      S.queueText = ev.target.value;
+      clearTimeout(timer);
+      timer = setTimeout(renderQueue, 250);   // 打字时不要每按一下就重画
+    };
+  }
+  const seed = $('#queueSeed');
+  if (seed) seed.onchange = (ev) => { S.queueSeed = ev.target.value; renderQueue(); };
+  const res = $('#queueResults');
+  if (res) {
+    res.value = S.queueResults;
+    res.onchange = (ev) => { S.queueResults = ev.target.value; renderQueue(); };
+  }
+  const clear = $('#queueFilterClear');
+  if (clear) {
+    clear.onclick = () => {
+      S.queueSeed = ''; S.queueText = ''; S.queueResults = '';
+      S.queueEngines.clear(); S.queueKinds.clear();
+      if (txt) txt.value = '';
+      if (res) res.value = '';
+      renderQueue();
+    };
+  }
 }
 
 /**
@@ -1979,9 +2232,11 @@ async function boot() {
     b.onclick = () => {
       $$('#queueSeg button').forEach((x) => x.classList.toggle('on', x === b));
       S.queueStatus = b.dataset.s;
+      S.queueSelected.clear();          // 换状态时清掉选择，避免删到看不见的条目
       renderQueue();
     };
   });
+  bindQueueFilters();
   $('#boardSearch').oninput = (ev) => { S.search = ev.target.value; renderBoard(); };
   $('#selAllBtn').onclick = () => {
     const visible = S.findings.filter((f) => !f.dup_of).map((f) => f.id);

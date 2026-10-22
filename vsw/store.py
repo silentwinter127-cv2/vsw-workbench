@@ -620,6 +620,24 @@ class Store:
     def delete_job(self, job_id: int) -> None:
         self.execute("DELETE FROM jobs WHERE id=?", (job_id,))
 
+    def delete_jobs(self, job_ids: Sequence[int]) -> int:
+        """批量删除队列项，返回实际删掉的条数。
+
+        手机端的「删除选中 / 删除当前筛选结果」走这里：几百条逐条发请求太慢，
+        而且中途失败会留下半删状态。
+        """
+        ids = [int(i) for i in job_ids if str(i).strip().isdigit()]
+        if not ids:
+            return 0
+        removed = 0
+        # 分批拼占位符，避开 SQLite 的变量数上限（旧版本默认 999）
+        for start in range(0, len(ids), 400):
+            chunk = ids[start:start + 400]
+            marks = ",".join("?" for _ in chunk)
+            cur = self.execute(f"DELETE FROM jobs WHERE id IN ({marks})", chunk)
+            removed += cur.rowcount or 0
+        return removed
+
     def clear_jobs(self, statuses: Sequence[str]) -> int:
         if not statuses:
             return 0
@@ -768,7 +786,9 @@ class Store:
             args.append(int(archive_id))
         elif archived is True:
             sql += " AND COALESCE(archived_at,0)>0"
-        elif archived is False:
+        elif archived is False and not trashed:
+            # 归档与回收站正交：已归档对象被移进回收站后，回收站视图必须看得见它，
+            # 否则它既不在归档列表、也不在回收站里 —— 变成看不见也清理不掉的幽灵行。
             sql += " AND COALESCE(archived_at,0)=0"
         if not_promoted:
             # "还没被选为下一轮种子" —— 回收站默认就扫这一批，别把已经回流的成果删掉
@@ -813,10 +833,14 @@ class Store:
               ("trashed=1" if trashed else "COALESCE(trashed,0)=0")
         if not include_dups:
             sql += " AND dup_of=0"
-        if archived is True:
-            sql += " AND COALESCE(archived_at,0)>0"
-        elif archived is False:
-            sql += " AND COALESCE(archived_at,0)=0"
+        # 归档与回收站是两个正交的状态：已归档的对象被移进回收站后，
+        # 回收站视图也必须能看见它，否则它就"既不在归档、也不在回收站"，
+        # 变成既看不见也清理不掉的幽灵行。所以 trashed 查询不再叠加归档过滤。
+        if not trashed:
+            if archived is True:
+                sql += " AND COALESCE(archived_at,0)>0"
+            elif archived is False:
+                sql += " AND COALESCE(archived_at,0)=0"
         row = self.one(sql)
         return int(row["n"]) if row else 0
 

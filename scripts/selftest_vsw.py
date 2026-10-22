@@ -1092,6 +1092,41 @@ def test_trash(tmp: str, fixtures: FixtureServer, vision: bool) -> None:
     check("没在回收站里的对象不能被彻底删除（必须先回收）",
           not guard["purged"] and wb.store.finding(made[1]["id"]) is not None,
           json.dumps(guard, ensure_ascii=False))
+    # 归档与回收站是正交状态：已归档对象进回收站后必须仍然可见，
+    # 否则它既不在归档列表也不在回收站里，变成看不见也清理不掉的幽灵行。
+    wb.archive_now(name="正交状态测试")
+    archived_before = [f["id"] for f in wb.store.findings(limit=99, archived=True)]
+    check("先把对象归档，活动板上应看不到它们",
+          bool(archived_before) and not wb.store.findings(limit=99),
+          json.dumps({"archived": archived_before[:5]}, ensure_ascii=False))
+    wb.store.trash_findings(archived_before[:2], reason="test")
+    trashed_ids = [f["id"] for f in wb.store.findings(limit=99, trashed=True)]
+    check("归档对象被移进回收站后，回收站里仍然看得见（不会被归档过滤掉）",
+          set(archived_before[:2]) <= set(trashed_ids),
+          json.dumps({"want": archived_before[:2], "got": trashed_ids[:5]}, ensure_ascii=False))
+    check("回收站计数也算上它们",
+          wb.store.count_findings(trashed=True) >= 2,
+          str(wb.store.count_findings(trashed=True)))
+    wb.store.restore_findings(archived_before[:2])
+    check("恢复后回到归档视图（不会泄漏回活动板）",
+          set(archived_before[:2]) <= {f["id"] for f in wb.store.findings(limit=99, archived=True)}
+          and not wb.store.findings(limit=99),
+          json.dumps({"archived": [f["id"] for f in wb.store.findings(limit=99, archived=True)][:5]},
+                     ensure_ascii=False))
+
+    # 队列批量删除（手机端「删除选中 / 删除筛选结果」走它）
+    seed_q = wb.import_bytes(jpeg(photo_b(), 90), title="队列删除测试",
+                             variants=["full", "gray", "edges"])["seed_id"]
+    new_jobs = wb.enqueue_seed(seed_q, engines=["baidu"], kinds=["full", "gray", "edges"])
+    check("先造出 3 条队列项", len(new_jobs) == 3, str(len(new_jobs)))
+    removed = wb.store.delete_jobs(new_jobs[:2])
+    left = {j["id"] for j in wb.queue_view("all")["jobs"]}
+    check("批量删除只删指定的那些",
+          removed == 2 and not ({new_jobs[0], new_jobs[1]} & left) and new_jobs[2] in left,
+          json.dumps({"removed": removed, "left": sorted(left)[:6]}, ensure_ascii=False))
+    check("批量删除不会误伤其它队列项", len(left) >= 1, str(len(left)))
+    check("delete_jobs 对空列表安全", wb.store.delete_jobs([]) == 0)
+
     check("指标里的「回收站」计数正确", wb.store.stats()["trashed"] == 0,
           json.dumps({"trashed": wb.store.stats()["trashed"]}))
     wb.store.close()

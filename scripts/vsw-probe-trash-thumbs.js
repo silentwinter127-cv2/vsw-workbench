@@ -138,6 +138,26 @@ async function main() {
       console.log(`      二次尝试后: ${again && again.server} · online=${again && again.online}`);
     }
 
+    // 回收站可能就是空的（用户清空过）。探针不能依赖"已有垃圾数据"，
+    // 所以没有就自己把几条活动结果移进回收站，验证完再恢复原样。
+    const prepared = await evaluate(`(async () => {
+      const list = await api('/api/findings/trash?limit=1');
+      if ((list.count || 0) > 0) return { created: 0, existing: list.count };
+      // 活动结果板上的对象可能都是"已回流"的（不能动），那就从归档对象里取样 ——
+      // 归档对象同样可以进回收站，验证完再恢复，不留痕迹。
+      const pick = async (qs) => {
+        const res = await api('/api/findings?limit=20' + qs);
+        return (res.findings || []).filter(f => f.status !== 'promoted').slice(0, 3).map(f => f.id);
+      };
+      let ids = await pick('');
+      let from = 'active';
+      if (!ids.length) { ids = await pick('&archived=1'); from = 'archived'; }
+      if (!ids.length) return { created: 0, error: '库里没有可安全借用的对象（都被回流或已清空）' };
+      await post('/api/findings/trash', { finding_ids: ids, reason: 'probe' });
+      return { created: ids.length, ids, from };
+    })()`);
+    console.log(`      （回收站准备：${JSON.stringify(prepared)}）`);
+
     // 拉一次快照并写入本地库（模拟手机同步过）
     const synced = await evaluate(`(async () => {
       const res = await fetch(${JSON.stringify(args.origin)} + '/api/mobile/snapshot?images=thumbs&limit=300&trash=1&archives=1');
@@ -216,6 +236,17 @@ async function main() {
           JSON.stringify({ src: rendered && rendered.blobSrc, w: rendered && rendered.loadedSample }));
     check('「N 源」显示真实来源数（不再恒为 0 源）',
           rendered && rendered.blank === 0, JSON.stringify(rendered && rendered.sourceTexts));
+
+    // 收拾干净：探针造出来的回收站条目要还原回结果板
+    if (prepared && prepared.ids && prepared.ids.length) {
+      const cleanup = await evaluate(`(async () => {
+        try {
+          const out = await post('/api/findings/trash/restore', { finding_ids: ${JSON.stringify(prepared.ids)} });
+          return { restored: (out.restored || []).length };
+        } catch (e) { return { error: String(e) }; }
+      })()`);
+      console.log(`      （已把探针造出的 ${prepared.ids.length} 条还原回结果板：${JSON.stringify(cleanup)}）`);
+    }
 
     const failed = results.filter((r) => !r.ok);
     console.log(`\n通过 ${results.length - failed.length} 项，失败 ${failed.length} 项`);

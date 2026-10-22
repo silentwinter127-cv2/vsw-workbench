@@ -332,6 +332,22 @@ class Router:
             statuses = body.get("statuses") or ["pending"]
             return {"removed": svc.store.clear_jobs(statuses)}
 
+        @self.post("/api/queue/delete")
+        def delete_queue_items(body: Dict[str, Any], **_kw: Any) -> Dict[str, Any]:
+            """批量删除队列项（手机端「删除选中 / 删除筛选结果」用）。
+
+            传 job_ids 就删指定的那些；传 statuses 则按状态清空（等价于 /api/queue/clear）。
+            两者都给时先删 id、再按状态清，返回删掉的总数。
+            """
+            ids = [int(i) for i in (body.get("job_ids") or [])]
+            statuses = body.get("statuses") or []
+            if not ids and not statuses:
+                raise ServiceError("需要 job_ids，或 statuses 指定要清空的状态")
+            removed = svc.store.delete_jobs(ids) if ids else 0
+            if statuses:
+                removed += svc.store.clear_jobs(statuses)
+            return {"removed": removed, "ids": ids[:50]}
+
         # -------------------------------------------------------------- ingest
         @self.post("/api/job/*/ingest")
         def ingest(wild: str, body: Dict[str, Any], **_kw: Any) -> Dict[str, Any]:
