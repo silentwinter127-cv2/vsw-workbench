@@ -79,8 +79,11 @@ node ../scripts/vsw-probe-apk-page.js --apk ../vsw-workbench.apk --origin http:/
 # 3) 导入队列行为：真造 3 张图走一遍「逐张导入 + 全部导入」（9 项）
 node ../scripts/vsw-probe-import-queue.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
 
-# 4) 回收站图片：故意删掉本地 206 张缩略图，看会不会自动补回（5 项）
+# 4) 回收站图片：故意删掉本地缩略图，看会不会自动补回（5 项）
 node ../scripts/vsw-probe-trash-thumbs.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
+
+# 5) 队列缩略图：变体图/种子图、键不撞车、缺图自动补（9 项）
+node ../scripts/vsw-probe-queue-thumbs.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
 ```
 
 | 层 | 查什么 | 结果 |
@@ -170,6 +173,37 @@ false，结果一张图都没补"）。另外回收站缩略图的键原来用 `
 探针 `scripts/vsw-probe-trash-thumbs.js` 复现这条路径：拉快照 → **故意把本地 206 张缩略图
 全删掉** → 渲染回收站 → 断言自动补回、`<img>` 上是真实图片数据（`blob:` 且
 `naturalWidth > 0`）、「N 源」不再是 0。
+
+### 真机踩到的坑 4：队列页缩略图空白 / 显示成别的图（已修）
+
+真机反馈队列页有的条目有图、有的空白，而且"看着有图"的那几张其实不是该条目对应的变体图。
+
+查到三个原因，前两个都是设计缺陷：
+
+1. **变体没有缩略图**：变体表只有 `rel_path`（原尺寸图），没有缩略图列；快照的 `thumbs`
+   档又把变体唯一的 `rel_path` 清空了 —— 队列根本拿不到"这一条派发的是哪个变体"的图。
+   修法：服务端新增 `GET /api/variant/{id}/thumb`（按需生成 + 磁盘缓存，
+   `thumbs/variants/v{id}-{box}.jpg`），快照里给每个变体带上 `thumb` 字段；
+   同步时只下载**队列里真正用到**的变体图。
+2. **本地图片键撞车**：结果 / 回收站 / 变体三张表 id 各成一套，却有大量重号
+   （实测结果↔变体重叠 **39** 个、回收站↔变体重叠 **99** 个）。原来键写作 `thumb:{id}`，
+   于是"变体 5 的图"和"结果 5 的图"是同一个键 —— 队列会显示成**别的图**或空白。
+   修法：键加命名空间 `fthumb: / ffull: / tthumb: / sthumb: / vthumb:`，
+   IndexedDB 升到 v2 并在升级时清空 `assets`（旧键有歧义，可能已存成错图，重下更可靠）。
+3. **`tx()` 在 `get` 未命中时返回了 IDBRequest 对象**（最隐蔽的一个）：
+   原实现只在 `transaction.oncomplete` 里取值，而 `get` 未命中时 `out.result` 是 `undefined`，
+   于是 `resolve(out)` 把 **请求对象本身** 当结果返回 —— 它是 truthy。
+   后果是**所有 `if (await local.get(...))` 恒为真**：图片缓存永远认为"已经存过了"，
+   一张都不会下载。这也解释了之前回收站探针里"明明清空了却显示已存在"的怪现象。
+   修法：单个请求按它自己的 `onsuccess` 取 `result`（未命中就是 `undefined`）。
+
+队列项的取图顺序改为：**变体自己的小图 → 种子缩略图 → 占位**；缺图的在渲染后自动补
+（`ensureJobThumbs`，只补当前显示的那些，几百条不必全下）。
+
+探针 `scripts/vsw-probe-queue-thumbs.js`（9 项）验：同步能拉到变体图、绝大多数队列项有图、
+图是真实数据（`blob:` 且 `naturalWidth > 0`）、有变体的项优先用变体图、
+**同 id 的结果图与变体图能共存且内容不同**（撞车 bug 的回归测试）、
+清掉本地图后能自动补回。
 
 ### ⚠ 还没验证到的（真机才能确认）
 

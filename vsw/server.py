@@ -388,6 +388,15 @@ class Router:
             return svc.repair_source_labels()
 
         # ---- 手机端 ------------------------------------------------------------
+        @self.get("/api/variant/*/thumb")
+        def variant_thumb(wild: str, query: Dict[str, List[str]], **_kw: Any) -> Any:
+            """变体缩略图（按需生成 + 磁盘缓存），给手机队列页显示"这条派发的是哪个变体"。
+
+            变体表只有原尺寸图片，没有缩略图；队列动辄几百条，下原图太重，所以现生成小图。
+            """
+            payload = svc.variant_thumb(int(wild), box=self._int(query, "box", 320))
+            return _Raw(payload, "image/jpeg")
+
         @self.get("/api/mobile/snapshot")
         def mobile_snapshot(query: Dict[str, List[str]], **_kw: Any) -> Dict[str, Any]:
             """给手机端打一份可离线使用的快照（纯文本 JSON，图片走独立静态路由）。"""

@@ -270,6 +270,33 @@ class Workbench:
         return candidate
 
     # --------------------------------------------------------------- variants
+    def variant_thumb(self, variant_id: int, box: int = 320) -> bytes:
+        """按需生成变体缩略图（磁盘缓存），给手机端队列页用。
+
+        为什么需要它：变体表只有 ``rel_path``（原尺寸的变体图），没有缩略图列。
+        手机队列页要显示"这一条派发的是哪个变体"，下原图太重（几十上百 KB × 几百条），
+        所以这里现生成一张小图并缓存。缓存键带 box，换尺寸不会串图。
+        """
+        variant = self.store.variant(int(variant_id))
+        if not variant:
+            raise ServiceError("变体不存在")
+        source = self.abs_media(variant.get("rel_path") or "")
+        if not source or not os.path.isfile(source):
+            raise ServiceError("变体图片文件不存在")
+        cache_dir = os.path.join(self.thumb_dir, "variants")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, f"v{variant_id}-{int(box)}.jpg")
+        if os.path.isfile(cache_path):
+            with open(cache_path, "rb") as fh:
+                return fh.read()
+        with Image.open(source) as img:
+            payload = imaging.thumb_bytes(img.convert("RGB"), box=int(box))
+        tmp = cache_path + ".part"
+        with open(tmp, "wb") as fh:
+            fh.write(payload)
+        os.replace(tmp, cache_path)
+        return payload
+
     def generate_variants(self, seed_id: int, kinds: Optional[Sequence[str]] = None,
                           formats: Sequence[str] = ("jpg",)) -> List[Dict[str, Any]]:
         seed = self.store.seed(seed_id)
@@ -1704,7 +1731,11 @@ class Workbench:
 
         variants = []
         for variant in store.variants(limit=findings_limit * 2):
-            variants.append(self._slim_for_mobile(dict(variant), mode, with_sources=False))
+            item = self._slim_for_mobile(dict(variant), mode, with_sources=False)
+            # 变体表没有缩略图列；给手机一个按需生成小图的地址，队列页才能显示
+            # "这一条派发的是哪个变体"（下原图太重：几百条 × 几十上百 KB）。
+            item["thumb"] = f"api/variant/{int(variant['id'])}/thumb"
+            variants.append(item)
 
         jobs = []
         for job in store.jobs(status="all", limit=findings_limit):

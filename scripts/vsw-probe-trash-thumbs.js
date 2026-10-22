@@ -158,7 +158,7 @@ async function main() {
     const wiped = await evaluate(`(async () => {
       let removed = 0;
       for (const f of S.trash) {
-        const key = 'thumb:' + f.id;
+        const key = KEY.trashThumb(f.id);
         if (await local.get('assets', key)) { await local.del('assets', key); removed += 1; }
       }
       S._thumbs = {};                 // 连内存里的 objectURL 也清掉
@@ -177,7 +177,7 @@ async function main() {
       const sourceTexts = cards.map((c) => (c.querySelector('.ln') || {}).textContent || '');
       // 诊断：为什么没补上
       const first = S.trash[0] || {};
-      const stored = first.id ? await local.get('assets', 'thumb:' + first.id) : null;
+      const stored = first.id ? await local.get('assets', KEY.trashThumb(first.id)) : null;
       let probeUrl = '';
       let probeOk = null;
       let probeErr = '';

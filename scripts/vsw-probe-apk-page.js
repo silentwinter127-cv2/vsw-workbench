@@ -195,7 +195,7 @@ async function main() {
         const snap = await res.json();
         out.snapshot = { ok: res.ok, counts: snap.counts };
         const db = await new Promise((resolve, reject) => {
-          const req = indexedDB.open('vsw-mobile', 1);
+          const req = indexedDB.open('vsw-mobile');   // 不写死版本：应用会自己迁移到最新版
           req.onsuccess = () => resolve(req.result);
           req.onerror = () => reject(req.error);
         });

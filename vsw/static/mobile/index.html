@@ -449,28 +449,57 @@ function toast(msg, bad = false) {
 
 /* ---------------------------------------------------------------- 本地库 */
 const DB_NAME = 'vsw-mobile';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let dbPromise = null;
+
+/* ---------------------------------------------------------------------------
+ * 本地图片的键必须带命名空间。
+ *
+ * 踩过的真 bug：结果、回收站、变体三张表的 id 各成一套，却有大量重号
+ * （实测结果与变体重叠 39 个、回收站与变体重叠 99 个）。原来键写作 `thumb:{id}`，
+ * 于是"变体 5 的缩略图"和"结果 5 的缩略图"是同一个键 —— 队列页会显示成别的图，
+ * 或者明明有图却显示空白。
+ *
+ * 现在统一成：
+ *   fthumb:{结果id}  ffull:{结果id}  tthumb:{回收站id}
+ *   sthumb:{种子id}  vthumb:{变体id}
+ * 旧键（thumb:/full:/thumb:seed-）一律不再读取；升级时把 assets 清空重下。
+ * ------------------------------------------------------------------------- */
+const KEY = {
+  findingThumb: (id) => `fthumb:${id}`,
+  findingFull: (id) => `ffull:${id}`,
+  trashThumb: (id) => `tthumb:${id}`,
+  seedThumb: (id) => `sthumb:${id}`,
+  variantThumb: (id) => `vthumb:${id}`,
+};
 
 function db() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (event) => {
       const d = req.result;
       if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta', { keyPath: 'key' });
-      if (!d.objectStoreNames.contains('assets')) d.createObjectStore('assets', { keyPath: 'key' });
+      if (!d.objectStoreNames.contains('assets')) {
+        d.createObjectStore('assets', { keyPath: 'key' });
+      } else if (event.oldVersion < 2) {
+        // 1 → 2：旧键有歧义（结果/回收站/变体共用 `thumb:{id}`），可能已存成错图，
+        // 直接清空重下。图片本身在电脑上都在，重下一次就好，比留着一堆错图强。
+        req.transaction.objectStore('assets').clear();
+      }
       if (!d.objectStoreNames.contains('pending')) {
         d.createObjectStore('pending', { keyPath: 'key', autoIncrement: true });
       }
-      const findings = d.createObjectStore('findings', { keyPath: 'id' });
-      findings.createIndex('triage', 'triage');
-      findings.createIndex('status', 'status');
-      d.createObjectStore('trash', { keyPath: 'id' });
-      d.createObjectStore('archives', { keyPath: 'id' });
-      d.createObjectStore('jobs', { keyPath: 'id' });
-      d.createObjectStore('seeds', { keyPath: 'id' });
-      d.createObjectStore('variants', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('findings')) {
+        const findings = d.createObjectStore('findings', { keyPath: 'id' });
+        findings.createIndex('triage', 'triage');
+        findings.createIndex('status', 'status');
+      }
+      if (!d.objectStoreNames.contains('trash')) d.createObjectStore('trash', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('archives')) d.createObjectStore('archives', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('jobs')) d.createObjectStore('jobs', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('seeds')) d.createObjectStore('seeds', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('variants')) d.createObjectStore('variants', { keyPath: 'id' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -478,6 +507,15 @@ function db() {
   return dbPromise;
 }
 
+/**
+ * 在 IndexedDB 上跑一个操作并返回结果。
+ *
+ * 这里有一个踩过的坑（很隐蔽，影响面很大）：如果只监听 `transaction.oncomplete`，
+ * 用 `out.result` 取值，那么 **`get` 未命中时 `out.result` 是 `undefined`**，
+ * 于是 `resolve(out)` 会把 **IDBRequest 对象本身** 当成结果返回 —— 它是 truthy！
+ * 结果就是所有 `if (await local.get(...))` 都恒为真：图片缓存永远认为"已经存过了"，
+ * 一张都不会下载。所以单个请求必须按请求自身的 onsuccess 取值（未命中就是 undefined）。
+ */
 async function tx(store, mode, fn) {
   const d = await db();
   return new Promise((resolve, reject) => {
@@ -485,7 +523,13 @@ async function tx(store, mode, fn) {
     const s = t.objectStore(store);
     let out;
     try { out = fn(s); } catch (e) { reject(e); return; }
-    t.oncomplete = () => resolve(out && out.result !== undefined ? out.result : out);
+    if (out && typeof out === 'object' && 'onsuccess' in out) {
+      // 单个 IDBRequest（get/getAll/count/put/delete/clear）：按它自己的结果 resolve
+      out.onsuccess = () => resolve(out.result);
+      out.onerror = () => reject(out.error || t.error);
+      return;
+    }
+    t.oncomplete = () => resolve(out);
     t.onerror = () => reject(t.error);
     t.onabort = () => reject(t.error);
   });
@@ -500,19 +544,21 @@ const local = {
   del: (store, key) => tx(store, 'readwrite', (s) => s.delete(key)),
   deleteFinding: async (id) => {
     await local.del('findings', id);
-    await local.del('assets', `thumb:${id}`);
-    await local.del('assets', `full:${id}`);
+    await local.del('assets', KEY.findingThumb(id));
+    await local.del('assets', KEY.findingFull(id));
   },
 };
 
-/* 图片一律走 Blob 单独存：塞进快照 JSON 会让 IndexedDB 膨胀且无法按需取 */
-async function assetUrl(kind, id) {
-  const record = await local.get('assets', `${kind}:${id}`);
+/* 图片一律走 Blob 单独存：塞进快照 JSON 会让 IndexedDB 膨胀且无法按需取。
+   参数是**完整的键**（见上面的 KEY），不再由 kind+id 拼出来。 */
+async function assetUrl(key) {
+  if (!key) return '';
+  const record = await local.get('assets', key);
   return record && record.blob ? URL.createObjectURL(record.blob) : '';
 }
 
-async function storeBlob(kind, id, blob, meta = {}) {
-  await local.put('assets', { key: `${kind}:${id}`, blob, meta, at: Date.now() });
+async function storeBlob(key, blob, meta = {}) {
+  await local.put('assets', { key, blob, meta, at: Date.now() });
 }
 
 /* ---------------------------------------------------------------- 网络 */
@@ -543,25 +589,38 @@ async function checkOnline() {
 }
 
 /* ---------------------------------------------------------------- 快照 */
+/** 把快照里的相对地址拼成能 fetch 的地址。
+ *  两种形态：`media/thumbs/x.jpg`（媒体文件）与 `api/variant/12/thumb`（接口）。 */
 function relToMediaServer(rel) {
   if (!rel) return '';
-  return S.server.replace(/\/+$/, '') + '/media/' + String(rel).replace(/^\/+/, '').replace(/^media\//i, '');
+  const base = S.server.replace(/\/+$/, '');
+  const cleaned = String(rel).replace(/^\/+/, '');
+  if (/^api\//i.test(cleaned)) return `${base}/${cleaned}`;
+  return `${base}/media/` + cleaned.replace(/^media\//i, '');
+}
+
+/** 下载一张图并存进本地库（key 由调用方决定，见 KEY）。 */
+async function fetchInto(key, rel) {
+  if (!rel) return false;
+  if (await local.get('assets', key)) return false;
+  try {
+    const resp = await fetch(relToMediaServer(rel), { cache: 'force-cache' });
+    if (!resp.ok) return false;
+    const blob = await resp.blob();
+    if (!blob.size) return false;
+    await storeBlob(key, blob, { rel, kind: key.split(':')[0] });
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 async function downloadAsset(finding, mode) {
   if (mode === 'none') return;
-  const plan = mode === 'full' && finding.rel_path
-    ? [['full', finding.rel_path]]
-    : [['thumb', finding.thumb_path || finding.rel_path]];
-  for (const [kind, rel] of plan) {
-    if (!rel) continue;
-    const key = `${kind}:${finding.id}`;
-    if (await local.get('assets', key)) continue;
-    try {
-      const resp = await fetch(relToMediaServer(rel), { cache: 'force-cache' });
-      if (!resp.ok) continue;
-      await storeBlob(kind, finding.id, await resp.blob(), { rel, kind });
-    } catch (e) { /* 单张失败不影响整体同步 */ }
+  // 结果图：thumbs 档只存缩略图；full 档存原图（缩略图也留一份，列表页要用）
+  await fetchInto(KEY.findingThumb(finding.id), finding.thumb_path || finding.rel_path);
+  if (mode === 'full') {
+    await fetchInto(KEY.findingFull(finding.id), finding.rel_path);
   }
 }
 
@@ -599,16 +658,22 @@ async function syncSnapshot() {
         $('#syncNote').textContent = `下载图片 ${done}/${total}…`;
       }
     }
-    for (const row of snap.trash || []) await downloadAsset(row, mode);
-    // 种子缩略图也拉一份，队列页的变体缩略图离线时才显示得出来
+    for (const row of snap.trash || []) {
+      await fetchInto(KEY.trashThumb(row.id), row.thumb_path || row.rel_path);
+    }
+    // 种子缩略图（队列项的兜底图、以及种子池的样子都靠它）
     for (const seed of snap.seeds || []) {
-      if (!seed.thumb_path) continue;
-      const key = `thumb:seed-${seed.id}`;
-      if (await local.get('assets', key)) continue;
-      try {
-        const resp = await fetch(relToMediaServer(seed.thumb_path), { cache: 'force-cache' });
-        if (resp.ok) await storeBlob('thumb', `seed-${seed.id}`, await resp.blob(), { kind: 'seed' });
-      } catch (e) { /* 单张失败不影响整体 */ }
+      await fetchInto(KEY.seedThumb(seed.id), seed.thumb_path || seed.rel_path);
+    }
+    // 变体缩略图：队列页要显示"这一条派发的是哪个变体"。
+    // 只下载**队列里真正用到**的那些变体，避免给全部变体都下一遍。
+    const usedVariants = new Set();
+    for (const job of snap.jobs || []) {
+      if (job.variant_id) usedVariants.add(job.variant_id);
+    }
+    for (const variant of snap.variants || []) {
+      if (!usedVariants.has(variant.id)) continue;
+      await fetchInto(KEY.variantThumb(variant.id), variant.thumb || '');
     }
     await local.put('meta', { key: 'snapshot', value: {
       at: Date.now(), mode, limit, counts: snap.counts, stats: snap.stats, host: snap.host,
@@ -676,11 +741,20 @@ async function flushPending() {
 /* ---------------------------------------------------------------- 渲染：结果板 */
 function thumbSrcMap() { return S._thumbs || (S._thumbs = {}); }
 
-async function hydrateThumbs(rows, kind = 'thumb') {
+/** 每一类数据各自的图片键与地址字段。集中定义，避免到处拼键拼错。 */
+const THUMB_SPEC = {
+  finding: { key: (row) => KEY.findingThumb(row.id), rel: (row) => row.thumb_path || row.rel_path },
+  trash: { key: (row) => KEY.trashThumb(row.id), rel: (row) => row.thumb_path || row.rel_path },
+  seed: { key: (row) => KEY.seedThumb(row.id), rel: (row) => row.thumb_path || row.rel_path },
+  variant: { key: (row) => KEY.variantThumb(row.id), rel: (row) => row.thumb || '' },
+};
+
+async function hydrateThumbs(rows, kind = 'finding') {
+  const spec = THUMB_SPEC[kind] || THUMB_SPEC.finding;
   const map = thumbSrcMap();
   for (const row of rows) {
     if (map[row.id] !== undefined) continue;
-    map[row.id] = (await assetUrl(kind, row.id)) || '';
+    map[row.id] = (await assetUrl(spec.key(row))) || '';
   }
 }
 
@@ -689,19 +763,20 @@ async function hydrateThumbs(rows, kind = 'thumb') {
  *
  * 为什么必须有这个：图片是"同步时按需下载"的，而**回收站里的条目往往是之后才被清掉的**
  * —— 上一次同步时它们还不是回收站条目，缩略图就没下过。结果就是列表里一片空白
- * （用户反馈的"看图有点问题"）。
+ * （用户反馈的"看图有点问题"）。队列页同理：变体缩略图是后加的。
  *
  * 判定"缺图"只认本地库里有没有 Blob（assets 表），**不看内存里的 URL 映射** ——
  * 内存映射会因为 objectURL 失效、或刚清库而失真，用它当判据会漏掉该补的。
  */
-async function ensureThumbs(rows) {
+async function ensureThumbs(rows, kind = 'finding') {
   if (!rows || !rows.length || !S.server) return 0;
+  const spec = THUMB_SPEC[kind] || THUMB_SPEC.finding;
   const map = thumbSrcMap();
 
   // 1) 先把本地已有的填进内存映射（不发请求）
   for (const row of rows) {
     if (map[row.id]) continue;
-    const url = (await assetUrl('thumb', row.id)) || (await assetUrl('full', row.id));
+    const url = await assetUrl(spec.key(row));
     if (url) map[row.id] = url;
   }
 
@@ -709,11 +784,7 @@ async function ensureThumbs(rows) {
   const missing = [];
   for (const row of rows) {
     if (map[row.id]) continue;
-    if (await local.get('assets', `thumb:${row.id}`)) {
-      const url = (await assetUrl('thumb', row.id)) || '';
-      if (url) { map[row.id] = url; continue; }
-    }
-    if (!row.thumb_path && !row.rel_path) continue;
+    if (!spec.rel(row)) continue;
     missing.push(row);
   }
   if (!missing.length) return 0;
@@ -722,13 +793,13 @@ async function ensureThumbs(rows) {
   //    （探测到过：快照明明拉下来了 S.online 仍是 false，结果一张都没补）。
   let got = 0;
   for (const row of missing) {
-    const rel = row.thumb_path || row.rel_path;
+    const rel = spec.rel(row);
     try {
       const resp = await fetch(relToMediaServer(rel), { cache: 'force-cache' });
       if (!resp.ok) continue;
       const blob = await resp.blob();
       if (!blob.size) continue;
-      await storeBlob('thumb', row.id, blob, { rel, kind: 'thumb' });
+      await storeBlob(spec.key(row), blob, { rel, kind });
       map[row.id] = URL.createObjectURL(blob);
       got += 1;
     } catch (e) { /* 单张失败不影响其它 */ }
@@ -742,6 +813,16 @@ function paintThumbs(rootSelector) {
   $$(`${rootSelector} [data-want-thumb]`).forEach((img) => {
     const id = Number(img.getAttribute('data-want-thumb'));
     if (map[id]) img.src = map[id];
+  });
+}
+
+/** 队列卡片同理（按 job id 索引）。 */
+function paintJobThumbs() {
+  const map = thumbSrcMap();
+  $$('#queueList [data-want-job-thumb]').forEach((img) => {
+    const id = Number(img.getAttribute('data-want-job-thumb'));
+    const src = map[`job:${id}`];
+    if (src) img.src = src;
   });
 }
 
@@ -887,7 +968,10 @@ async function openDetail(id) {
       }
     } catch (e) { /* 取不到就退回"N 源"的显示 */ }
   }
-  const full = (await assetUrl('full', id)) || (await assetUrl('thumb', id));
+  // full 档优先用原图，没有就退到缩略图（两种都在本地或都没有）
+  const full = (await assetUrl(KEY.findingFull(id)))
+    || (await assetUrl(KEY.findingThumb(id)))
+    || (await assetUrl(KEY.trashThumb(id)));
   const chain = await buildLocalChain(f);
   const sources = Array.isArray(f.sources) ? (f.sources.map((s) => `
     <div class="src">
@@ -1021,7 +1105,8 @@ function renderQueue() {
     const thumb = thumbSrcMap()[`job:${j.id}`] || '';
     const browser = j.engine === 'baidu' || j.engine === 'so360';
     return `<div class="job">
-      ${thumb ? `<img src="${thumb}" alt="">` : '<img alt="" style="opacity:.25">'}
+      ${thumb ? `<img src="${thumb}" alt="">`
+        : `<img alt="" style="opacity:.25" data-want-job-thumb="${j.id}">`}
       <div>
         <div class="t1">${esc(j.engine_name || j.engine)} · ${esc(j.variant_label || j.variant_kind || '')}
           <span class="st ${j.status}">${STATUS[j.status] || j.status}</span>
@@ -1038,6 +1123,18 @@ function renderQueue() {
       </div>
     </div>`;
   }).join('') || '<div class="empty">这个筛选下没有队列项</div>';
+
+  // 先画已有的，再补缺的（只补当前显示出来的这些，几百条不必全下）
+  hydrateJobThumbs(rows).then(() => {
+    paintJobThumbs();
+    const missing = rows.filter((j) => !thumbSrcMap()[`job:${j.id}`]);
+    if (missing.length) {
+      ensureJobThumbs(missing).then((n) => {
+        paintJobThumbs();
+        if (n) console.log(`[vsw] 补齐了 ${n} 张队列缩略图`);
+      });
+    }
+  });
 
   $$('#queueList [data-act]').forEach((btn) => {
     btn.onclick = async () => {
@@ -1058,17 +1155,35 @@ function renderQueue() {
   hydrateJobThumbs(rows);
 }
 
+/**
+ * 队列项的缩略图：优先变体自己的小图（这才看得出"这一条派发的是哪个变体"），
+ * 没有就退回种子缩略图；都没有就先占位，等补图。
+ *
+ * 修过的真 bug：原来键写作 `thumb:{变体id}`，而结果/回收站/变体三张表 id 大量重号
+ * （实测结果↔变体重叠 39 个、回收站↔变体重叠 99 个），于是队列里会显示成**别的图**
+ * 或者空白。现在键带命名空间（见 KEY），互不干扰。
+ */
+async function resolveJobThumb(job) {
+  const variantKey = job.variant_id ? KEY.variantThumb(job.variant_id) : '';
+  if (variantKey) {
+    const url = await assetUrl(variantKey);
+    if (url) return { url, key: variantKey };
+  }
+  if (job.seed_id) {
+    const seedKey = KEY.seedThumb(job.seed_id);
+    const url = await assetUrl(seedKey);
+    if (url) return { url, key: seedKey };
+  }
+  return { url: '', key: '' };
+}
+
 async function hydrateJobThumbs(rows) {
   const map = thumbSrcMap();
   let changed = false;
   for (const j of rows) {
     const key = `job:${j.id}`;
     if (map[key] !== undefined) continue;
-    // 队列项的缩略图优先用变体自己的（如果同步时带下来了），否则退回种子缩略图
-    const variant = S.variants.find((v) => v.id === j.variant_id);
-    let source = variant ? await assetUrl('thumb', variant.id) : '';
-    if (!source && j.seed_id) source = await assetUrl('thumb', `seed-${j.seed_id}`);
-    map[key] = source || '';
+    map[key] = (await resolveJobThumb(j)).url || '';
     changed = true;
   }
   if (changed && rows.length) {
@@ -1082,6 +1197,29 @@ async function hydrateJobThumbs(rows) {
       if (img && src) img.src = src;
     });
   }
+}
+
+/** 队列页的补图：变体图缺就补变体图，变体也没有就补种子图。 */
+async function ensureJobThumbs(rows) {
+  if (!rows || !rows.length || !S.server) return 0;
+  const map = thumbSrcMap();
+  let got = 0;
+  for (const j of rows) {
+    if (map[`job:${j.id}`]) continue;
+    const variant = S.variants.find((v) => v.id === j.variant_id);
+    const seed = S.seeds.find((s) => s.id === j.seed_id);
+    let filled = false;
+    if (variant && variant.thumb) {
+      filled = await fetchInto(KEY.variantThumb(variant.id), variant.thumb);
+    }
+    if (!filled && seed && (seed.thumb_path || seed.rel_path)) {
+      filled = await fetchInto(KEY.seedThumb(seed.id), seed.thumb_path || seed.rel_path);
+    }
+    const resolved = await resolveJobThumb(j);
+    map[`job:${j.id}`] = resolved.url || '';
+    if (resolved.url) got += 1;
+  }
+  return got;
 }
 
 /* ---------------------------------------------------------------- 归档 / 回收站 */
@@ -1707,8 +1845,9 @@ async function exportDataset() {
                     jobs: S.jobs, seeds: S.seeds, variants: S.variants, assets: [] };
   const assets = await local.all('assets');
   for (const record of assets) {
-    // 缩略图一起带上（离线看图全靠它）；原图体积太大，留给同步
-    if (!record.key.startsWith('thumb:')) continue;
+    // 缩略图一起带上（离线看图全靠它）；原图体积太大，留给同步。
+    // 键有命名空间：fthumb:/tthumb:/sthumb:/vthumb:，原图是 ffull:。
+    if (!/^(fthumb|tthumb|sthumb|vthumb):/.test(record.key)) continue;
     payload.assets.push({ key: record.key, data_url: await blobToDataUrl(record.blob) });
   }
   const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
@@ -1801,8 +1940,8 @@ async function loadLocal() {
   S.variants = await local.all('variants');
   S.selection.clear();
   S._thumbs = {};
-  await hydrateThumbs(S.findings, 'thumb');
-  await hydrateThumbs(S.trash, 'thumb');
+  await hydrateThumbs(S.findings, 'finding');
+  await hydrateThumbs(S.trash, 'trash');
   const snap = await local.get('meta', 'snapshot');
   S.snap = snap ? snap.value : null;
   await refreshPending();
@@ -1813,13 +1952,10 @@ async function loadLocal() {
   // 放在这里而不是"切到某个标签页时"：图片缺不缺和用户切到哪一页无关，而 loadLocal
   // 是数据进内存的唯一入口（启动、同步完成、导入数据集都会走它）。
   Promise.resolve()
-    .then(() => ensureThumbs(S.findings))
-    .then(() => ensureThumbs(S.trash))
-    .then((filled) => {
-      paintThumbs('#boardList');
-      paintThumbs('#trashList');
-      if (filled) console.log(`[vsw] 补齐了 ${filled} 张本地缺失的缩略图`);
-    })
+    .then(() => ensureThumbs(S.findings, 'finding'))
+    .then(() => ensureThumbs(S.trash, 'trash'))
+    .then(() => ensureThumbs(S.seeds, 'seed'))
+    .then(() => paintThumbs('#boardList') || paintThumbs('#trashList'))
     .catch(() => { /* 离线或没有可补的图时静默跳过 */ });
 }
 
