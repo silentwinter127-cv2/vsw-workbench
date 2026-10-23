@@ -2103,10 +2103,13 @@ function shareLinksHtml(info, code) {
   (share.desktop || []).forEach((u) => add('电脑上打开', u));
   (share.phone || []).forEach((u) => add('手机上打开', u));
   if (!rows.length) rows.push('<div class="meta">还不知道本机的局域网地址，先确认服务在跑。</div>');
+  const locked = !!(info && info.enabled);
   if (code) {
-    rows.unshift(`<div class="hint small">下面这些链接里带着密钥，点开就能进，不用再手打。</div>`);
+    rows.unshift('<div class="hint small">下面这些链接里带着密钥，点开就能进，不用再手打 —— 别发到公开群里。</div>');
+  } else if (!locked) {
+    rows.unshift('<div class="hint small">现在没上锁，谁拿到这个地址都能直接用；要分人用就先建账号。</div>');
   } else {
-    rows.unshift(`<div class="hint small">这是给已登录的人用的地址 —— 别人打开要手打自己的密钥。</div>`);
+    rows.unshift('<div class="hint small">这是地址 —— 对方打开还要自己登录或手打密钥。</div>');
   }
   return rows.join('');
 }
@@ -2116,7 +2119,7 @@ function renderShare(info) {
   const roles = (info && info.roles) || [];
   const who = info && info.enabled
     ? `${roleBadge(me.role, me.label || '未知')} <span class="meta">${esc((roles.find((r) => r.role === me.role) || {}).note || '')}</span>`
-    : '<span class="meta">这个工作台现在没上锁：同一网络里的人都能读写。</span>';
+    : '<span class="meta">没上锁 —— 同一网络里的人都能读写。</span>';
   const noAccounts = !!(ME && ME.accounts === false && ME.can_setup);
   $('#shareMe').innerHTML = `
     <div class="memrow">
