@@ -886,6 +886,39 @@ class Store:
         row = self.one("SELECT * FROM archive_runs WHERE id=?", (int(archive_id),))
         return self._row_to_dict(row) if row else None
 
+    def archive_live_counts(self) -> Dict[int, Dict[str, int]]:
+        """按当前成员对象重算每个批次的 对象/来源/平台 数。
+
+        `archive_runs` 里存的是**归档那一刻**的快照。老批次（尤其是早期版本写进去的）
+        存的是 `sources=0, platforms=0`，于是归档表上明明有 11 个对象却写着"0 条来源"。
+        归档表要么显示真数，要么就别显示这一列 —— 这里从成员对象现算。
+
+        - `findings` 只数未进回收站的（和 `archive_stats()` 口径一致）；
+        - `findings_all` 连回收站一起数（批次卡上写「N 个在归档 · M 个在回收站」要用）；
+        - `sources` 是来源记录行数（一个对象可以被多个引擎/关键词命中，一次命中也可能多条 URL）。
+        """
+        rows = self.query(
+            """SELECT f.archive_id AS aid,
+                      COUNT(DISTINCT CASE WHEN COALESCE(f.trashed,0)=0 THEN f.id END) AS live,
+                      COUNT(DISTINCT f.id) AS all_n,
+                      COUNT(s.id) AS sources,
+                      COUNT(DISTINCT COALESCE(NULLIF(s.platform,''), '(未识别)')) AS platforms
+                 FROM findings f LEFT JOIN sources s ON s.finding_id=f.id
+                WHERE COALESCE(f.archive_id,0)>0 AND COALESCE(f.archived_at,0)>0
+                  AND COALESCE(f.dup_of,0)=0
+                GROUP BY f.archive_id""")
+        out: Dict[int, Dict[str, int]] = {}
+        for row in rows:
+            data = self._row_to_dict(row) or {}
+            aid = int(data.get("aid") or 0)
+            if aid <= 0:
+                continue
+            out[aid] = {"findings": int(data.get("live") or 0),
+                        "findings_all": int(data.get("all_n") or 0),
+                        "sources": int(data.get("sources") or 0),
+                        "platforms": int(data.get("platforms") or 0)}
+        return out
+
     def unarchive(self, *, archive_id: Optional[int] = None) -> List[int]:
         if archive_id:
             rows = self.query("SELECT id FROM findings WHERE archive_id=?", (int(archive_id),))

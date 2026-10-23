@@ -165,6 +165,42 @@ async function main() {
           JSON.stringify(synced && { archivedLocal: synced.archivedLocal }));
     check('归档批次列表非空', synced && synced.batches > 0, String(synced && synced.batches));
 
+    // 批次卡上的「来源/平台」必须是按成员对象现算的，不是存档那一刻的快照。
+    // 老版本把 sources=0 写进了 archive_runs，于是归档表上 11 个对象却写着"0 条来源"。
+    const liveCounts = await evaluate(`(async () => {
+      switchTab('archive');
+      await new Promise((r) => setTimeout(r, 1200));
+      const out = [];
+      const withItems = S.archives.filter((a) => (a.findings || 0) > 0).slice(0, 4);
+      for (const a of withItems) {
+        const res = await api('/api/archive/' + a.id + '?limit=400');
+        const items = (res && (res.findings || res.items)) || [];
+        const sources = items.reduce((sum, f) => sum + ((f.sources || []).length), 0);
+        out.push({ id: a.id, listSources: a.sources, detailSources: sources,
+                   listFindings: a.findings, empty: a.empty === true });
+      }
+      const empties = S.archives.filter((a) => a.empty === true);
+      const cards = Array.from(document.querySelectorAll('#archiveList .card'));
+      const marked = cards.filter((c) => c.textContent.includes('空批次')).length;
+      return {
+        rows: out,
+        mismatch: out.filter((r) => r.listSources !== r.detailSources).length,
+        emptyCount: empties.length,
+        emptySane: empties.every((a) => (a.findings || 0) === 0 && (a.sources || 0) === 0),
+        emptyMarked: marked,
+        cards: cards.length,
+      };
+    })()`);
+    console.log(`      （现算对照：${JSON.stringify(liveCounts && liveCounts.rows)}）`);
+    check('批次卡上的「来源」数是按成员对象现算的（不是存档时写死的旧数字）',
+          liveCounts && liveCounts.rows.length > 0 && liveCounts.mismatch === 0,
+          JSON.stringify(liveCounts));
+    check('成员对象已经不在的批次不显示旧数字（findings/sources 归零并标空批次）',
+          liveCounts && liveCounts.emptySane
+            && (liveCounts.emptyCount === 0 || liveCounts.emptyMarked === liveCounts.emptyCount),
+          JSON.stringify(liveCounts && { emptyCount: liveCounts.emptyCount,
+                                         marked: liveCounts.emptyMarked, cards: liveCounts.cards }));
+
     // 挑一个**确实有内容**的批次来验（库里可能有些批次的对象后来被恢复/清理了）
     const picked = await evaluate(`(async () => {
       const counts = {};

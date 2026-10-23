@@ -88,7 +88,7 @@ node ../scripts/vsw-probe-queue-thumbs.js --apk ../vsw-workbench.apk --origin ht
 # 6) 队列筛选与删除：自造测试数据，验完删掉（14 项）
 node ../scripts/vsw-probe-queue-filter.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
 
-# 7) 归档查看与归档文件夹（18 项）
+# 7) 归档查看与归档文件夹 + 批次计数现算（20 项）
 node ../scripts/vsw-probe-archive-view.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
 
 # 8) 合并归档相册：跨批次去重/排序/打包 + 手机与桌面两处入口（40 项）
@@ -303,7 +303,7 @@ APK 侧：
 - `Access-Control-Expose-Headers` 暴露 `Content-Length` / `Content-Disposition` 给跨源页面；
 - zip 文件名用 RFC 5987 编码（HTTP 头只能是 latin-1，直接写中文会让发头时崩掉）。
 
-### 合并归档相册（r11）
+### 合并归档相册（r11 / r12 修计数）
 
 用户要的是「把几个归档批次合成一个相册看」。这是**视图合并**：不改数据库里的批次归属
 （批次记的是"当时为什么留下它"），只是把几批的图放到一起，跨批次按 id 去重、按发散度降序。
@@ -327,6 +327,29 @@ APK 侧：
 `scripts/vsw-probe-archive-merge.js`（40 项）把这条链路整个验一遍：服务端去重/排序/计数自洽、
 zip 里能解出 manifest 且记着合并了哪些批次、单批 zip 与 HEAD 回归、手机端勾选→合并查看→
 保存 zip 的地址、桌面端合并板条数与服务端一致。
+
+### 归档表的数字改成现算（r12）
+
+真机/桌面截图里，归档表明明「对象 11」，同一行却写着「0 条来源记录」，来源列与平台列也都是 0。
+
+根因是 `archive_runs` 存的是**归档那一刻的快照**，而早期版本算 `preview` 时没带来源
+（`store.finding()` 单条查询，不 attach `sources`），于是把 `sources=0, platforms=0` 写进了库。
+归档之后又在回收站里搬来搬去，快照里的数只会越来越离谱。
+
+改法（`store.archive_live_counts()` + `service.archives()`）：
+
+- 归档表的 对象/来源/平台 **按当前成员对象重算**，不再显示快照；快照原值保留在
+  `findings_snapshot` / `sources_snapshot` / `platforms_snapshot` 里备查；
+- 另给 `findings_all` 与 `trashed`，界面上写成「对象 5（+6 回收站）」；
+- 批次记录还在、但成员对象已经不在的（被恢复归档或删除）标成**空批次**，
+  数字归零而不是继续骗人；早期自动生成的备注文案也按现算重写（用户自己写的备注不动）；
+- 手机端快照的 `archives` 走同一个函数，所以手机上的批次卡数字也一起对了。
+
+统计 SQL 有个坑：`LEFT JOIN sources` 会把一行对象乘成 N 行，用 `COUNT(*)` 数出来的是
+"对象×来源数"。必须 `COUNT(DISTINCT f.id)`（在线数据里这个错让 #24 从 11 个对象变成 22 个）。
+
+`scripts/vsw-probe-archive-view.js` 加了 2 项回归：批次卡上的来源数必须等于详情里逐条来源之和；
+空批次的数字必须归零且卡上有「空批次」字样（现在是 20 项）。
 
 ### ⚠ 还没验证到的（真机才能确认）
 

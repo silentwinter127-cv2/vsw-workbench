@@ -1729,8 +1729,8 @@ function renderArchive() {
         </label>
         <b>${esc(a.name)}</b><div class="spacer"></div>
         <span class="small">${new Date((a.created_at || 0) * 1000).toLocaleDateString('zh-CN')}</span></div>
-      <div class="small">对象 ${a.findings} · 来源 ${a.sources} · 平台 ${a.platforms} ·
-        ${esc(a.date_from || '-')} ~ ${esc(a.date_to || '-')}</div>
+      <div class="small">对象 ${a.findings}${a.trashed ? `（+${a.trashed} 回收站）` : ''} · 来源 ${a.sources} · 平台 ${a.platforms} ·
+        ${esc(a.date_from || '-')} ~ ${esc(a.date_to || '-')}${a.empty ? ' · <b style="color:#ffb020">空批次</b>' : ''}</div>
       ${a.note ? `<div class="small">${esc(a.note)}</div>` : ''}
       <div class="row tight" style="margin-top:8px">
         <button class="btn sm primary" data-open="${a.id}">查看（${items.length}）</button>

@@ -364,3 +364,13 @@ canvas#graph { display: block; width: 100%; height: 62vh; cursor: grab; }
 .scroll { max-height: 60vh; overflow: auto; }
 .table-wrap { max-height: 46vh; overflow: auto; }
 .nowrap { white-space: nowrap; }
+
+/* 归档批次记录还在、但对象已经不在了（被恢复归档或删除）——别显示存档时的旧数字 */
+.empty-tag{display:inline-block;margin-left:6px;padding:0 6px;border-radius:6px;
+  font-size:11px;line-height:18px;color:#ffb020;background:rgba(255,176,32,.14);
+  border:1px solid rgba(255,176,32,.35)}
+table.matrix tr.is-empty td{opacity:.55}
+
+/* 归档表「对象」列：5 / +6 回收站 —— 别让那句小字被挤成三行 */
+table.matrix td.num{white-space:nowrap}
+table.matrix td.num .small{font-size:11px;opacity:.75;margin-top:2px}

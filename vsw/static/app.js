@@ -1283,11 +1283,11 @@ async function loadArchives() {
       ? Object.entries(triage).map(([k, v]) => `${TRIAGE_SHORT[k] || k} ${v}`).join(' · ')
       : '-';
     const picked = S.archivesPicked.has(Number(a.id));
-    return `<tr data-row="${a.id}" class="${picked ? 'is-picked' : ''}">
+    return `<tr data-row="${a.id}" class="${picked ? 'is-picked' : ''}${a.empty ? ' is-empty' : ''}">
       <td class="pick"><input type="checkbox" class="archpick" data-id="${a.id}"${picked ? ' checked' : ''}></td>
-      <td><b>${esc(a.name)}</b>${a.note ? `<div class="small">${esc(a.note)}</div>` : ''}</td>
+      <td><b>${esc(a.name)}</b>${a.empty ? '<span class="empty-tag">空批次</span>' : ''}${a.note ? `<div class="small">${esc(a.note)}</div>` : ''}</td>
       <td class="small">${esc(new Date((a.created_at || 0) * 1000).toLocaleString('zh-CN'))}</td>
-      <td class="num">${a.findings}</td>
+      <td class="num">${a.findings}${a.trashed ? `<div class="small">+${a.trashed} 回收站</div>` : ''}</td>
       <td class="num">${a.sources}</td>
       <td class="num">${a.platforms}</td>
       <td class="small">${esc(dist)}</td>

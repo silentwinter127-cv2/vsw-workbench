@@ -1772,7 +1772,7 @@ class Workbench:
             "variants": variants,
             "findings": findings,
             "jobs": jobs,
-            "archives": store.archive_runs() if include_archives else [],
+            "archives": self.archives()["archives"] if include_archives else [],
             "archive_stats": store.archive_stats() if include_archives else {},
             "platforms": store.platform_counts(),
             "settings": {
@@ -1972,6 +1972,38 @@ class Workbench:
 
     def archives(self) -> Dict[str, Any]:
         runs = self.store.archive_runs()
+        # 批次记录里的 对象/来源/平台 是归档那一刻的快照（老批次甚至是 0）。
+        # 归档表要显示的是"这批东西现在是什么样"，所以按成员对象重算后覆盖。
+        live = self.store.archive_live_counts()
+        auto_note = re.compile(r"^归档 \d+ 个视觉对象 / \d+ 条来源记录$")
+        for run in runs:
+            counts = live.get(int(run.get("id") or 0))
+            run["findings_snapshot"] = run.get("findings")
+            run["sources_snapshot"] = run.get("sources")
+            run["platforms_snapshot"] = run.get("platforms")
+            if not counts:
+                # 批次记录还在、但成员对象已经不在了（被恢复归档或删掉了）。
+                # 显示"存档那一刻的 20 个对象"是骗人的，如实显示 0 并标为空批次。
+                run["findings"] = 0
+                run["findings_all"] = 0
+                run["trashed"] = 0
+                run["sources"] = 0
+                run["platforms"] = 0
+                run["empty"] = True
+                if auto_note.match(str(run.get("note") or "")):
+                    run["note"] = "这个批次里的对象已经不在了（被恢复归档或删除）"
+                continue
+            run["findings"] = counts["findings"]
+            run["findings_all"] = counts["findings_all"]
+            run["trashed"] = max(0, counts["findings_all"] - counts["findings"])
+            run["sources"] = counts["sources"]
+            run["platforms"] = counts["platforms"]
+            run["empty"] = False
+            # 早期版本自动生成的备注里写死了当时的（错误的）数字，显示时按现算重写；
+            # 用户自己敲的备注一律不动。
+            if auto_note.match(str(run.get("note") or "")):
+                run["note"] = (f"归档 {counts['findings_all']} 个视觉对象 / "
+                               f"{counts['sources']} 条来源记录")
         return {"archives": runs, "current": self.store.archive_stats(),
                 "total": len(runs)}
 
