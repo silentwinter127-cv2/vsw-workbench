@@ -80,6 +80,58 @@ POST /api/archive/merge/export {"ids":[24,23]} # 合并导出文件夹
 > "对象 × 来源数"。必须用 `COUNT(DISTINCT f.id)` —— 在线数据里这个错让批次 #24
 > 从 11 个对象变成 22 个。
 
+## 账号、私人工作区与协作
+
+默认和以前一样：本机打开就能用，局域网里的人也能读写。要分人用，就在页面上建第一个账号
+（右上角「共享 / 账号」→「建第一个账号」，**只有在跑服务的那台电脑上才能建**）。
+
+### 一个工作区 = 一个数据目录
+
+私人工作区不是"同一张表加个 owner_id 过滤"，而是**物理隔离**：每个工作区有自己的
+`workbench.sqlite3`、`media/`、`archives/`，连访客密钥库都是各自的。
+
+```
+vsw/data/                     ← 第一个账号（主人）的工作区，老数据原地留下
+  workbench.sqlite3
+  auth.sqlite3                ← 账号、工作区、成员、会话、邀请码（全局一份）
+  ws/2-阿乙的工作区/           ← 后来新建的工作区
+    workbench.sqlite3
+    media/
+```
+
+切工作区只换 `X-VSW-Workspace` / `vsw_ws` cookie，服务端按工作区把请求绑到对应实例，
+互不可见。协作 = 被加进同一个工作区，看到的是同一份数据。
+
+### 三种角色，谁都不能越界
+
+| 角色 | 能做什么 |
+| --- | --- |
+| 主人 | 全部权限：管成员、发邀请码、改阈值、彻底删除、清空队列 |
+| 可操作 | 搜索、导入、归档、移入回收站；不能改全局设置、不能彻底删 |
+| 只看 | 只读，连移入回收站都不行 |
+
+### 邀请码：注册不开放
+
+`INV-XXXX-XXXX-XXXX`，一次性、带有效期（默认 3 天）、**不能直接发「主人」**——
+先让别人以「可操作」进来，需要的话再在成员列表里升级。这样"邀请"不会变成"交出钥匙"。
+
+### 访客密钥（降级保留）
+
+没有账号、只想给朋友看一会儿的场景仍然可用：`VSW-XXXX-XXXX-XXXX`，分
+主人 / 可操作 / 只看三种，库里只存加盐哈希，明文只在生成那一刻显示一次。
+密钥是**工作区局部**的，而且访客密钥进不了账号接口（403）。
+
+```bash
+python -m vsw.server --root vsw/data --protect     # 上锁并生成第一把主人密钥
+python -m vsw.server --root vsw/data --unprotect   # 关掉密钥闸门
+```
+
+### 手机与 APK 怎么带身份
+
+手机端页面在 APK 里是 `file://`，浏览器不会替它带 cookie，所以登录后除了 cookie 还会存一份
+令牌，走请求头 `X-VSW-Session`（同样认 `Authorization: Bearer`）。访客密钥走
+`X-VSW-Key` 或链接上的 `?key=`——`<img>` 带不了请求头，分享链接是必要的退路。
+
 ## 快速开始
 
 ```bat
@@ -90,6 +142,9 @@ start_vsw.bat
 ```bash
 # 或手动
 python -m vsw.server --root vsw/data --host 127.0.0.1 --port 8799
+
+# 想给人用：绑 0.0.0.0 并上锁（会打印第一把主人密钥）
+python -m vsw.server --root vsw/data --host 0.0.0.0 --port 8799 --protect
 ```
 
 依赖：Python 3.10+、`Pillow`、`numpy`、`requests`；
@@ -128,6 +183,13 @@ python scripts/vsw-check-syntax.py                                            # 
 `vsw-probe-import-queue.js`、`-queue-filter.js`、`-queue-thumbs.js`、`-trash-thumbs.js`、
 `-archive-view.js`、`-archive-merge.js`。
 
+权限与账号是服务端语义，各有独立探针（自建临时数据目录 + 临时密钥库，在随机端口上跑真服务）：
+
+```bash
+python scripts/vsw-probe-access.py      # 45 项：密钥、角色分级、限速、页面壳子免检
+python scripts/vsw-probe-accounts.py    # 58 项：建号、邀请码、工作区隔离、协作、会话头
+```
+
 ## 仓库结构
 
 ```
@@ -137,7 +199,10 @@ vsw/                  桌面工作台 + 手机端页面（同一份手机页面�
   store.py            SQLite：seeds/variants/jobs/sources/findings/clusters/ledger/settings
   engines.py          外部引擎定义（入口/选择器/提取脚本）、结果页解析、平台与可信度判定
   service.py          闭环：入库 → 变体 → 队列 → 检索 → 三层去重 → 聚类 → 排序 → 回流 → 图谱
-  server.py           纯标准库 HTTP 服务：JSON API + 单页 UI + 媒体服务 + 手机端接口
+  server.py           纯标准库 HTTP 服务：JSON API + 单页 UI + 媒体服务 + 手机端接口 + 身份闸门
+  accounts.py         账号 / 工作区 / 成员 / 会话 / 邀请码（auth.sqlite3，PBKDF2 口令哈希）
+  hub.py              工作区句柄表：一个工作区 = 一个数据目录，按请求绑定
+  access.py           访客密钥：加盐哈希、角色、失败限速
   static/             桌面端 index.html / app.css / app.js（无框架）
   static/mobile/      手机端 PWA（单文件内联全部代码）+ manifest + service worker
   cdp_driver.js       无头 Chromium + CDP 驱动：上传变体 → 等结果 → 提取结构化 JSON

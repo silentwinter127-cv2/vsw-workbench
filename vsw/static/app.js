@@ -55,7 +55,17 @@ async function api(path, options = {}) {
   let data = null;
   try { data = await resp.json(); } catch (e) { data = null; }
   if (!resp.ok) {
+    // 没登录/没密钥时 401 是常态：弹登录卡，别用红条刷屏。
+    if (resp.status === 401 && data && (data.need_login || data.need_key)) {
+      showAuth(data.can_setup ? 'setup' : 'login', data.error || '');
+      throw new Error(data.need_login ? '需要登录' : '需要访问密钥');
+    }
+    if (resp.status === 429) {
+      toast((data && data.error) || '试错太多次了，等一会儿再试', true);
+      throw new Error('被限速了');
+    }
     const msg = (data && (data.error || data.message)) || `HTTP ${resp.status}`;
+    if (resp.status === 403) toast(msg, true);
     throw new Error(msg);
   }
   return data;
@@ -1252,6 +1262,14 @@ function fmtBytes(bytes) {
   return `${n} B`;
 }
 
+function fmtDate(ts) {
+  const t = Number(ts || 0);
+  if (!t) return '—';
+  const d = new Date(t * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 async function loadArchives() {
   const data = await api('/api/archives');
   const selected = Array.from(S.selectedFindings);
@@ -1803,11 +1821,642 @@ async function refreshHealth() {
   renderHealth();
 }
 
+// ------------------------------------------------------------ 访问密钥（共享）
+// 三种角色：主人能管密钥和删文件，可操作能搜能归档，只看只能读。
+// 页面壳子是公开的（解锁框得先能显示），数据全在 /api 与 /media 后面。
+let ACCESS = null;
+let ME = null;                 // /api/auth 返回的身份
+let AUTH_ON = false;           // 这台机器开没开账号
+
+function authMode(mode) {
+  const layer = $('#authLayer');
+  if (!layer) return;
+  layer.hidden = false;
+  const setup = $('#authSetup');
+  const login = $('#authLogin');
+  const title = $('#authTitle');
+  const hint = $('#authHint');
+  if (setup) setup.hidden = mode !== 'setup';
+  if (login) login.hidden = mode !== 'login';
+  if (mode === 'setup') {
+    if (title) title.textContent = '建第一个账号';
+    if (hint) hint.textContent = '这台机器还没有账号。你建的这个就是主人，现在这份数据会归到你的私人工作区。';
+    const name = $('#setupName');
+    if (name) setTimeout(() => name.focus(), 30);
+  } else {
+    if (title) title.textContent = AUTH_ON ? '登录' : '这个工作台上锁了';
+    if (hint) hint.textContent = AUTH_ON
+      ? '用你的账号进来。每人有自己的私人工作区，也能进别人邀请你协作的工作区。'
+      : '输入主人给你的访问密钥，形如 VSW-XXXX-XXXX-XXXX。大小写、空格都不敏感。';
+  }
+}
+
+function showAuth(mode, msg) {
+  authMode(mode || (AUTH_ON ? 'login' : 'login'));
+  const err = $('#authErr');
+  if (err) err.textContent = msg || '';
+  const lockErr = $('#lockErr');
+  if (lockErr && msg && mode === 'login') lockErr.textContent = '';
+}
+
+function hideAuth() {
+  const layer = $('#authLayer');
+  if (layer) layer.hidden = true;
+}
+
+function applyMe(me) {
+  ME = me || null;
+  AUTH_ON = !!(me && me.accounts);
+  const btn = $('#userBtn');
+  if (!btn) return;
+  if (!me || !me.logged_in) { btn.hidden = true; btn.textContent = ''; return; }
+  const user = me.user || {};
+  const ws = me.workspace || {};
+  btn.hidden = false;
+  btn.innerHTML = `👤 ${esc(user.name || '')}<span class="wsname">${esc(ws.name || '')}</span>`;
+  btn.title = `${user.name || ''} · ${ws.name || ''}（${me.role_label || ''}）\n点这里换工作区 / 改密码 / 退出`;
+}
+
+async function bootAuth() {
+  let me = null;
+  try { me = await fetch('/api/auth').then((r) => r.json()); } catch (e) { return true; }
+  AUTH_ON = !!(me && me.accounts);
+  ME = me || null;
+  const btn = $('#userBtn');
+  if (!AUTH_ON) {           // 还没建账号：跟以前一模一样，谁打开都能用
+    if (btn) btn.hidden = true;
+    hideAuth();
+    return true;
+  }
+  if (!me.logged_in) {
+    showAuth(me.can_setup ? 'setup' : 'login', '');
+    return false;
+  }
+  applyMe(me);
+  return true;
+}
+
+// ------------------------------------------------------------ 工作区面板
+function renderWs() {
+  const me = ME || {};
+  const ws = me.workspace || {};
+  const badge = roleBadge(me.role, me.role_label || '');
+  $('#wsMe').innerHTML = `${esc((me.user || {}).name || '')} ${badge}
+    <div class="meta">现在在「${esc(ws.name || '')}」· ${esc(me.role_label || '')}</div>`;
+  const list = $('#wsList');
+  const items = me.workspaces || [];
+  if (!items.length) {
+    list.innerHTML = '<div class="meta">你还没有工作区。</div>';
+  } else {
+    list.innerHTML = items.map((w) => `
+      <div class="keyrow ${w.id === ws.id ? 'is-current' : ''}" data-ws="${w.id}">
+        <div class="who">
+          <b>${esc(w.name || '')}</b> ${roleBadge(w.role, w.role_label || w.role)}
+          <div class="meta">${w.kind === 'personal' ? '私人' : '共享'} · ${w.members || 1} 人</div>
+        </div>
+        <div class="acts">
+          ${w.id === ws.id
+            ? '<span class="meta">当前</span>'
+            : `<button class="btn ghost" data-open="${w.id}">进入</button>`}
+        </div>
+      </div>`).join('');
+    list.querySelectorAll('[data-open]').forEach((b) => {
+      b.onclick = () => switchWs(Number(b.dataset.open));
+    });
+  }
+}
+
+async function switchWs(id) {
+  try {
+    const res = await api('/api/auth/workspaces/switch', { method: 'POST', body: { ws: id } });
+    applyMe(res);
+    location.reload();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function createWs() {
+  const name = ($('#wsNewName').value || '').trim();
+  if (!name) { toast('先给新工作区起个名字', true); return; }
+  try {
+    await api('/api/auth/workspaces', { method: 'POST', body: { name, kind: 'personal' } });
+    location.reload();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function changePass() {
+  const old = ($('#wsPassOld').value || '').trim();
+  const fresh = ($('#wsPassNew').value || '').trim();
+  try {
+    await api('/api/auth/password', { method: 'POST', body: { old, new: fresh } });
+    toast('密码改好了，其它设备上的登录已失效');
+    $('#wsPassOld').value = '';
+    $('#wsPassNew').value = '';
+    $('#wsPassBox').hidden = true;
+  } catch (e) { toast(e.message, true); }
+}
+
+function openWs() { renderWs(); $('#wsLayer').hidden = false; }
+function closeWs() { $('#wsLayer').hidden = true; }
+
+async function doLogin() {
+  const name = ($('#loginName').value || '').trim();
+  const password = $('#loginPass').value || '';
+  const err = $('#authErr');
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, password }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      if (err) err.textContent = (data && data.error) || '登录失败';
+      return;
+    }
+    location.reload();
+  } catch (e) { if (err) err.textContent = '连不上服务：' + e.message; }
+}
+
+async function doSetup() {
+  const name = ($('#setupName').value || '').trim();
+  const password = $('#setupPass').value || '';
+  const workspace = ($('#setupWs').value || '').trim();
+  const err = $('#authErr');
+  try {
+    const res = await fetch('/api/auth/setup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, password, workspace }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      if (err) err.textContent = (data && data.error) || '建账号失败';
+      return;
+    }
+    location.reload();
+  } catch (e) { if (err) err.textContent = '连不上服务：' + e.message; }
+}
+
+async function doRegister() {
+  const code = ($('#regCode').value || '').trim();
+  const name = ($('#regName').value || '').trim();
+  const password = $('#regPass').value || '';
+  const err = $('#authErr');
+  try {
+    const res = await fetch('/api/auth/register', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, name, password }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      if (err) err.textContent = (data && data.error) || '注册失败';
+      return;
+    }
+    location.reload();
+  } catch (e) { if (err) err.textContent = '连不上服务：' + e.message; }
+}
+
+async function doLogout() {
+  try { await api('/api/auth/logout', { method: 'POST', body: {} }); } catch (e) { /* 忽略 */ }
+  location.href = '/';
+}
+
+function roleBadge(role, label) {
+  const cls = role === 'owner' ? 'owner' : (role === 'view' ? 'view' : 'edit');
+  return `<span class="rolebadge ${cls}">${esc(label || role || '')}</span>`;
+}
+
+function applyAccess(info) {
+  ACCESS = info || null;
+  const pill = $('#rolePill');
+  if (!pill) return;
+  if (!info || !info.enabled || !info.me) { pill.hidden = true; pill.textContent = ''; return; }
+  pill.hidden = false;
+  pill.innerHTML = `🔒 已上锁 · ${esc(info.me.label || '')} ${roleBadge(info.me.role, '')}`.replace(/\s+$/, '');
+  pill.title = (info.roles || []).map((r) => `${r.label}：${r.note}`).join('\n');
+}
+
+function showLock(msg) {
+  // 兼容旧调用：密钥入口现在藏在登录卡的「只有访客密钥？」里。
+  showAuth('login', msg || '');
+  const input = $('#lockCode');
+  if (input) { setTimeout(() => input.focus(), 30); }
+  const more = document.querySelectorAll('.authmore');
+  if (more[1]) more[1].open = true;
+}
+
+async function unlock() {
+  const input = $('#lockCode');
+  const err = $('#lockErr');
+  const btn = $('#lockGo');
+  const code = (input && input.value || '').trim();
+  if (!code) { if (err) err.textContent = '先填密钥'; return; }
+  if (btn) { btn.disabled = true; btn.textContent = '解锁中…'; }
+  try {
+    const resp = await fetch('/api/access/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: code }),
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      const left = data && data.attempts_left;
+      if (err) err.textContent = `${(data && data.error) || '密钥不对'}${left ? `（还能试 ${left} 次）` : ''}`;
+      return;
+    }
+    if (err) err.textContent = '';
+    const aerr = $('#authErr');
+    if (aerr) aerr.textContent = '';
+    location.reload();
+  } catch (e) {
+    if (err) err.textContent = '连不上服务：' + e.message;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '解锁'; }
+  }
+}
+
+function copyText(text, note) {
+  const done = () => toast(note || '已复制');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallback());
+  } else fallback();
+  function fallback() {
+    const area = document.createElement('textarea');
+    area.value = text;
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand('copy'); done(); } catch (e) { toast('复制失败，手动选中吧', true); }
+    area.remove();
+  }
+}
+
+function shareLinksHtml(info, code) {
+  const share = (info && info.share) || {};
+  const rows = [];
+  const add = (label, url) => {
+    if (!url) return;
+    const full = code ? `${url}${url.includes('?') ? '&' : '?'}key=${encodeURIComponent(code)}` : url;
+    rows.push(`<div class="linkrow" data-url="${esc(full)}">
+      <span class="meta">${esc(label)}</span>
+      <code>${esc(full)}</code>
+      <button class="btn ghost" data-copy="${esc(full)}">复制</button>
+    </div>`);
+  };
+  (share.desktop || []).forEach((u) => add('电脑上打开', u));
+  (share.phone || []).forEach((u) => add('手机上打开', u));
+  if (!rows.length) rows.push('<div class="meta">还不知道本机的局域网地址，先确认服务在跑。</div>');
+  if (code) {
+    rows.unshift(`<div class="hint small">下面这些链接里带着密钥，点开就能进，不用再手打。</div>`);
+  } else {
+    rows.unshift(`<div class="hint small">这是给已登录的人用的地址 —— 别人打开要手打自己的密钥。</div>`);
+  }
+  return rows.join('');
+}
+
+function renderShare(info) {
+  const me = (info && info.me) || {};
+  const roles = (info && info.roles) || [];
+  const who = info && info.enabled
+    ? `${roleBadge(me.role, me.label || '未知')} <span class="meta">${esc((roles.find((r) => r.role === me.role) || {}).note || '')}</span>`
+    : '<span class="meta">这个工作台现在没上锁：同一网络里的人都能读写。</span>';
+  const noAccounts = !!(ME && ME.accounts === false && ME.can_setup);
+  $('#shareMe').innerHTML = `
+    <div class="memrow">
+      <div class="who"><span class="role">我现在是</span>${who}</div>
+      <div class="acts">
+        ${noAccounts ? '<button class="btn primary" id="shareMakeAccount">建第一个账号</button>' : ''}
+        ${info && info.enabled ? '<button class="btn ghost" id="shareLogout">退出（忘掉这台机器的密钥）</button>' : ''}
+      </div>
+    </div>
+    ${noAccounts ? `<p class="hint small">建了账号以后：每人一个私人工作区（一个工作区 = 一个数据目录），
+      你还能邀请别人协作。现在这份数据会归到第一个账号名下。</p>` : ''}`;
+  const makeAcc = $('#shareMakeAccount');
+  if (makeAcc) makeAcc.onclick = () => {
+    closeShare();
+    showAuth('setup', '');
+  };
+  const out = $('#shareLogout');
+  if (out) out.onclick = async () => {
+    await api('/api/access/logout', { method: 'POST', body: {} });
+    location.reload();
+  };
+
+  const isOwner = info && info.enabled && me.role === 'owner';
+  $('#shareOwnerOnly').hidden = !isOwner;
+
+  const sel = $('#newKeyRole');
+  if (sel) {
+    sel.innerHTML = roles.map((r) => `<option value="${esc(r.role)}"${r.role === 'view' ? ' selected' : ''}>${esc(r.label)}</option>`).join('');
+    sel.title = roles.map((r) => `${r.label}：${r.note}`).join('\n');
+  }
+
+  const list = $('#keyList');
+  if (list) {
+    const keys = (info && info.keys) || [];
+    if (!isOwner) list.innerHTML = '';
+    else if (!keys.length) list.innerHTML = '<div class="meta">还没有密钥。上面生成一把。</div>';
+    else list.innerHTML = keys.map((k) => `
+      <div class="keyrow ${k.active ? '' : 'is-dead'}" data-key="${k.id}">
+        <div class="who">
+          <b>${esc(k.label || '（没写名字）')}</b> ${roleBadge(k.role, k.role_label || k.role)}
+          <div class="meta">${k.active ? '有效' : '已撤销'} ·
+            ${k.last_used_at ? `最近 ${esc(String(k.idle_days))} 天前用过` : '还没用过'} ·
+            建了 ${esc(String(k.age_days))} 天${k.uses ? ` · 用过 ${k.uses} 次` : ''}</div>
+        </div>
+        <div class="acts">
+          ${k.active
+            ? `<button class="btn ghost" data-act="revoke" data-id="${k.id}">撤销</button>`
+            : `<button class="btn ghost" data-act="restore" data-id="${k.id}">恢复</button>`}
+          <button class="btn ghost" data-act="rename" data-id="${k.id}">改名</button>
+          <button class="btn ghost danger" data-act="delete" data-id="${k.id}">删除</button>
+        </div>
+      </div>`).join('');
+    list.querySelectorAll('[data-act]').forEach((btn) => {
+      btn.onclick = () => keyAction(btn.dataset.act, Number(btn.dataset.id));
+    });
+  }
+
+  const links = $('#shareLinks');
+  if (links) {
+    links.innerHTML = shareLinksHtml(info, '');
+    links.querySelectorAll('[data-copy]').forEach((b) => {
+      b.onclick = () => copyText(b.dataset.copy);
+    });
+  }
+
+  loadWorkspaceBits();
+}
+
+// ------------------------------------------------------- 成员 / 邀请码
+function wsIdNow() {
+  return Number(((ME || {}).workspace || {}).id || 0);
+}
+
+function roleOptions(roles, current, allowOwner = true) {
+  const list = (roles && roles.length) ? roles : [
+    { role: 'owner', label: '主人' }, { role: 'edit', label: '可操作' }, { role: 'view', label: '只看' },
+  ];
+  return list
+    .filter((r) => allowOwner || r.role !== 'owner')
+    .map((r) => `<option value="${esc(r.role)}"${r.role === current ? ' selected' : ''}>${esc(r.label)}</option>`)
+    .join('');
+}
+
+function renderMembers(payload) {
+  const list = $('#memberList');
+  if (!list) return;
+  const rows = (payload && payload.members) || [];
+  const roles = (payload && payload.roles) || [];
+  const isOwner = !!(payload && payload.is_owner);
+  const myId = Number(((ME || {}).user || {}).id || 0);
+  if (!rows.length) {
+    list.innerHTML = '<div class="meta">这个工作区只有你。</div>';
+    return;
+  }
+  list.innerHTML = rows.map((m) => `
+    <div class="keyrow memrow" data-user="${m.user_id}">
+      <div class="who">
+        <b>${esc(m.name)}</b> ${roleBadge(m.role, m.role_label || m.role)}
+        ${m.user_id === myId ? '<span class="meta">（你自己）</span>' : ''}
+        <div class="meta">${m.last_login_at ? '来过' : '还没登录过'} · 加进来 ${esc(String(daysAgo(m.joined_at)))}</div>
+      </div>
+      <div class="acts">
+        ${isOwner && m.user_id !== myId
+          ? `<select data-role="${m.user_id}">${roleOptions(roles, m.role)}</select>
+             <button class="btn ghost danger" data-kick="${m.user_id}">移出</button>`
+          : ''}
+      </div>
+    </div>`).join('');
+  list.querySelectorAll('[data-role]').forEach((sel) => {
+    sel.onchange = () => setMemberRole(Number(sel.dataset.role), sel.value);
+  });
+  list.querySelectorAll('[data-kick]').forEach((btn) => {
+    btn.onclick = () => kickMember(Number(btn.dataset.kick));
+  });
+  const pick = $('#memberRole');
+  if (pick) {
+    const keep = pick.value;
+    pick.innerHTML = roleOptions(roles, keep || 'edit');
+  }
+}
+
+async function addMember() {
+  const name = ($('#memberName').value || '').trim();
+  const role = $('#memberRole').value || 'edit';
+  if (!name) { toast('填对方账号的名字', true); return; }
+  try {
+    const res = await api(`/api/auth/workspaces/${wsIdNow()}/members`, { method: 'POST', body: { name, role } });
+    $('#memberName').value = '';
+    renderMembers({ members: res.members, roles: (ACCESS && ACCESS.roles) || [] });
+    toast(`「${name}」已经能进这个工作区了`);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function setMemberRole(userId, role) {
+  try {
+    const res = await api(`/api/auth/workspaces/${wsIdNow()}/members/${userId}`,
+      { method: 'POST', body: { role } });
+    renderMembers({ members: res.members, roles: (ACCESS && ACCESS.roles) || [], is_owner: true });
+    toast('角色改好了');
+  } catch (e) { toast(e.message, true); }
+}
+
+async function kickMember(userId) {
+  if (!confirm('把这个人移出工作区？他下次就进不来了（工作区里的东西不会删）。')) return;
+  try {
+    const res = await api(`/api/auth/workspaces/${wsIdNow()}/members/${userId}`, { method: 'DELETE' });
+    renderMembers({ members: res.members, roles: (ACCESS && ACCESS.roles) || [], is_owner: true });
+  } catch (e) { toast(e.message, true); }
+}
+
+function daysAgo(ts) {
+  const t = Number(ts || 0);
+  if (!t) return '刚刚';
+  const d = Math.floor((Date.now() / 1000 - t) / 86400);
+  if (d <= 0) return '今天';
+  return `${d} 天`;
+}
+
+function renderInvites(payload) {
+  const list = $('#inviteList');
+  if (!list) return;
+  const rows = (payload && payload.invites) || [];
+  if (!rows.length) { list.innerHTML = '<div class="meta">还没发过邀请码。</div>'; return; }
+  list.innerHTML = rows.map((v) => {
+    const state = v.used ? '已用过' : (v.expired ? '已过期' : '还能用');
+    const cls = v.usable ? '' : 'is-dead';
+    const hours = Math.max(0, Math.round((Number(v.expires_at || 0) - Date.now() / 1000) / 3600));
+    return `<div class="keyrow ${cls}">
+      <div class="who">
+        <b>${esc(v.role === 'edit' ? '可操作' : (v.role === 'view' ? '只看' : v.role))}</b>
+        <span class="rolebadge ${v.usable ? 'owner' : 'view'}">${state}</span>
+        <div class="meta">${v.usable ? `还剩 ${hours} 小时` : ''}${v.expires_at ? ` · 到 ${esc(fmtDate(v.expires_at))}` : ''}</div>
+      </div>
+      <div class="acts">${v.usable ? `<button class="btn ghost" data-copyinv="${esc(v.code || '')}" hidden></button>` : ''}</div>
+    </div>`;
+  }).join('');
+}
+
+async function createInvite() {
+  const role = $('#inviteRole').value || 'edit';
+  const hours = Number($('#inviteHours').value || 72);
+  try {
+    const res = await api(`/api/auth/workspaces/${wsIdNow()}/invites`, { method: 'POST', body: { role, hours } });
+    const made = res.invite || {};
+    const box = $('#inviteOut');
+    box.hidden = false;
+    box.innerHTML = `<div class="meta">给对方的邀请码（只显示这一次，他拿它注册一个自己的账号）</div>
+      <div class="code"><span>${esc(made.code || '')}</span>
+        <button class="btn" id="inviteCopy">复制邀请码</button></div>
+      <div class="meta">${esc(fmtDate(made.expires_at))} 前有效 · 只能注册一次</div>`;
+    $('#inviteCopy').onclick = () => copyText(made.code || '', `邀请码 ${made.code} 可以注册一次，别公开贴出来`);
+    renderInvites({ invites: res.invites });
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadWorkspaceBits() {
+  const box = $('#shareAccount');
+  if (!box) return;
+  const logged = !!(ME && ME.logged_in);
+  box.hidden = !logged;
+  if (!logged) return;
+  const wsId = wsIdNow();
+  const roles = (ACCESS && ACCESS.roles) || [];
+  try {
+    renderMembers(await api(`/api/auth/workspaces/${wsId}/members`));
+  } catch (e) {
+    $('#memberList').innerHTML = `<div class="meta">${esc(e.message)}</div>`;
+  }
+  const invRole = $('#inviteRole');
+  if (invRole && !invRole.dataset.done) {
+    invRole.innerHTML = roleOptions(roles, 'edit', false);
+    invRole.dataset.done = '1';
+  }
+  try {
+    renderInvites(await api(`/api/auth/workspaces/${wsId}/invites`));
+  } catch (e) {
+    $('#inviteList').innerHTML = '';
+  }
+}
+
+async function openShare() {
+  $('#shareLayer').hidden = false;
+  try {
+    renderShare(await api('/api/access'));
+  } catch (e) {
+    $('#shareMe').innerHTML = `<span class="meta">读取失败：${esc(e.message)}</span>`;
+  }
+}
+
+function closeShare() {
+  $('#shareLayer').hidden = true;
+}
+
+async function keyAction(act, id) {
+  if (act === 'delete' && !confirm('彻底删掉这条密钥？用它的那台机器下次就进不来了。')) return;
+  if (act === 'revoke' && !confirm('撤销这条密钥？用它的机器立刻失效，可以再恢复。')) return;
+  const path = act === 'delete' ? `/api/access/keys/${id}` : `/api/access/keys/${id}/${act}`;
+  try {
+    if (act === 'rename') {
+      const name = prompt('新的名字');
+      if (name === null) return;
+      await api(path, { method: 'POST', body: { label: name } });
+    } else {
+      await api(path, { method: act === 'delete' ? 'DELETE' : 'POST', body: {} });
+    }
+    renderShare(await api('/api/access'));
+  } catch (e) { toast(e.message, true); }
+}
+
+async function createKey() {
+  const label = ($('#newKeyLabel').value || '').trim() || '朋友';
+  const role = $('#newKeyRole').value || 'view';
+  try {
+    const res = await api('/api/access/keys', { method: 'POST', body: { label, role } });
+    const made = res.key || {};
+    const box = $('#newKeyOut');
+    box.hidden = false;
+    box.innerHTML = `<div class="meta">给「${esc(label)}」的密钥（只显示这一次）</div>
+      <div class="code"><span>${esc(made.code || '')}</span>
+        <button class="btn" id="newKeyCopy">复制密钥</button></div>
+      <div class="links">${shareLinksHtml({ share: (ACCESS && ACCESS.share) || {} }, made.code || '')}</div>`;
+    $('#newKeyCopy').onclick = () => copyText(made.code || '');
+    box.querySelectorAll('[data-copy]').forEach((b) => { b.onclick = () => copyText(b.dataset.copy); });
+    $('#newKeyLabel').value = '';
+    renderShare(res);
+  } catch (e) { toast(e.message, true); }
+}
+
+function bindAccessPanel() {
+  const bind = (sel, fn, ev) => {
+    const el = $(sel);
+    if (!el) return;
+    if (ev) el.addEventListener(ev, fn);
+    else el.onclick = fn;
+  };
+  bind('#loginGo', doLogin);
+  bind('#loginPass', (e) => { if (e.key === 'Enter') doLogin(); }, 'keydown');
+  bind('#loginName', (e) => { if (e.key === 'Enter') doLogin(); }, 'keydown');
+  bind('#setupGo', doSetup);
+  bind('#setupPass', (e) => { if (e.key === 'Enter') doSetup(); }, 'keydown');
+  bind('#regGo', doRegister);
+  bind('#userBtn', openWs);
+  bind('#wsClose', closeWs);
+  bind('#wsNewGo', createWs);
+  bind('#wsLogout', doLogout);
+  bind('#wsPassBtn', () => {
+    const box = $('#wsPassBox');
+    if (box) box.hidden = !box.hidden;
+  });
+  bind('#wsPassGo', changePass);
+  bind('#memberAddGo', addMember);
+  bind('#memberName', (e) => { if (e.key === 'Enter') addMember(); }, 'keydown');
+  bind('#inviteGo', createInvite);
+
+  const go = $('#lockGo');
+  if (go) go.onclick = unlock;
+  const input = $('#lockCode');
+  if (input) input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') unlock(); });
+  const share = $('#shareBtn');
+  if (share) share.onclick = openShare;
+  const close = $('#shareClose');
+  if (close) close.onclick = closeShare;
+  const make = $('#newKeyGo');
+  if (make) make.onclick = createKey;
+  const label = $('#newKeyLabel');
+  if (label) label.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') createKey(); });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape') return;
+    if ($('#shareLayer') && !$('#shareLayer').hidden) closeShare();
+    if ($('#lockLayer') && !$('#lockLayer').hidden) { /* 上锁时不许 ESC 关掉 */ }
+  });
+}
+
+async function bootAccess() {
+  let info = null;
+  try {
+    info = await fetch('/api/access').then((r) => r.json());
+  } catch (e) {
+    return true;
+  }
+  applyAccess(info);
+  // 没账号时（老的单机模式）密钥就是唯一门禁，这里挡一下；
+  // 有账号时登录卡已经由 bootAuth 处理过了，别再弹一次。
+  if (info && info.enabled && !info.me && !AUTH_ON) {
+    showLock('');
+    return false;
+  }
+  return true;
+}
+
 async function boot() {
   renderTabs();
+  bindAccessPanel();
   $('#scrim').onclick = closeDrawer;
   $('#drawerClose').onclick = closeDrawer;
   document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeDrawer(); });
+
+  // 先过门：没账号时看密钥，有账号时看登录。没过就别去打一串注定 401 的请求。
+  if (!(await bootAuth())) return;
+  if (!(await bootAccess())) return;
 
   try {
     const meta = await api('/api/engines');

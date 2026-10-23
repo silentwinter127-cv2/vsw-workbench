@@ -8,7 +8,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `vsw-workbench.apk` | 可直接安装的 release 包（约 354 KB，用你自己的密钥库自签） |
+| `vsw-workbench.apk` | 可直接安装的 release 包（约 602 KB，用你自己的密钥库自签） |
 | `vsw-workbench-debug.apk` | 带调试签名的版本（`build_apk.bat` 不带参数时的产物） |
 
 包名 `com.vsw.workbench` · 应用名「视觉搜索工作台」· minSdk 24（Android 7.0+）· targetSdk 34。
@@ -93,6 +93,12 @@ node ../scripts/vsw-probe-archive-view.js --apk ../vsw-workbench.apk --origin ht
 
 # 8) 合并归档相册：跨批次去重/排序/打包 + 手机与桌面两处入口（40 项）
 node ../scripts/vsw-probe-archive-merge.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
+
+# 9) 访客密钥：上锁、角色分级、失败限速、页面壳子免检（45 项）
+python ../scripts/vsw-probe-access.py
+
+# 10) 账号 / 私人工作区 / 协作：建号、邀请码、隔离、会话头（58 项）
+python ../scripts/vsw-probe-accounts.py
 
 # 0) 语法闸门：内联脚本一处语法错，整页就不能点（比行为探针便宜得多，先跑它）
 python ../scripts/vsw-check-syntax.py
@@ -350,6 +356,26 @@ zip 里能解出 manifest 且记着合并了哪些批次、单批 zip 与 HEAD �
 
 `scripts/vsw-probe-archive-view.js` 加了 2 项回归：批次卡上的来源数必须等于详情里逐条来源之和；
 空批次的数字必须归零且卡上有「空批次」字样（现在是 20 项）。
+
+### 手机端登录与访客密钥（r13）
+
+APK 里的页面是 `file://`，浏览器不会替它带 cookie —— 所以身份有两种携带方式：
+
+1. **账号登录**：登录成功后把令牌存本地（`vsw.sid`），之后每个请求带 `X-VSW-Session`；
+2. **访客密钥**：`X-VSW-Key`（或链接上的 `?key=`，一个照面就换成 cookie）。
+
+「我的」页最上面是账号卡：
+
+- 没登录时：名字 + 密码 + 登录、用邀请码注册、访客密钥三条路；
+- 登录后：显示「谁 · 现在在哪个工作区（什么角色）」、工作区下拉切换、退出登录；
+- 退出登录会**清空本地库**（数据属于上一个工作区，留着就是串味）。
+
+服务端这次一并修的：没账号但工作区上了锁时，仍然要密钥（之前会直接当本机主人放过去）。
+桌面端同理：右上角「共享 / 账号」里有成员表、邀请码生成、一次性明文密钥；没有账号时那里
+会多一个「建第一个账号」的入口 —— 否则锁死自己进不去。
+
+> 踩过的坑：`input[type=password]` 在桌面端和手机端都各自漏了样式，渲染成白底黑字的孤岛；
+> 两处都补了显式规则。密码框不吃通用 `input` 选择器这件事，只有真的看一眼截图才发现。
 
 ### ⚠ 还没验证到的（真机才能确认）
 

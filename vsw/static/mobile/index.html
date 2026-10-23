@@ -85,8 +85,10 @@ main{padding:12px 12px calc(var(--safe-b) + 84px)}
 .spacer{flex:1}
 .small{font-size:12px;color:var(--mute)}
 .mono{font-family:ui-monospace,Consolas,monospace}
-input[type=text],input[type=number],select,textarea{
-  width:100%;padding:10px;background:var(--bg2);border:1px solid var(--line);border-radius:10px}
+input[type=text],input[type=password],input[type=number],select,textarea{
+  width:100%;padding:10px;background:var(--bg2);color:var(--fg);
+  border:1px solid var(--line);border-radius:10px}
+input[type=password]{letter-spacing:1px}
 textarea{min-height:80px;font-family:ui-monospace,Consolas,monospace;font-size:12px}
 label.field{display:block;margin:10px 0}
 label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5px}
@@ -311,6 +313,41 @@ label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5
 
   <!-- 我的 -->
   <section id="v-me" class="hide">
+    <div class="card" id="accountCard">
+      <div class="row"><b>账号</b><div class="spacer"></div><span class="small" id="accState">未登录</span></div>
+      <div id="accWho" class="small" style="margin:6px 0"></div>
+      <div id="accLogged" class="hide">
+        <label class="field"><span>工作区</span>
+          <select id="accWs"></select></label>
+        <div class="row">
+          <button class="btn" id="accSwitchBtn">切换</button>
+          <button class="btn ghost" id="accLogoutBtn">退出登录</button>
+        </div>
+      </div>
+      <div id="accLoggedOut" class="hide">
+        <label class="field"><span>名字</span>
+          <input type="text" id="accName" autocomplete="username" placeholder="你的账号名"></label>
+        <label class="field"><span>密码</span>
+          <input type="password" id="accPass" autocomplete="current-password" placeholder="至少 6 位"></label>
+        <div class="row">
+          <button class="btn primary" id="accLoginBtn">登录</button>
+          <button class="btn" id="accRegisterBtn">用邀请码注册</button>
+        </div>
+        <div id="accInviteBox" class="hide" style="margin-top:8px">
+          <label class="field"><span>邀请码</span>
+            <input type="text" id="accInvite" placeholder="INV-XXXX-XXXX-XXXX"></label>
+          <button class="btn primary" id="accRegGo" style="width:100%">注册并登录</button>
+        </div>
+        <p class="small">没有账号？让主人在电脑上「共享 / 账号」里给你一条邀请码。</p>
+        <label class="field"><span>或者：访客密钥（VSW-…，只读或协作）</span>
+          <input type="text" id="accKey" placeholder="VSW-XXXX-XXXX-XXXX" autocapitalize="characters"></label>
+        <div class="row">
+          <button class="btn" id="accKeyGo">用密钥进入</button>
+          <button class="btn ghost" id="accKeyClear">清掉密钥</button>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="row"><b>连接电脑上的工作台</b></div>
       <p class="small">手机本身跑不了无头浏览器，所以「自动识图」只能在电脑上执行。
@@ -466,6 +503,9 @@ const S = {
   seeds: [],
   variants: [],
   selection: new Set(),
+  sid: '',      // 登录令牌（APK 里页面是 file://，cookie 带不上，只能存本地走请求头）
+  key: '',      // 访客密钥（VSW-…）
+  me: null,     // /api/auth 的身份
   server: '',   // 真正取值在 boot() 里做（要清洗掉 file:// 下产生的 "null"）
   online: false,
   snap: null,
@@ -618,17 +658,55 @@ async function storeBlob(key, blob, meta = {}) {
 }
 
 /* ---------------------------------------------------------------- 网络 */
+/* 密钥一律走 `X-VSW-Key` 头而不是 cookie：APK 里页面是 file:// 起的，
+   cookie 属于另一个源，浏览器根本不会替我们带上。 */
+function authHeaders(extra) {
+  const head = Object.assign({}, extra || {});
+  if (S.key) head['X-VSW-Key'] = S.key;
+  if (S.sid) head['X-VSW-Session'] = S.sid;
+  return head;
+}
+
+function netFetch(url, opts) {
+  const conf = Object.assign({ cache: 'no-store' }, opts || {});
+  conf.headers = authHeaders(conf.headers);
+  return fetch(url, conf);
+}
+
+/* 401 + need_key = 这把钥匙不对或没带：弹解锁面板，别在控制台刷一屏红。 */
+async function readJson(resp) {
+  let data = null;
+  try { data = await resp.json(); } catch (e) { data = null; }
+  if (resp.status === 401 && data && (data.need_login || data.need_key)) {
+    const msg = data.error || (data.need_login ? '先登录' : '需要访问密钥');
+    showLock(msg);
+    throw new Error(msg);
+  }
+  if (resp.status === 429) {
+    throw new Error((data && data.error) || '试错太多次了，等一会儿再试');
+  }
+  if (!resp.ok) {
+    throw new Error((data && (data.error || data.message)) || `HTTP ${resp.status}`);
+  }
+  return data;
+}
+
 function api(path) {
   if (!S.server) return Promise.reject(new Error('还没填电脑地址'));
-  return fetch(S.server.replace(/\/+$/, '') + path, { cache: 'no-store' })
-    .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
+  return netFetch(S.server.replace(/\/+$/, '') + path).then(readJson);
 }
 
 function post(path, body) {
   if (!S.server) return Promise.reject(new Error('还没填电脑地址'));
-  return fetch(S.server.replace(/\/+$/, '') + path, {
+  return netFetch(S.server.replace(/\/+$/, '') + path, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-  }).then((r) => r.json());
+  }).then(readJson);
+}
+
+/* <img src> 与 <a download> 带不了请求头，只能把密钥放进查询串。 */
+function withKey(url) {
+  if (!S.key) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(S.key);
 }
 
 async function checkOnline() {
@@ -660,7 +738,7 @@ async function fetchInto(key, rel) {
   if (!rel) return false;
   if (await local.get('assets', key)) return false;
   try {
-    const resp = await fetch(relToMediaServer(rel), { cache: 'force-cache' });
+    const resp = await netFetch(relToMediaServer(rel), { cache: 'force-cache' });
     if (!resp.ok) return false;
     const blob = await resp.blob();
     if (!blob.size) return false;
@@ -1689,7 +1767,7 @@ function saveMergedZip() {
   const ids = Array.from(S.albumPick);
   if (!ids.length) return;
   if (!S.online) return toast('离线中：需要连上电脑才能打包', true);
-  const url = S.server.replace(/\/+$/, '') + `/api/archive/merge/zip?ids=${ids.join(',')}`;
+  const url = withKey(S.server.replace(/\/+$/, '') + `/api/archive/merge/zip?ids=${ids.join(',')}`);
   // 同理「保存到手机」：交给系统下载（APK 里 DownloadListener 存到「下载」）
   const a = document.createElement('a');
   a.href = url;
@@ -1768,16 +1846,16 @@ function renderArchive() {
       const id = Number(btn.dataset.save);
       const host = $(`#archivePath-${id}`);
       if (!S.online) return toast('离线中：需要连上电脑才能取这一批文件', true);
-      const url = S.server.replace(/\/+$/, '') + `/api/archive/${id}/zip`;
+      const raw = S.server.replace(/\/+$/, '') + `/api/archive/${id}/zip`;
       if (host) host.textContent = '正在打包下载…';
       try {
         // 先探一下服务端能不能打包（出错时给明确提示，而不是静默失败）
-        const head = await fetch(url, { method: 'HEAD' });
+        const head = await netFetch(raw, { method: 'HEAD' });
         if (!head.ok) throw new Error(`HTTP ${head.status}`);
         const size = Number(head.headers.get('content-length') || 0);
         // 交给系统下载（APK 里有 DownloadListener，会存到「下载」并通知）
         const a = document.createElement('a');
-        a.href = url;
+        a.href = withKey(raw);
         a.download = `archive-${id}.zip`;
         a.rel = 'noopener';
         document.body.appendChild(a);
@@ -2146,7 +2224,7 @@ function scanQrCode(onResult) {
   // 浏览器里没有原生扫码接口：引导用户用系统相机/微信扫，或用「导入数据集」
   if (S.server) {
     const img = $('#qrImg');
-    img.src = S.server.replace(/\/+$/, '') + '/api/mobile/qr.png';
+    img.src = withKey(S.server.replace(/\/+$/, '') + '/api/mobile/qr.png');
     toast('用系统相机或微信扫这个码，把地址复制回来后填进去');
   } else {
     toast('先填一个地址（或让对方把启动日志里的地址发给你）', true);
@@ -2375,9 +2453,187 @@ async function importOne(entry) {
   return entry;
 }
 
+/* ---------------------------------------------------------------- 账号 */
+/* 手机端两种身份：
+   - 账号（名字 + 密码）→ 每人有自己的私人工作区，也能切到别人邀请协作的工作区；
+   - 访客密钥（VSW-…）→ 主人发的一条只读/可操作通道。
+   APK 里页面是 file://，服务器源的 cookie 带不上，所以登录后把令牌存本地、每次塞进
+   `X-VSW-Session` 头（服务端 `_session_token()` 会读这个头）。 */
+
+function showLock(msg) {
+  // 401 的统一出口：提示 + 把人带到「我的」页去登录/填密钥。
+  toast(msg || '需要登录或访问密钥', true);
+  if (S.tab !== 'me') switchTab('me');
+  renderAccount();
+}
+
+function saveSid(token) {
+  S.sid = token || '';
+  if (S.sid) localStorage.setItem('vsw.sid', S.sid);
+  else localStorage.removeItem('vsw.sid');
+}
+
+function loadCreds() {
+  S.sid = localStorage.getItem('vsw.sid') || '';
+  S.key = localStorage.getItem('vsw.key') || '';
+}
+
+async function refreshAccount() {
+  if (!S.server) { S.me = null; renderAccount(); return null; }
+  try {
+    const me = await api('/api/auth');
+    S.me = me;
+    renderAccount();
+    // 这台电脑开了账号、而我还没进去 —— 直接把「我的」摆到面前，别让人对着空结果板发呆
+    if (me && me.accounts && !me.logged_in && S.tab !== 'me') switchTab('me');
+    return me;
+  } catch (e) {
+    S.me = null;
+    renderAccount();
+    return null;
+  }
+}
+
+function renderAccount() {
+  const me = S.me;
+  const state = $('#accState');
+  const who = $('#accWho');
+  const logged = $('#accLogged');
+  const out = $('#accLoggedOut');
+  if (!state) return;
+  const on = !!(me && me.accounts);
+  if (!on) {
+    state.textContent = S.key ? '访客密钥' : '未上锁';
+    who.innerHTML = S.key
+      ? `这台电脑还没开账号，你现在用密钥访问：<code>${esc(S.key)}</code>`
+      : '这台电脑还没开账号，谁连上都能用。要分人用，就在电脑上建第一个账号。';
+    logged.classList.add('hide');
+    out.classList.add('hide');
+    return;
+  }
+  if (me.logged_in) {
+    const u = me.user || {};
+    const w = me.workspace || {};
+    state.textContent = '已登录';
+    who.innerHTML = `<b>${esc(u.name || '')}</b> · 现在在「${esc(w.name || '')}」（${esc(me.role_label || '')}）
+      ${S.key ? `<br>另外还带着访客密钥 <code>${esc(S.key)}</code>` : ''}`;
+    logged.classList.remove('hide');
+    out.classList.add('hide');
+    const sel = $('#accWs');
+    const list = me.workspaces || [];
+    sel.innerHTML = list.map((w2) => `<option value="${w2.id}"${w2.id === (w.id || 0) ? ' selected' : ''}>${esc(w2.name || '')}${w2.kind === 'personal' ? '（私人）' : '（共享）'}</option>`).join('');
+  } else {
+    state.textContent = '未登录';
+    who.textContent = me.can_setup
+      ? '这台电脑还没建账号：请在电脑浏览器里建第一个账号。'
+      : '输名字和密码进来；没有账号就让主人发邀请码。';
+    logged.classList.add('hide');
+    out.classList.remove('hide');
+    $('#accInviteBox').classList.add('hide');
+  }
+}
+
+async function accLogin() {
+  const name = ($('#accName').value || '').trim();
+  const password = $('#accPass').value || '';
+  if (!name || !password) { toast('名字和密码都要填', true); return; }
+  try {
+    const out = await post('/api/auth/login', { name, password });
+    saveSid(out.token || '');
+    $('#accPass').value = '';
+    toast(`进来了：${(out.user || {}).name || name}`);
+    await afterLogin();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function accRegister() {
+  const code = ($('#accInvite').value || '').trim();
+  const name = ($('#accName').value || '').trim();
+  const password = $('#accPass').value || '';
+  if (!code) { toast('先填邀请码', true); return; }
+  try {
+    const out = await post('/api/auth/register', { code, name, password });
+    saveSid(out.token || '');
+    $('#accPass').value = '';
+    toast(`注册好了：${(out.user || {}).name || name}`);
+    await afterLogin();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function accSwitch() {
+  const ws = Number($('#accWs').value || 0);
+  try {
+    await post('/api/auth/workspaces/switch', { ws });
+    toast('换好了');
+    await afterLogin();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function accLogout() {
+  try { await post('/api/auth/logout', {}); } catch (e) { /* 忽略 */ }
+  saveSid('');
+  // 退出后本地库还是上一个工作区的：清掉，免得下一个人看到别人的东西。
+  for (const store of ['findings', 'trash', 'archived', 'archives', 'jobs', 'seeds', 'variants']) {
+    await local.clear(store);
+  }
+  await local.clear('assets');
+  await local.put('meta', { key: 'snapshot', value: null });
+  S.snap = null;
+  S.findings = []; S.trash = []; S.archived = []; S.archives = [];
+  S.jobs = []; S.seeds = []; S.variants = [];
+  toast('已退出，本地缓存清空了');
+  await refreshAccount();
+  await loadLocal();
+}
+
+async function afterLogin() {
+  await refreshAccount();
+  await checkOnline();
+  // 换了身份就是换了数据目录：把本地库清掉，重新同步这个工作区的。
+  for (const store of ['findings', 'trash', 'archived', 'archives', 'jobs', 'seeds', 'variants']) {
+    await local.clear(store);
+  }
+  await local.clear('assets');
+  await local.put('meta', { key: 'snapshot', value: null });
+  S.snap = null;
+  await loadLocal();
+  if (S.online) { try { await syncSnapshot(); } catch (e) { /* 同步失败也别挡着用 */ } }
+  render();
+}
+
+async function accUseKey(code) {
+  const key = (code || '').trim();
+  if (!key) { toast('先填密钥', true); return; }
+  S.key = key;
+  localStorage.setItem('vsw.key', key);
+  saveSid('');                       // 账号会话和访客密钥只留一个，避免打架
+  await checkOnline();
+  await refreshAccount();
+  await afterLogin();
+}
+
+async function accDropKey() {
+  S.key = '';
+  localStorage.removeItem('vsw.key');
+  await refreshAccount();
+  toast('密钥已清掉');
+}
+
+function bindAccount() {
+  $('#accKeyGo').onclick = () => accUseKey($('#accKey').value);
+  $('#accKeyClear').onclick = accDropKey;
+  $('#accLoginBtn').onclick = accLogin;
+  $('#accRegisterBtn').onclick = () => $('#accInviteBox').classList.toggle('hide');
+  $('#accRegGo').onclick = accRegister;
+  $('#accSwitchBtn').onclick = accSwitch;
+  $('#accLogoutBtn').onclick = accLogout;
+  $('#accPass').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') accLogin(); });
+}
+
 /* ---------------------------------------------------------------- 我的页 */
 async function openSettings() {
   $('#serverInput').value = S.server || window.location.origin;
+  refreshAccount();
   const snap = (await local.get('meta', 'snapshot')) || null;
   S.snap = snap ? snap.value : null;
   $('#snapInfo').textContent = S.snap
@@ -2385,7 +2641,7 @@ async function openSettings() {
     : '还没同步过';
   if (S.server) {
     $('#qrBox').classList.remove('hide');
-    $('#qrImg').src = S.server.replace(/\/+$/, '') + '/api/mobile/qr.png';
+    $('#qrImg').src = withKey(S.server.replace(/\/+$/, '') + '/api/mobile/qr.png');
     $('#qrImg').onerror = () => { $('#qrBox').classList.add('hide'); };
   }
   const rows = await local.all('pending');
@@ -2414,7 +2670,7 @@ function bindMe() {
   $('#scanQrBtn').onclick = () => {
     $('#qrBox').classList.toggle('hide');
     if (S.server) {
-      $('#qrImg').src = S.server.replace(/\/+$/, '') + '/api/mobile/qr.png';
+      $('#qrImg').src = withKey(S.server.replace(/\/+$/, '') + '/api/mobile/qr.png');
       toast('用电脑屏幕上的二维码对准手机扫；也可以把地址手打进来');
     } else {
       toast('先填一个电脑地址，才能取到它的二维码', true);
@@ -2574,7 +2830,9 @@ async function boot() {
     S.server = sanitizeServer(location.origin);
   }
   if (S.server) localStorage.setItem('vsw.server', S.server);
+  loadCreds();
   $('#serverInput').value = S.server || '';
+  bindAccount();
   $$('nav button[data-v]').forEach((b) => { b.onclick = () => switchTab(b.dataset.v); });
   $$('#triageSeg button').forEach((b) => {
     b.onclick = () => {
@@ -2645,7 +2903,7 @@ async function boot() {
   await checkOnline();
   renderNet();
   // 离线优先：先渲染本地库，联网检查在后台进行（不要让它挡住首屏）
-  checkOnline().then(() => render());
+  checkOnline().then(() => { render(); refreshAccount(); });
 
   if (ENV.canUseServiceWorker) {
     navigator.serviceWorker.register('/m/sw.js').then(() => {

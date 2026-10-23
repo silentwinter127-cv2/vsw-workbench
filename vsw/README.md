@@ -197,6 +197,8 @@ start_vsw.bat
 python -m vsw.server --root vsw/data --host 127.0.0.1 --port 8799
 # 可选：--allow-private  只在本地自测时允许抓内网/回环地址的图
 # 可选：--no-browser
+# 可选：--protect       给这个工作区上锁（第一次会自动生成一把主人密钥）
+# 可选：--unprotect     把锁摘掉
 ```
 
 打开 `http://127.0.0.1:8799/`，七个工作区：
@@ -216,6 +218,26 @@ python -m vsw.server --root vsw/data --host 127.0.0.1 --port 8799
 依赖：Python 3.10+、`Pillow`、`numpy`、`requests`（都已在本机可用）；
 自动识图另需 **Node 18+**（本机 22/24 都有，驱动只用标准库 + 全局 `WebSocket`）与本机 Edge/Chrome。
 语义层需要本机模型 `D:\siglip2-base-patch16-224`；**没有它也能跑**，工作台自动退化为文件层 + 感知哈希层，公式与队列照常工作。
+
+### 分人用：账号、私人工作区、协作
+
+默认不设防（本机与同一局域网都能读写）。要分人用，就在页面右上角「共享 / 账号」里
+**建第一个账号** —— 只能在跑服务的那台电脑上建，建完这份数据就归它名下。
+
+- **一个工作区 = 一个数据目录**：自己的 `workbench.sqlite3` + `media/` + `archives/`，
+  不是"同一张表按 owner 过滤"的假隔离。老数据目录原地留下，成为第一个账号的工作区。
+- **三种角色**：主人（全部权限）/ 可操作（搜、导、归档、进回收站）/ 只看。
+  权限在服务端判，前端藏按钮只是顺手。
+- **邀请码**：`INV-XXXX-XXXX-XXXX`，一次性、带有效期、**不能直接发主人**；注册入口不对外开放。
+- **访客密钥**（`VSW-XXXX-XXXX-XXXX`）保留给"只想给人看一会儿"的场景，是工作区局部的，
+  而且进不了账号接口。
+
+登录状态两种携带方式：普通浏览器走 cookie；APK 里页面是 `file://`，带不了 cookie，
+所以登录后会存一份令牌走 `X-VSW-Session` 请求头（访客密钥走 `X-VSW-Key` 或 `?key=`）。
+
+实现位置：[`vsw/accounts.py`](accounts.py)（账号/工作区/成员/会话/邀请码）、
+[`vsw/hub.py`](hub.py)（工作区句柄表）、[`vsw/access.py`](access.py)（访客密钥）、
+[`vsw/server.py`](server.py) 的 `_resolve/_bind/_guard`（每请求定身份 + 绑工作区）。
 
 ### 手机版（PWA / 安卓 APK，可离线独立使用）
 

@@ -26,6 +26,9 @@ body { margin: 0; background: #0e1116; color: #e6ecf3; }
   <div class="spacer"></div>
   <span class="pill" id="enginePill">检测语义引擎…</span>
   <span class="pill" id="statPill">—</span>
+  <span class="pill" id="rolePill" hidden></span>
+  <button class="btn ghost" id="userBtn" hidden title="账号与工作区"></button>
+  <button class="btn ghost" id="shareBtn" title="把这个工作台开放给别人：账号、成员、密钥">共享 / 账号</button>
 </header>
 
 <main>
@@ -443,6 +446,137 @@ body { margin: 0; background: #0e1116; color: #e6ecf3; }
 </aside>
 
 <div class="toast" id="toast"></div>
+
+<!-- 账号层：第一次建号 / 登录 / 邀请码注册 / 访客密钥，全在这一张卡里。
+     页面壳子本身不设防（解锁框、登录框就长在这些文件里）。 -->
+<div class="layer" id="authLayer" hidden>
+  <div class="sheet lockcard">
+    <div class="lockicon" id="authIcon">🔒</div>
+    <h2 id="authTitle">登录</h2>
+    <p class="hint" id="authHint">用你的账号进来。每人有自己的私人工作区，也可以进别人邀请你协作的工作区。</p>
+
+    <div id="authSetup" hidden>
+      <input type="text" id="setupName" placeholder="你的名字" autocomplete="username">
+      <input type="password" id="setupPass" placeholder="密码（至少 6 位）" autocomplete="new-password">
+      <input type="text" id="setupWs" placeholder="工作区名字（留空就用「XX 的工作区」）">
+      <button class="btn primary wide" id="setupGo">建账号并开始</button>
+      <p class="hint small">第一个账号是这个工作台的主人，会接管现在这份数据目录。
+        以后想再拉人进来，发一条邀请码给对方就行。</p>
+    </div>
+
+    <div id="authLogin" hidden>
+      <input type="text" id="loginName" placeholder="名字" autocomplete="username">
+      <input type="password" id="loginPass" placeholder="密码" autocomplete="current-password">
+      <div class="lockerr" id="authErr"></div>
+      <button class="btn primary wide" id="loginGo">登录</button>
+
+      <details class="authmore">
+        <summary>有邀请码？在这里注册一个账号</summary>
+        <input type="text" id="regCode" placeholder="INV-XXXX-XXXX-XXXX"
+               autocomplete="off" spellcheck="false" autocapitalize="characters">
+        <input type="text" id="regName" placeholder="你想用的名字" autocomplete="username">
+        <input type="password" id="regPass" placeholder="密码（至少 6 位）" autocomplete="new-password">
+        <button class="btn wide" id="regGo">用邀请码注册</button>
+      </details>
+
+      <details class="authmore">
+        <summary>只有访客密钥？用密钥进来</summary>
+        <input type="text" id="lockCode" placeholder="VSW-XXXX-XXXX-XXXX"
+               autocomplete="off" spellcheck="false" autocapitalize="characters">
+        <button class="btn wide" id="lockGo">用密钥进入</button>
+        <p class="hint small">访客密钥只能看不能改（或者按主人给的权限）。连续试错 8 次会锁 5 分钟。</p>
+      </details>
+    </div>
+
+    <div class="lockerr" id="lockErr"></div>
+  </div>
+</div>
+
+<!-- 账号菜单：换工作区、开新工作区、登出。 -->
+<div class="layer" id="wsLayer" hidden>
+  <div class="sheet wscard">
+    <div class="sheethead">
+      <h2>账号与工作区</h2>
+      <button class="btn ghost" id="wsClose">关闭</button>
+    </div>
+    <div class="shareme" id="wsMe"></div>
+    <h3>我的工作区</h3>
+    <div class="keylist" id="wsList"></div>
+    <div class="sharerow">
+      <input type="text" id="wsNewName" placeholder="新工作区名字（比如：2026 春季素材）">
+      <button class="btn" id="wsNewGo">新建</button>
+    </div>
+    <p class="hint small">每个工作区是一套独立的数据目录：种子、结果、归档、回收站都不相通。
+      想几个人一起用同一个工作区，就进「共享 / 账号 → 成员」把人拉进来。</p>
+    <div class="sharerow">
+      <button class="btn ghost" id="wsLogout">退出登录</button>
+      <button class="btn ghost" id="wsPassBtn">改密码</button>
+    </div>
+    <div id="wsPassBox" hidden>
+      <div class="sharerow">
+        <input type="password" id="wsPassOld" placeholder="原密码">
+        <input type="password" id="wsPassNew" placeholder="新密码（至少 6 位）">
+        <button class="btn" id="wsPassGo">改</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 共享面板：主人在这里发钥匙、撤销钥匙、拿分享链接。 -->
+<div class="layer" id="shareLayer" hidden>
+  <div class="sheet sharecard">
+    <div class="sheethead">
+      <h2>共享这个工作台</h2>
+      <button class="btn ghost" id="shareClose">关闭</button>
+    </div>
+    <div class="shareme" id="shareMe"></div>
+
+    <!-- 账号模式才有：这个工作区的成员 + 邀请码 -->
+    <div id="shareAccount" hidden>
+      <h3>这个工作区里的成员</h3>
+      <div class="keylist" id="memberList"></div>
+      <div class="sharerow" id="memberAddRow">
+        <input type="text" id="memberName" placeholder="已有账号的名字">
+        <select id="memberRole"></select>
+        <button class="btn" id="memberAddGo">加进来</button>
+      </div>
+      <p class="hint small">对方得先有账号。没有的话，下面发一条邀请码给他注册。</p>
+
+      <h3>邀请码</h3>
+      <div class="sharerow">
+        <select id="inviteRole"></select>
+        <select id="inviteHours">
+          <option value="24">1 天有效</option>
+          <option value="72" selected>3 天有效</option>
+          <option value="168">7 天有效</option>
+          <option value="720">30 天有效</option>
+        </select>
+        <button class="btn primary" id="inviteGo">生成邀请码</button>
+      </div>
+      <div class="newkey" id="inviteOut" hidden></div>
+      <div class="keylist" id="inviteList"></div>
+    </div>
+
+    <div id="shareOwnerOnly">
+      <h3>新建一把密钥</h3>
+      <div class="sharerow">
+        <input type="text" id="newKeyLabel" placeholder="给谁用（例如：小林、群里）">
+        <select id="newKeyRole"></select>
+        <button class="btn primary" id="newKeyGo">生成</button>
+      </div>
+      <p class="hint small">明文码只在生成这一刻显示一次，库里只存哈希 —— 关掉面板就再也拿不回来了，
+        但可以撤掉重发一把。</p>
+      <div class="newkey" id="newKeyOut" hidden></div>
+
+      <h3>已有的密钥</h3>
+      <div class="keylist" id="keyList"></div>
+    </div>
+
+    <h3>别人怎么进来</h3>
+    <div class="keylist" id="shareLinks"></div>
+    <p class="hint small">链接里带着密钥，谁拿到谁就能进来 —— 发给信得过的人，别贴到公开群里。</p>
+  </div>
+</div>
 
 <script>
 /* 内联引导脚本：外链脚本加载失败时也能给出提示。 */

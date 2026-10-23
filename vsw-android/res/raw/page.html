@@ -1,0 +1,2962 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="视觉工作台">
+<title>视觉搜索工作台 · 手机版</title>
+<link rel="manifest" href="/m/manifest.webmanifest">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='96' fill='%230e1116'/%3E%3Cg fill='none' stroke='%234ea1ff' stroke-width='26'%3E%3Crect x='92' y='92' width='132' height='132' rx='18'/%3E%3Crect x='288' y='92' width='132' height='132' rx='18'/%3E%3Crect x='92' y='288' width='132' height='132' rx='18'/%3E%3C/g%3E%3Ccircle cx='354' cy='354' r='58' fill='none' stroke='%2359d9a4' stroke-width='26'/%3E%3C/svg%3E">
+<style>
+/* 手机端设计前提：单手、竖屏、可能在地铁上没网。
+   所以底部标签栏 + 全屏面板 + 所有列表都能离线读；联网才有动作的地方一律标灰并说明原因。 */
+:root{
+  --bg:#0e1116; --bg1:#151a22; --bg2:#1b222c; --bg3:#232c38;
+  --line:#2b3542; --soft:#222b36;
+  --fg:#e6ecf3; --dim:#9aa8b8; --mute:#6b7a8c;
+  --accent:#4ea1ff; --accent-soft:rgba(78,161,255,.16);
+  --track:#ffb454; --diff:#59d9a4; --bridge:#c58cff; --danger:#ff6b6b;
+  --radius:12px;
+  --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-t:env(safe-area-inset-top,0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
+  font:15px/1.5 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  overscroll-behavior-y:none}
+a{color:var(--accent);text-decoration:none}
+button,input,select,textarea{font:inherit;color:inherit}
+.hide{display:none!important}
+
+/* ------------------------------------------------------------------ 顶栏 */
+header{
+  position:sticky;top:0;z-index:30;padding:calc(var(--safe-t) + 8px) 12px 8px;
+  background:rgba(14,17,22,.94);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);
+}
+.htop{display:flex;align-items:center;gap:8px}
+.htop h1{font-size:16px;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pill{padding:3px 10px;border-radius:999px;background:var(--bg2);border:1px solid var(--line);
+  font-size:11.5px;color:var(--dim);white-space:nowrap}
+.pill.on{border-color:var(--diff);color:var(--diff)}
+.pill.off{border-color:var(--danger);color:var(--danger)}
+.pill.warn{border-color:var(--track);color:var(--track)}
+.hsub{display:flex;gap:6px;align-items:center;margin-top:8px}
+
+/* ------------------------------------------------------------------ 标签栏 */
+nav{
+  position:fixed;left:0;right:0;bottom:0;z-index:40;display:flex;
+  padding:6px 4px calc(var(--safe-b) + 6px);background:rgba(14,17,22,.96);
+  backdrop-filter:blur(10px);border-top:1px solid var(--line);
+}
+nav button{flex:1;background:none;border:0;padding:6px 2px;color:var(--mute);font-size:11px;
+  display:flex;flex-direction:column;align-items:center;gap:3px;position:relative}
+nav button .ic{font-size:19px;line-height:1}
+nav button.active{color:var(--accent)}
+nav button .badge-dot{position:absolute;top:2px;right:calc(50% - 16px);min-width:16px;height:16px;
+  border-radius:999px;background:var(--accent);color:#04121f;font-size:10px;line-height:16px;
+  padding:0 4px;font-weight:700}
+
+main{padding:12px 12px calc(var(--safe-b) + 84px)}
+
+/* ------------------------------------------------------------------ 通用件 */
+.seg{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;margin:0 0 10px}
+.seg button{flex:0 0 auto;padding:6px 12px;border-radius:999px;border:1px solid var(--line);
+  background:var(--bg2);color:var(--dim);font-size:13px}
+.seg button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
+.card{background:var(--bg1);border:1px solid var(--line);border-radius:var(--radius);
+  padding:12px;margin-bottom:10px}
+/* 合并相册：勾中的批次卡片换边色，一眼看出合并了什么 */
+.card.is-picked{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.pickbox{display:flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 22px}
+.pickbox input{width:18px;height:18px;accent-color:var(--accent)}
+.btn{padding:9px 14px;border-radius:10px;border:1px solid var(--line);background:var(--bg2);
+  color:var(--fg);font-size:14px}
+.btn:active{background:var(--bg3)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#06111f;font-weight:600}
+.btn.danger{border-color:rgba(255,107,107,.5);color:var(--danger)}
+.btn.ghost{background:transparent}
+.btn[disabled]{opacity:.42}
+.btn.sm{padding:6px 10px;font-size:12.5px;border-radius:9px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.row.tight{gap:6px}
+.spacer{flex:1}
+.small{font-size:12px;color:var(--mute)}
+.mono{font-family:ui-monospace,Consolas,monospace}
+input[type=text],input[type=password],input[type=number],select,textarea{
+  width:100%;padding:10px;background:var(--bg2);color:var(--fg);
+  border:1px solid var(--line);border-radius:10px}
+input[type=password]{letter-spacing:1px}
+textarea{min-height:80px;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+label.field{display:block;margin:10px 0}
+label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{padding:5px 10px;border:1px solid var(--line);border-radius:999px;background:var(--bg2);
+  font-size:12.5px;color:var(--dim)}
+.chip.on{border-color:var(--accent);background:var(--accent-soft);color:var(--fg)}
+.chip .n{color:var(--mute);font-family:ui-monospace,monospace;font-size:11px;margin-left:4px}
+.tbadge{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+.tbadge.tracking{color:var(--track);border-color:var(--track)}
+.tbadge.diffusion{color:var(--diff);border-color:var(--diff)}
+.tbadge.bridge{color:var(--bridge);border-color:var(--bridge)}
+.tbadge.promoted{color:#04140d;background:var(--diff);border-color:var(--diff)}
+.tbadge.archived{color:#150a22;background:var(--bridge);border-color:var(--bridge)}
+.empty{text-align:center;color:var(--mute);padding:34px 12px;font-size:13.5px}
+
+/* ------------------------------------------------------------------ 结果卡片 */
+.flist{display:flex;flex-direction:column;gap:10px}
+.fcard{display:grid;grid-template-columns:96px 1fr;gap:10px;background:var(--bg1);
+  border:1px solid var(--line);border-radius:var(--radius);padding:8px;position:relative}
+.fcard.sel{border-color:var(--accent);background:var(--accent-soft)}
+.fcard img{width:96px;height:96px;object-fit:cover;border-radius:9px;background:#05080c}
+.fcard .tt{font-size:13.5px;line-height:1.4;max-height:2.8em;overflow:hidden}
+.fcard .meta2{display:flex;flex-direction:column;gap:5px;min-width:0}
+.fcard .ln{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:11.5px;color:var(--mute)}
+.fcard .check{position:absolute;top:6px;right:6px;width:24px;height:24px;border-radius:999px;
+  border:1.5px solid var(--line);background:rgba(6,10,16,.7);display:flex;align-items:center;
+  justify-content:center;font-size:14px;color:transparent}
+.fcard.sel .check{border-color:var(--accent);background:var(--accent);color:#06111f}
+
+/* ------------------------------------------------------------------ 底部面板 */
+.sheet{position:fixed;inset:0;z-index:60;background:var(--bg);display:flex;flex-direction:column;
+  transform:translateY(102%);transition:transform .22s ease}
+.sheet.open{transform:none}
+.sheet .shead{display:flex;align-items:center;gap:8px;padding:calc(var(--safe-t) + 10px) 12px 10px;
+  border-bottom:1px solid var(--line);background:var(--bg1)}
+.sheet .sbody{flex:1;overflow-y:auto;padding:12px 12px calc(var(--safe-b) + 20px)}
+.sheet img.hero{width:100%;border-radius:12px;background:#05080c;display:block}
+.kv{display:grid;grid-template-columns:74px 1fr;gap:5px 10px;font-size:13px;margin:10px 0}
+.kv dt{color:var(--mute)}
+.kv dd{margin:0;word-break:break-all}
+.src{background:var(--bg2);border:1px solid var(--soft);border-radius:10px;padding:9px;
+  margin-bottom:7px;font-size:12.5px}
+.src .u{font-family:ui-monospace,monospace;font-size:11px;color:var(--mute);word-break:break-all}
+.chain{display:flex;flex-direction:column;gap:4px;font-size:12.5px}
+.chain .n{display:flex;gap:8px;align-items:center;background:var(--bg2);border:1px solid var(--soft);
+  border-radius:9px;padding:7px}
+.chain .n .ty{color:var(--mute);font-size:11px;min-width:44px}
+
+/* ------------------------------------------------------------------ 框选 */
+.cropwrap{position:relative;background:#05080c;border-radius:12px;overflow:hidden;touch-action:none;
+  user-select:none}
+.cropwrap img{display:block;width:100%}
+.cropsel{position:absolute;border:0;pointer-events:none}
+.cropsel .cnr{position:absolute;width:22px;height:22px;border:3px solid #fff}
+.cropsel .cnr.tl{top:-2px;left:-2px;border-right:0;border-bottom:0;border-radius:11px 0 0 0}
+.cropsel .cnr.tr{top:-2px;right:-2px;border-left:0;border-bottom:0;border-radius:0 11px 0 0}
+.cropsel .cnr.bl{bottom:-2px;left:-2px;border-right:0;border-top:0;border-radius:0 0 0 11px}
+.cropsel .cnr.br{bottom:-2px;right:-2px;border-left:0;border-top:0;border-radius:0 0 11px 0}
+.cropsel .tag{position:absolute;top:-26px;left:0;background:rgba(10,14,20,.9);
+  border:1px solid rgba(255,255,255,.2);border-radius:999px;padding:2px 8px;font-size:11px;
+  font-family:ui-monospace,monospace;white-space:nowrap}
+.cropveil{position:absolute;inset:0;pointer-events:none}
+.croptip{text-align:center;font-size:12px;color:var(--mute);margin-top:8px}
+
+/* ------------------------------------------------------------------ 队列项 */
+.job{background:var(--bg1);border:1px solid var(--line);border-radius:var(--radius);padding:9px;
+  display:grid;grid-template-columns:52px 1fr;gap:9px;margin-bottom:8px}
+.job img{width:52px;height:52px;object-fit:cover;border-radius:8px;background:#05080c}
+.job .t1{font-size:13px}
+.job .t2{font-size:11px;color:var(--mute);font-family:ui-monospace,monospace}
+/* 多选模式下被选中的队列项要一眼看出来 */
+.job.sel{border-color:var(--accent);background:var(--accent-soft)}
+.st{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+.st.pending{color:var(--dim)} .st.running{color:var(--accent);border-color:var(--accent)}
+.st.review{color:var(--track);border-color:var(--track)}
+.st.done{color:var(--diff);border-color:var(--diff)}
+.st.failed{color:var(--danger);border-color:var(--danger)}
+
+/* ------------------------------------------------------------------ 其它 */
+.toast{position:fixed;left:50%;bottom:calc(var(--safe-b) + 78px);transform:translateX(-50%);
+  background:var(--bg3);border:1px solid var(--line);border-radius:999px;padding:9px 16px;
+  font-size:13px;z-index:90;opacity:0;transition:.2s;max-width:86vw;text-align:center}
+.toast.show{opacity:1}
+.toast.bad{border-color:var(--danger);color:#ffd9d9}
+.progress{height:6px;border-radius:4px;background:var(--bg3);overflow:hidden;margin:8px 0}
+.progress i{display:block;height:100%;background:var(--accent);width:0}
+.gate{background:rgba(255,180,84,.12);border:1px solid rgba(255,180,84,.45);border-radius:10px;
+  padding:9px 11px;font-size:12.5px;color:#ffd9a3;margin-bottom:10px}
+.metric{background:var(--bg2);border:1px solid var(--soft);border-radius:10px;padding:9px 11px}
+.metric .n{font-size:20px;font-family:ui-monospace,monospace}
+.metric .l{font-size:11.5px;color:var(--mute)}
+/* ------------------------------------------------------------------ 首次启动 */
+.intro{position:fixed;inset:0;z-index:70;background:var(--bg);overflow-y:auto;
+  padding:calc(var(--safe-t) + 22px) 18px calc(var(--safe-b) + 24px)}
+.intro h2{font-size:21px;margin:0 0 6px}
+.intro .lead{color:var(--dim);font-size:13.5px;margin:0 0 18px}
+.intro .opt{background:var(--bg1);border:1px solid var(--line);border-radius:14px;
+  padding:14px;margin-bottom:12px}
+.intro .opt h3{font-size:15px;margin:0 0 6px;display:flex;align-items:center;gap:8px}
+.intro .opt h3 .num{width:22px;height:22px;border-radius:999px;background:var(--accent);
+  color:#06111f;font-size:12px;display:flex;align-items:center;justify-content:center;font-weight:700}
+.intro .opt p{margin:0 0 10px;color:var(--dim);font-size:12.5px}
+.intro code{background:var(--bg3);border-radius:5px;padding:1px 5px;font-size:12px;
+  font-family:ui-monospace,Consolas,monospace;word-break:break-all}
+.intro .steps{counter-reset:s;margin:0 0 10px;padding-left:0;list-style:none}
+.intro .steps li{counter-increment:s;position:relative;padding-left:24px;margin-bottom:6px;
+  font-size:12.5px;color:var(--dim)}
+.intro .steps li::before{content:counter(s);position:absolute;left:0;top:1px;width:17px;height:17px;
+  border-radius:999px;background:var(--bg3);color:var(--dim);font-size:11px;
+  display:flex;align-items:center;justify-content:center}
+.intro .skip{width:100%;margin-top:4px}
+.banner{background:rgba(78,161,255,.12);border:1px solid rgba(78,161,255,.4);border-radius:10px;
+  padding:9px 11px;font-size:12.5px;margin-bottom:10px;display:flex;gap:8px;align-items:center}
+.banner .spacer{flex:1}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="htop">
+    <h1 id="title">结果板</h1>
+    <span class="pill" id="netPill">检测中…</span>
+    <span class="pill" id="dataPill">本地库</span>
+  </div>
+  <div class="hsub" id="hsub"></div>
+</header>
+
+<main>
+  <!-- 结果板 -->
+  <section id="v-board">
+    <div id="boardBanner"></div>
+    <div class="seg" id="triageSeg">
+      <button data-t="all" class="on">全部</button>
+      <button data-t="tracking">A 来源追踪</button>
+      <button data-t="diffusion">B 主题扩散</button>
+      <button data-t="bridge">C 桥接探索</button>
+    </div>
+    <div class="row" style="margin-bottom:10px">
+      <input type="text" id="boardSearch" placeholder="搜标题 / 标签 / 平台" style="flex:1">
+      <button class="btn sm" id="selAllBtn">全选</button>
+    </div>
+    <div class="row tight" id="boardActions" style="margin-bottom:10px"></div>
+    <div class="flist" id="boardList"></div>
+    <div class="empty hide" id="boardEmpty">本地库是空的 —— 到「我的」页连上电脑同步一次，或直接导入别人给你的数据集。</div>
+  </section>
+
+  <!-- 队列 -->
+  <section id="v-queue" class="hide">
+    <div id="queueGate"></div>
+    <div class="mgrid" id="queueStats" style="margin-bottom:10px"></div>
+    <div class="seg" id="queueSeg">
+      <button data-s="todo" class="on">待处理</button>
+      <button data-s="pending">待搜索</button>
+      <button data-s="review">待复查</button>
+      <button data-s="done">已完成</button>
+      <button data-s="failed">失败</button>
+    </div>
+
+    <details class="filter-box" id="queueFilterBox" open>
+      <summary>队列筛选 <span class="small" id="queueFilterSummary"></span></summary>
+      <div class="filter-grid">
+        <label class="field"><span>种子</span>
+          <select id="queueSeed"><option value="">全部种子</option></select></label>
+        <label class="field"><span>产出</span>
+          <select id="queueResults">
+            <option value="">全部</option>
+            <option value="with">只看到有产出的</option>
+            <option value="without">只看还没产出的</option>
+          </select></label>
+        <label class="field"><span>关键词</span>
+          <input type="text" id="queueText" placeholder="引擎 / 变体 / 种子标题"></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="small">引擎：</span>
+        <div class="chips" id="queueFilterEngines"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <span class="small">变体：</span>
+        <div class="chips" id="queueFilterKinds"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn sm" id="queueFilterClear">清空筛选</button>
+      </div>
+    </details>
+
+    <div class="row tight" id="queueActions" style="margin-bottom:10px"></div>
+    <div id="queueList"></div>
+  </section>
+
+  <!-- 归档与回收站 -->
+  <section id="v-archive" class="hide">
+    <div class="card">
+      <div class="row"><b>入库归档</b><div class="spacer"></div>
+        <span class="small" id="archiveHint"></span></div>
+      <div class="mgrid" id="archiveMetrics" style="margin-top:10px"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="archiveSelectedBtn">归档选中</button>
+        <button class="btn" id="archiveAllBtn">整批归档</button>
+      </div>
+    </div>
+    <div id="archiveMergeBar" class="card" style="margin-bottom:10px">
+      <div class="row"><b>合并相册</b><div class="spacer"></div>
+        <span class="small" id="archiveMergeHint">勾选下面的批次，把几批合成一个相册看</span></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn primary" id="archiveMergeLook" disabled>合并查看</button>
+        <button class="btn" id="archiveMergeSave" disabled>合并保存 zip</button>
+        <button class="btn ghost" id="archiveMergeClear" style="display:none">清除勾选</button>
+      </div>
+    </div>
+    <div id="archiveList"></div>
+    <div class="card" style="margin-top:12px">
+      <div class="row"><b>回收站</b><div class="spacer"></div>
+        <span class="small" id="trashHint"></span></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="trashRestoreAll">全部恢复</button>
+        <button class="btn danger" id="trashPurgeAll">清空（彻底删）</button>
+      </div>
+    </div>
+    <div id="trashList"></div>
+  </section>
+
+  <!-- 我的 -->
+  <section id="v-me" class="hide">
+    <div class="card" id="accountCard">
+      <div class="row"><b>账号</b><div class="spacer"></div><span class="small" id="accState">未登录</span></div>
+      <div id="accWho" class="small" style="margin:6px 0"></div>
+      <div id="accLogged" class="hide">
+        <label class="field"><span>工作区</span>
+          <select id="accWs"></select></label>
+        <div class="row">
+          <button class="btn" id="accSwitchBtn">切换</button>
+          <button class="btn ghost" id="accLogoutBtn">退出登录</button>
+        </div>
+      </div>
+      <div id="accLoggedOut" class="hide">
+        <label class="field"><span>名字</span>
+          <input type="text" id="accName" autocomplete="username" placeholder="你的账号名"></label>
+        <label class="field"><span>密码</span>
+          <input type="password" id="accPass" autocomplete="current-password" placeholder="至少 6 位"></label>
+        <div class="row">
+          <button class="btn primary" id="accLoginBtn">登录</button>
+          <button class="btn" id="accRegisterBtn">用邀请码注册</button>
+        </div>
+        <div id="accInviteBox" class="hide" style="margin-top:8px">
+          <label class="field"><span>邀请码</span>
+            <input type="text" id="accInvite" placeholder="INV-XXXX-XXXX-XXXX"></label>
+          <button class="btn primary" id="accRegGo" style="width:100%">注册并登录</button>
+        </div>
+        <p class="small">没有账号？让主人在电脑上「共享 / 账号」里给你一条邀请码。</p>
+        <label class="field"><span>或者：访客密钥（VSW-…，只读或协作）</span>
+          <input type="text" id="accKey" placeholder="VSW-XXXX-XXXX-XXXX" autocapitalize="characters"></label>
+        <div class="row">
+          <button class="btn" id="accKeyGo">用密钥进入</button>
+          <button class="btn ghost" id="accKeyClear">清掉密钥</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row"><b>连接电脑上的工作台</b></div>
+      <p class="small">手机本身跑不了无头浏览器，所以「自动识图」只能在电脑上执行。
+        这里填电脑的局域网地址，就能同步一份快照到手机上离线看、也能把手机拍的照片推回电脑。</p>
+      <label class="field"><span>电脑地址</span>
+        <input type="text" id="serverInput" placeholder="http://192.168.1.5:8787"></label>
+      <div class="row">
+        <button class="btn" id="scanQrBtn">扫二维码</button>
+        <button class="btn" id="pingBtn">测试连接</button>
+      </div>
+      <div id="qrBox" class="hide" style="margin-top:10px;text-align:center">
+        <img id="qrImg" alt="二维码" style="width:190px;height:190px;background:#fff;border-radius:12px;padding:6px">
+        <div class="small">用电脑屏幕上的二维码对准手机扫；也可以把地址直接填在上面</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row"><b>怎么让别人也能用</b></div>
+      <p class="small">这个应用本身只是一个"看板"，它需要连到一台跑着<b>视觉搜索工作台</b>的电脑
+        （那台电脑负责搜索、去重、排序——手机做不了无头浏览器）。给别人用的时候：</p>
+      <ol class="steps">
+        <li>把 <code>vsw</code> 文件夹和工作台源码给对方</li>
+        <li>对方电脑上装 Python，然后跑 <code>start_vsw_lan.bat</code></li>
+        <li>对方在这个应用里填自己电脑的地址（或扫启动日志里的二维码）</li>
+      </ol>
+      <p class="small">不想让对方装 Python 也行：你在自己电脑上导出一份数据集文件发给他，
+        他在下面「导入数据集」即可离线浏览（能看结果、来源、回放链，但不能搜新图）。</p>
+      <div class="row"><button class="btn" id="introAgainBtn">再看一遍首次使用说明</button></div>
+    </div>
+
+    <div class="card">
+      <div class="row"><b>同步快照</b><div class="spacer"></div><span class="small" id="snapInfo"></span></div>
+      <label class="field"><span>图片</span>
+        <select id="imageMode">
+          <option value="thumbs">只带缩略图（推荐，体积小）</option>
+          <option value="full">连原图一起带（可完全断网看图，体积大）</option>
+          <option value="none">只带文字信息</option>
+        </select></label>
+      <label class="field"><span>最多多少条（越大首次同步越慢）</span>
+        <input type="number" id="snapLimit" value="300" min="50" max="5000" step="50"></label>
+      <label class="field"><span>回收站</span>
+        <select id="trashMode">
+          <option value="1">一起同步（手机上也能恢复/清理）</option>
+          <option value="0">不同步（快照更小）</option>
+        </select></label>
+      <button class="btn primary" id="syncBtn" style="width:100%">同步到手机</button>
+      <div class="progress hide" id="syncProgress"><i></i></div>
+      <div class="small" id="syncNote"></div>
+    </div>
+
+    <div class="card">
+      <div class="row"><b>离线收件箱</b><div class="spacer"></div><span class="small" id="pendingInfo"></span></div>
+      <p class="small">手机上拍/选的图、框选结果、以及离线时删掉的对象都会先存在这里，
+        回到同一 WiFi 后一键推回电脑。数据集也可以导出成文件，用数据线拷给别人。</p>
+      <div class="row">
+        <button class="btn primary" id="flushBtn">推回电脑</button>
+        <button class="btn" id="exportBtn">导出数据集</button>
+        <button class="btn" id="importFileBtn">导入数据集</button>
+        <button class="btn ghost" id="clearLocalBtn">清空本地库</button>
+      </div>
+      <input type="file" id="importFile" accept=".json,application/json" class="hide">
+      <div id="pendingList" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <div class="row"><b>安装到桌面</b></div>
+      <p class="small">浏览器菜单里选「添加到主屏幕」即可当 App 用（iOS 用 Safari 的分享 → 添加到主屏幕）。
+        装好后即使连不上电脑也能打开看本地库。</p>
+      <div class="row"><span class="pill" id="swPill">service worker</span>
+        <span class="pill" id="storagePill">存储</span></div>
+    </div>
+  </section>
+</main>
+
+<nav>
+  <button data-v="board" class="active"><span class="ic">▦</span>结果板</button>
+  <button data-v="queue"><span class="ic">≡</span>队列<span class="badge-dot hide" id="queueDot"></span></button>
+  <button data-v="archive"><span class="ic">▤</span>归档</button>
+  <button data-v="me"><span class="ic">☰</span>我的</button>
+  <button id="importFab"><span class="ic">＋</span>导入</button>
+</nav>
+
+<div class="toast" id="toast"></div>
+
+<!-- 首次启动引导：应用是"看板"，必须先告诉它数据从哪来，否则对方看到的是空白页 -->
+<div class="intro hide" id="intro">
+  <h2>视觉搜索工作台 · 手机版</h2>
+  <p class="lead">「搜索引擎负责发现，工作台负责调度、去重、排序和积累知识。」
+    手机端负责随时翻看与收集；真正的批量搜索、三层去重、发散度排序在家里那台电脑上跑。</p>
+
+  <div class="opt">
+    <h3><span class="num">1</span>连上你（或对方）电脑上的工作台</h3>
+    <p>推荐这个。电脑负责搜索与去重，手机只当看板 —— 所有能力都完整。</p>
+    <ol class="steps">
+      <li>电脑上装 Python 3.10+，进入工作台目录</li>
+      <li>双击 <code>start_vsw_lan.bat</code>（等于 <code>python -m vsw.server --host 0.0.0.0 --port 8799</code>）</li>
+      <li>启动日志里会出现一个二维码和几个地址，扫它或手填到下面</li>
+    </ol>
+    <label class="field"><span>电脑地址</span>
+      <input type="text" id="introServer" placeholder="http://192.168.1.5:8799"></label>
+    <div class="row">
+      <button class="btn primary" id="introConnect">连接并同步</button>
+      <button class="btn" id="introScan">扫二维码</button>
+    </div>
+    <p class="small" style="margin:10px 0 0">电脑和手机要在同一个 WiFi 下。
+      工作台目前没有口令，别在公共 WiFi 上开放。</p>
+  </div>
+
+  <div class="opt">
+    <h3><span class="num">2</span>导入一份数据集，先离线看看</h3>
+    <p>别人给你导出过一个 <code>.json</code> 数据集可以直接选它。
+      能离线浏览结果板、来源页、搜索链回放，也能做归档与清理；但搜新图需要电脑。</p>
+    <div class="row">
+      <button class="btn" id="introImport">选择数据集文件</button>
+      <button class="btn ghost" id="introSkip">先随便看看</button>
+    </div>
+    <input type="file" id="introFile" accept=".json,application/json" class="hide">
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ==========================================================================
+   手机版：一个文件、无依赖、可离线。
+   - 数据：IndexedDB 本地库（快照 JSON + 图片 Blob），离线全靠它
+   - 联网时才有的：同步快照、推回离线操作、自动识图（电脑上的无头浏览器）
+   ========================================================================== */
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const num = (v, d = 2) => (Number(v) || 0).toFixed(d);
+
+const S = {
+  tab: 'board',
+  triage: 'all',
+  queueStatus: 'todo',
+  queueEngines: new Set(),
+  queueKinds: new Set(),      // 变体类型筛选（full / crop_center_50 / …）
+  queueSeed: '',              // 种子筛选（'' = 全部）
+  queueText: '',              // 关键词（引擎名 / 变体 / 种子标题 / 备注）
+  queueResults: '',           // '' | 'with'（只看到有产出的） | 'without'
+  queueSelectMode: false,     // 是否处于多选（删除）模式
+  queueSelected: new Set(),   // 已选中的队列项 id
+  queueDirty: false,          // 队列是否需要在切回队列页时从电脑重拉
+  search: '',
+  findings: [],
+  trash: [],
+  archived: [],      // 归档对象（按 archive_id 归入批次）
+  archives: [],
+  albumPick: new Set(),   // 合并相册：勾中的批次 id
+  jobs: [],
+  seeds: [],
+  variants: [],
+  selection: new Set(),
+  sid: '',      // 登录令牌（APK 里页面是 file://，cookie 带不上，只能存本地走请求头）
+  key: '',      // 访客密钥（VSW-…）
+  me: null,     // /api/auth 的身份
+  server: '',   // 真正取值在 boot() 里做（要清洗掉 file:// 下产生的 "null"）
+  online: false,
+  snap: null,
+  caps: {},
+};
+
+const TRIAGE = { tracking: 'A 来源追踪', diffusion: 'B 主题扩散', bridge: 'C 桥接探索' };
+const STATUS = { pending: '待搜索', running: '搜索中', review: '待复查', done: '已完成', failed: '失败' };
+
+/* 运行环境自检。同一份文件要能跑在三种地方：
+   - APK：安卓 WebView，file:///android_asset/… —— 没有 service worker，原生桥可用
+   - 手机浏览器：http://<电脑IP>/m/ —— 有 service worker，能装到主屏
+   - 本地文件：file:///…/index.html —— 没有 SW，也连不上任何东西，纯离线看数据集  */
+const ENV = {
+  protocol: (typeof location !== 'undefined' && location.protocol) || '',
+  isFile: (typeof location !== 'undefined' && location.protocol === 'file:'),
+  isAndroidApp: typeof window.AndroidBridge !== 'undefined',
+  get canScanQR() {
+    return this.isAndroidApp && typeof window.AndroidBridge.scanQR === 'function';
+  },
+  get canUseServiceWorker() {
+    return 'serviceWorker' in navigator && !this.isFile;
+  },
+};
+
+function toast(msg, bad = false) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.toggle('bad', !!bad);
+  el.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove('show'), bad ? 4200 : 2400);
+}
+
+/* ---------------------------------------------------------------- 本地库 */
+const DB_NAME = 'vsw-mobile';
+const DB_VERSION = 3;
+let dbPromise = null;
+
+/* ---------------------------------------------------------------------------
+ * 本地图片的键必须带命名空间。
+ *
+ * 踩过的真 bug：结果、回收站、变体三张表的 id 各成一套，却有大量重号
+ * （实测结果与变体重叠 39 个、回收站与变体重叠 99 个）。原来键写作 `thumb:{id}`，
+ * 于是"变体 5 的缩略图"和"结果 5 的缩略图"是同一个键 —— 队列页会显示成别的图，
+ * 或者明明有图却显示空白。
+ *
+ * 现在统一成：
+ *   fthumb:{结果id}  ffull:{结果id}  tthumb:{回收站id}
+ *   sthumb:{种子id}  vthumb:{变体id}
+ * 旧键（thumb:/full:/thumb:seed-）一律不再读取；升级时把 assets 清空重下。
+ * ------------------------------------------------------------------------- */
+const KEY = {
+  findingThumb: (id) => `fthumb:${id}`,
+  findingFull: (id) => `ffull:${id}`,
+  trashThumb: (id) => `tthumb:${id}`,
+  seedThumb: (id) => `sthumb:${id}`,
+  variantThumb: (id) => `vthumb:${id}`,
+  archivedThumb: (id) => `athumb:${id}`,
+};
+
+function db() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (event) => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta', { keyPath: 'key' });
+      if (!d.objectStoreNames.contains('assets')) {
+        d.createObjectStore('assets', { keyPath: 'key' });
+      } else if (event.oldVersion < 2) {
+        // 1 → 2：旧键有歧义（结果/回收站/变体共用 `thumb:{id}`），可能已存成错图，
+        // 直接清空重下。图片本身在电脑上都在，重下一次就好，比留着一堆错图强。
+        req.transaction.objectStore('assets').clear();
+      }
+      if (!d.objectStoreNames.contains('pending')) {
+        d.createObjectStore('pending', { keyPath: 'key', autoIncrement: true });
+      }
+      if (!d.objectStoreNames.contains('findings')) {
+        const findings = d.createObjectStore('findings', { keyPath: 'id' });
+        findings.createIndex('triage', 'triage');
+        findings.createIndex('status', 'status');
+      }
+      if (!d.objectStoreNames.contains('trash')) d.createObjectStore('trash', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('archives')) d.createObjectStore('archives', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('jobs')) d.createObjectStore('jobs', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('seeds')) d.createObjectStore('seeds', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('variants')) d.createObjectStore('variants', { keyPath: 'id' });
+      // v3：归档对象单独一仓（手机端要能点开某个批次看内容，离线也要能看）
+      if (!d.objectStoreNames.contains('archived')) d.createObjectStore('archived', { keyPath: 'id' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return dbPromise;
+}
+
+/**
+ * 在 IndexedDB 上跑一个操作并返回结果。
+ *
+ * 这里有一个踩过的坑（很隐蔽，影响面很大）：如果只监听 `transaction.oncomplete`，
+ * 用 `out.result` 取值，那么 **`get` 未命中时 `out.result` 是 `undefined`**，
+ * 于是 `resolve(out)` 会把 **IDBRequest 对象本身** 当成结果返回 —— 它是 truthy！
+ * 结果就是所有 `if (await local.get(...))` 都恒为真：图片缓存永远认为"已经存过了"，
+ * 一张都不会下载。所以单个请求必须按请求自身的 onsuccess 取值（未命中就是 undefined）。
+ */
+async function tx(store, mode, fn) {
+  const d = await db();
+  return new Promise((resolve, reject) => {
+    const t = d.transaction(store, mode);
+    const s = t.objectStore(store);
+    let out;
+    try { out = fn(s); } catch (e) { reject(e); return; }
+    if (out && typeof out === 'object' && 'onsuccess' in out) {
+      // 单个 IDBRequest（get/getAll/count/put/delete/clear）：按它自己的结果 resolve
+      out.onsuccess = () => resolve(out.result);
+      out.onerror = () => reject(out.error || t.error);
+      return;
+    }
+    t.oncomplete = () => resolve(out);
+    t.onerror = () => reject(t.error);
+    t.onabort = () => reject(t.error);
+  });
+}
+
+const local = {
+  put: (store, value) => tx(store, 'readwrite', (s) => s.put(value)),
+  get: (store, key) => tx(store, 'readonly', (s) => s.get(key)),
+  all: (store) => tx(store, 'readonly', (s) => s.getAll()),
+  count: (store) => tx(store, 'readonly', (s) => s.count()),
+  clear: (store) => tx(store, 'readwrite', (s) => s.clear()),
+  del: (store, key) => tx(store, 'readwrite', (s) => s.delete(key)),
+  deleteFinding: async (id) => {
+    await local.del('findings', id);
+    await local.del('assets', KEY.findingThumb(id));
+    await local.del('assets', KEY.findingFull(id));
+  },
+};
+
+/* 图片一律走 Blob 单独存：塞进快照 JSON 会让 IndexedDB 膨胀且无法按需取。
+   参数是**完整的键**（见上面的 KEY），不再由 kind+id 拼出来。 */
+async function assetUrl(key) {
+  if (!key) return '';
+  const record = await local.get('assets', key);
+  return record && record.blob ? URL.createObjectURL(record.blob) : '';
+}
+
+async function storeBlob(key, blob, meta = {}) {
+  await local.put('assets', { key, blob, meta, at: Date.now() });
+}
+
+/* ---------------------------------------------------------------- 网络 */
+/* 密钥一律走 `X-VSW-Key` 头而不是 cookie：APK 里页面是 file:// 起的，
+   cookie 属于另一个源，浏览器根本不会替我们带上。 */
+function authHeaders(extra) {
+  const head = Object.assign({}, extra || {});
+  if (S.key) head['X-VSW-Key'] = S.key;
+  if (S.sid) head['X-VSW-Session'] = S.sid;
+  return head;
+}
+
+function netFetch(url, opts) {
+  const conf = Object.assign({ cache: 'no-store' }, opts || {});
+  conf.headers = authHeaders(conf.headers);
+  return fetch(url, conf);
+}
+
+/* 401 + need_key = 这把钥匙不对或没带：弹解锁面板，别在控制台刷一屏红。 */
+async function readJson(resp) {
+  let data = null;
+  try { data = await resp.json(); } catch (e) { data = null; }
+  if (resp.status === 401 && data && (data.need_login || data.need_key)) {
+    const msg = data.error || (data.need_login ? '先登录' : '需要访问密钥');
+    showLock(msg);
+    throw new Error(msg);
+  }
+  if (resp.status === 429) {
+    throw new Error((data && data.error) || '试错太多次了，等一会儿再试');
+  }
+  if (!resp.ok) {
+    throw new Error((data && (data.error || data.message)) || `HTTP ${resp.status}`);
+  }
+  return data;
+}
+
+function api(path) {
+  if (!S.server) return Promise.reject(new Error('还没填电脑地址'));
+  return netFetch(S.server.replace(/\/+$/, '') + path).then(readJson);
+}
+
+function post(path, body) {
+  if (!S.server) return Promise.reject(new Error('还没填电脑地址'));
+  return netFetch(S.server.replace(/\/+$/, '') + path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(readJson);
+}
+
+/* <img src> 与 <a download> 带不了请求头，只能把密钥放进查询串。 */
+function withKey(url) {
+  if (!S.key) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(S.key);
+}
+
+async function checkOnline() {
+  if (!S.server) { S.online = false; return false; }
+  try {
+    const health = await api('/api/health');
+    S.online = true;
+    S.caps = health.vision || {};
+    return true;
+  } catch (e) {
+    S.online = false;
+    return false;
+  }
+}
+
+/* ---------------------------------------------------------------- 快照 */
+/** 把快照里的相对地址拼成能 fetch 的地址。
+ *  两种形态：`media/thumbs/x.jpg`（媒体文件）与 `api/variant/12/thumb`（接口）。 */
+function relToMediaServer(rel) {
+  if (!rel) return '';
+  const base = S.server.replace(/\/+$/, '');
+  const cleaned = String(rel).replace(/^\/+/, '');
+  if (/^api\//i.test(cleaned)) return `${base}/${cleaned}`;
+  return `${base}/media/` + cleaned.replace(/^media\//i, '');
+}
+
+/** 下载一张图并存进本地库（key 由调用方决定，见 KEY）。 */
+async function fetchInto(key, rel) {
+  if (!rel) return false;
+  if (await local.get('assets', key)) return false;
+  try {
+    const resp = await netFetch(relToMediaServer(rel), { cache: 'force-cache' });
+    if (!resp.ok) return false;
+    const blob = await resp.blob();
+    if (!blob.size) return false;
+    await storeBlob(key, blob, { rel, kind: key.split(':')[0] });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function downloadAsset(finding, mode) {
+  if (mode === 'none') return;
+  // 结果图：thumbs 档只存缩略图；full 档存原图（缩略图也留一份，列表页要用）
+  await fetchInto(KEY.findingThumb(finding.id), finding.thumb_path || finding.rel_path);
+  if (mode === 'full') {
+    await fetchInto(KEY.findingFull(finding.id), finding.rel_path);
+  }
+}
+
+async function syncSnapshot() {
+  if (!(await checkOnline())) return toast('连不上电脑，先填对地址或连上同一 WiFi', true);
+  const mode = $('#imageMode').value;
+  const limit = Number($('#snapLimit').value) || 300;
+  const withTrash = $('#trashMode').value === '1';
+  const bar = $('#syncProgress');
+  const fill = $('#syncProgress i');
+  bar.classList.remove('hide');
+  fill.style.width = '2%';
+  $('#syncNote').textContent = '正在拉取快照…';
+  try {
+    const snap = await api(`/api/mobile/snapshot?images=${mode}&limit=${limit}&thumb=240`
+      + `&trash=${withTrash ? 1 : 0}&archives=1`);
+    $('#syncNote').textContent = '正在写入本地库…';
+    fill.style.width = '35%';
+    await Promise.all(['findings', 'trash', 'archived', 'archives', 'jobs', 'seeds', 'variants']
+      .map((s) => local.clear(s)));
+    for (const row of snap.findings || []) await local.put('findings', row);
+    for (const row of snap.trash || []) await local.put('trash', row);
+    for (const row of snap.archived || []) await local.put('archived', row);
+    for (const row of snap.archives || []) await local.put('archives', row);
+    for (const row of snap.jobs || []) await local.put('jobs', row);
+    for (const row of snap.seeds || []) await local.put('seeds', row);
+    for (const row of snap.variants || []) await local.put('variants', row);
+    fill.style.width = '60%';
+    const total = (snap.findings || []).length + (snap.trash || []).length;
+    let done = 0;
+    for (const row of snap.findings || []) {
+      await downloadAsset(row, mode);
+      done += 1;
+      if (done % 5 === 0 || done === total) {
+        fill.style.width = `${60 + 38 * (done / Math.max(1, total))}%`;
+        $('#syncNote').textContent = `下载图片 ${done}/${total}…`;
+      }
+    }
+    for (const row of snap.trash || []) {
+      await fetchInto(KEY.trashThumb(row.id), row.thumb_path || row.rel_path);
+    }
+    for (const row of snap.archived || []) {
+      await fetchInto(KEY.archivedThumb(row.id), row.thumb_path || row.rel_path);
+    }
+    // 种子缩略图（队列项的兜底图、以及种子池的样子都靠它）
+    for (const seed of snap.seeds || []) {
+      await fetchInto(KEY.seedThumb(seed.id), seed.thumb_path || seed.rel_path);
+    }
+    // 变体缩略图：队列页要显示"这一条派发的是哪个变体"。
+    // 只下载**队列里真正用到**的那些变体，避免给全部变体都下一遍。
+    const usedVariants = new Set();
+    for (const job of snap.jobs || []) {
+      if (job.variant_id) usedVariants.add(job.variant_id);
+    }
+    for (const variant of snap.variants || []) {
+      if (!usedVariants.has(variant.id)) continue;
+      await fetchInto(KEY.variantThumb(variant.id), variant.thumb || '');
+    }
+    await local.put('meta', { key: 'snapshot', value: {
+      at: Date.now(), mode, limit, counts: snap.counts, stats: snap.stats, host: snap.host,
+      version: snap.version,
+    } });
+    fill.style.width = '100%';
+    $('#syncNote').textContent = `同步完成：对象 ${snap.counts.findings}、种子 ${snap.counts.seeds}、队列 ${snap.counts.jobs}、回收站 ${snap.counts.trash}`;
+    toast('同步完成');
+    await loadLocal();
+  } catch (e) {
+    $('#syncNote').textContent = `同步失败：${e.message}`;
+    toast(`同步失败：${e.message}`, true);
+  }
+}
+
+/* ---------------------------------------------------------------- 离线收件箱 */
+async function queuePending(kind, payload) {
+  await local.put('pending', { kind, payload, at: Date.now() });
+  await refreshPending();
+}
+
+async function refreshPending() {
+  const rows = await local.all('pending');
+  const imports = rows.filter((r) => r.kind === 'import');
+  const trash = rows.filter((r) => r.kind === 'trash');
+  $('#pendingInfo').textContent = rows.length ? `${rows.length} 条待同步` : '没有待同步的内容';
+  $('#pendingList').innerHTML = rows.length ? rows.map((r) => {
+    const label = r.kind === 'import'
+      ? `导入「${esc((r.payload.name || '手机图片').slice(0, 24))}」`
+      : `移进回收站：${(r.payload.ids || []).length} 个对象`;
+    return `<div class="src"><div class="row"><span>${label}</span><div class="spacer"></div>
+      <button class="btn sm ghost" data-drop="${r.key}">丢弃</button></div>
+      <div class="u">${new Date(r.at).toLocaleString('zh-CN')}</div></div>`;
+  }).join('') : '';
+  $$('#pendingList [data-drop]').forEach((btn) => {
+    btn.onclick = async () => { await local.del('pending', Number(btn.dataset.drop)); await refreshPending(); };
+  });
+  const dot = $('#queueDot');
+  return rows.length;
+}
+
+async function flushPending() {
+  const rows = await local.all('pending');
+  if (!rows.length) return toast('没有待同步的内容');
+  if (!(await checkOnline())) return toast('连不上电脑，待会儿再推', true);
+  const imports = rows.filter((r) => r.kind === 'import').map((r) => r.payload);
+  const trashIds = rows.filter((r) => r.kind === 'trash')
+    .flatMap((r) => r.payload.ids || []);
+  $('#pendingInfo').textContent = '正在推回电脑…';
+  try {
+    const res = await post('/api/mobile/sync', { imports, trash: trashIds });
+    for (const row of rows) await local.del('pending', row.key);
+    const okImports = (res.imported || []).length;
+    const okTrash = (res.trashed || []).length;
+    toast(`推回完成：导入 ${okImports} 张、回收站 ${okTrash} 个`
+      + (res.errors && res.errors.length ? `（${res.errors.length} 张失败）` : ''));
+    if (res.errors && res.errors.length) console.warn(res.errors);
+    await refreshPending();
+    await syncSnapshot();
+  } catch (e) {
+    toast(`推回失败：${e.message}`, true);
+  }
+}
+
+/* ---------------------------------------------------------------- 渲染：结果板 */
+function thumbSrcMap() { return S._thumbs || (S._thumbs = {}); }
+
+/** 每一类数据各自的图片键与地址字段。集中定义，避免到处拼键拼错。 */
+const THUMB_SPEC = {
+  finding: { key: (row) => KEY.findingThumb(row.id), rel: (row) => row.thumb_path || row.rel_path },
+  trash: { key: (row) => KEY.trashThumb(row.id), rel: (row) => row.thumb_path || row.rel_path },
+  seed: { key: (row) => KEY.seedThumb(row.id), rel: (row) => row.thumb_path || row.rel_path },
+  variant: { key: (row) => KEY.variantThumb(row.id), rel: (row) => row.thumb || '' },
+  archived: { key: (row) => KEY.archivedThumb(row.id), rel: (row) => row.thumb_path || row.rel_path },
+};
+
+async function hydrateThumbs(rows, kind = 'finding') {
+  const spec = THUMB_SPEC[kind] || THUMB_SPEC.finding;
+  const map = thumbSrcMap();
+  for (const row of rows) {
+    if (map[row.id] !== undefined) continue;
+    map[row.id] = (await assetUrl(spec.key(row))) || '';
+  }
+}
+
+/**
+ * 补齐本地缺失的图片。
+ *
+ * 为什么必须有这个：图片是"同步时按需下载"的，而**回收站里的条目往往是之后才被清掉的**
+ * —— 上一次同步时它们还不是回收站条目，缩略图就没下过。结果就是列表里一片空白
+ * （用户反馈的"看图有点问题"）。队列页同理：变体缩略图是后加的。
+ *
+ * 判定"缺图"只认本地库里有没有 Blob（assets 表），**不看内存里的 URL 映射** ——
+ * 内存映射会因为 objectURL 失效、或刚清库而失真，用它当判据会漏掉该补的。
+ */
+async function ensureThumbs(rows, kind = 'finding') {
+  if (!rows || !rows.length || !S.server) return 0;
+  const spec = THUMB_SPEC[kind] || THUMB_SPEC.finding;
+  const map = thumbSrcMap();
+
+  // 1) 先把本地已有的填进内存映射（不发请求）
+  for (const row of rows) {
+    if (map[row.id]) continue;
+    const url = await assetUrl(spec.key(row));
+    if (url) map[row.id] = url;
+  }
+
+  // 2) 找出本地库里连 Blob 都没有的那些
+  const missing = [];
+  for (const row of rows) {
+    if (map[row.id]) continue;
+    if (!spec.rel(row)) continue;
+    missing.push(row);
+  }
+  if (!missing.length) return 0;
+
+  // 3) 去电脑上取。这里**不看 S.online**：那个标志是异步检查的结果，可能还没落定
+  //    （探测到过：快照明明拉下来了 S.online 仍是 false，结果一张都没补）。
+  let got = 0;
+  for (const row of missing) {
+    const rel = spec.rel(row);
+    try {
+      const resp = await fetch(relToMediaServer(rel), { cache: 'force-cache' });
+      if (!resp.ok) continue;
+      const blob = await resp.blob();
+      if (!blob.size) continue;
+      await storeBlob(spec.key(row), blob, { rel, kind });
+      map[row.id] = URL.createObjectURL(blob);
+      got += 1;
+    } catch (e) { /* 单张失败不影响其它 */ }
+  }
+  return got;
+}
+
+/** 把列表里所有 <img data-want-thumb="id"> 补上真实 src（补图完成后调它）。 */
+function paintThumbs(rootSelector) {
+  const map = thumbSrcMap();
+  $$(`${rootSelector} [data-want-thumb]`).forEach((img) => {
+    const id = Number(img.getAttribute('data-want-thumb'));
+    if (map[id]) img.src = map[id];
+  });
+}
+
+/** 队列卡片同理（按 job id 索引）。 */
+function paintJobThumbs() {
+  const map = thumbSrcMap();
+  $$('#queueList [data-want-job-thumb]').forEach((img) => {
+    const id = Number(img.getAttribute('data-want-job-thumb'));
+    const src = map[`job:${id}`];
+    if (src) img.src = src;
+  });
+}
+
+function sourceCount(f) {
+  if (Array.isArray(f.sources)) return f.sources.length;
+  return f.source_count || 0;
+}
+
+function cardHtml(f) {
+  const src = thumbSrcMap()[f.id] || '';
+  const selected = S.selection.has(f.id);
+  const tags = (f.tags || []).map((t) => t.name).slice(0, 2).join(' / ');
+  const platform = (f.sources && f.sources[0] && f.sources[0].platform) || f.platform || '';
+  return `<div class="fcard ${selected ? 'sel' : ''}" data-id="${f.id}">
+    <div class="check">✓</div>
+    ${src ? `<img loading="lazy" src="${src}" alt="">` : `<img alt="" style="opacity:.25">`}
+    <div class="meta2">
+      <div class="tt">${esc(f.title || f.image_url || `结果 #${f.id}`)}</div>
+      <div class="ln"><span class="tbadge ${f.triage}">${TRIAGE[f.triage] || f.triage}</span>
+        <span class="mono">E ${num(f.explore_value)}</span>
+        <span>${sourceCount(f)} 源</span>
+        ${f.status === 'promoted' ? '<span class="tbadge promoted">已回流</span>' : ''}
+        ${f.archived_at ? '<span class="tbadge archived">已归档</span>' : ''}</div>
+      <div class="ln">${esc(platform)}${tags ? ' · ' + esc(tags) : ''}</div>
+    </div>
+  </div>`;
+}
+
+function renderBoard() {
+  const q = S.search.trim().toLowerCase();
+  let rows = S.findings.filter((f) => !f.dup_of);
+  if (S.triage !== 'all') rows = rows.filter((f) => f.triage === S.triage);
+  if (q) {
+    rows = rows.filter((f) => [f.title, f.image_url, (f.tags || []).map((t) => t.name).join(' '),
+      (f.sources || []).map((s) => `${s.platform} ${s.url}`).join(' ')]
+      .join(' ').toLowerCase().includes(q));
+  }
+  rows.sort((a, b) => (b.explore_value || 0) - (a.explore_value || 0));
+  $('#boardList').innerHTML = rows.map(cardHtml).join('');
+  $('#boardEmpty').classList.toggle('hide', rows.length > 0 || S.findings.length > 0);
+  $('#boardEmpty').textContent = S.findings.length
+    ? '当前筛选下没有结果'
+    : '本地库是空的 —— 到「我的」页连上电脑同步一次，或直接导入别人给你的数据集。';
+  $$('#boardList .fcard').forEach((card) => {
+    card.onclick = () => {
+      const id = Number(card.dataset.id);
+      if (S.selection.size) {
+        if (S.selection.has(id)) S.selection.delete(id); else S.selection.add(id);
+        card.classList.toggle('sel', S.selection.has(id));
+        renderBoardActions();
+      } else {
+        openDetail(id);
+      }
+    };
+    card.oncontextmenu = (ev) => {   // 长按 = 多选（手机上比先点按钮再选自然）
+      ev.preventDefault();
+      const id = Number(card.dataset.id);
+      S.selection.add(id);
+      card.classList.add('sel');
+      renderBoardActions();
+    };
+  });
+  renderBoardActions();
+}
+
+function renderBoardActions() {
+  const n = S.selection.size;
+  const root = $('#boardActions');
+  if (!n) {
+    root.innerHTML = `<span class="small">长按或点「全选」进入多选；选中后可批量归档 / 回收站</span>`;
+    return;
+  }
+  root.innerHTML = `
+    <span class="pill on">已选 ${n}</span>
+    <button class="btn sm" id="selArchive">归档选中</button>
+    <button class="btn sm danger" id="selTrash">移进回收站</button>
+    <button class="btn sm ghost" id="selClear">取消选择</button>`;
+  $('#selArchive').onclick = () => archiveSelection();
+  $('#selTrash').onclick = () => trashSelection();
+  $('#selClear').onclick = () => { S.selection.clear(); renderBoard(); };
+  $('#selAllBtn').textContent = '全选';
+}
+
+async function archiveSelection() {
+  const ids = Array.from(S.selection);
+  if (!ids.length) return;
+  if (S.online) {
+    try {
+      const out = await post('/api/archives', { finding_ids: ids, name: `手机归档 ${ids.length} 个` });
+      toast(`电脑端已归档 ${out.archived} 个对象`);
+      S.selection.clear();
+      await syncSnapshot();
+      return;
+    } catch (e) { toast(`归档失败：${e.message}`, true); return; }
+  }
+  // 离线：先在本地标记，回连时再推（归档涉及快照记录，交给电脑端生成更准确）
+  for (const id of ids) {
+    const row = await local.get('findings', id);
+    if (row) { row.archived_at = Date.now() / 1000; await local.put('findings', row); }
+  }
+  toast('离线：已在本地标记归档，回连后点「推回电脑」生效', false);
+  S.selection.clear();
+  await loadLocal();
+}
+
+async function trashSelection() {
+  const ids = Array.from(S.selection);
+  if (!ids.length) return;
+  if (S.online) {
+    try {
+      const out = await post('/api/findings/trash', { finding_ids: ids, only_unpromoted: true });
+      toast(`电脑端已回收 ${(out.moved || []).length} 个`);
+      S.selection.clear();
+      await syncSnapshot();
+      return;
+    } catch (e) { toast(`回收失败：${e.message}`, true); return; }
+  }
+  await queuePending('trash', { ids });
+  for (const id of ids) await local.deleteFinding(id);
+  toast('离线：已记入待同步（回连后推回电脑）');
+  S.selection.clear();
+  await loadLocal();
+}
+
+/* ---------------------------------------------------------------- 详情 */
+async function openDetail(id) {
+  let f = S.findings.find((x) => x.id === id) || S.trash.find((x) => x.id === id)
+    || S.archived.find((x) => x.id === id);
+  if (!f) return;
+  $('#cropConfirm').classList.add('hide');
+  $('#cropStage').innerHTML = '';
+  // 快照默认不带来源明细（省体积）：联网时按需取这一次，并缓存回本地库供离线再看
+  if (!Array.isArray(f.sources) && S.online) {
+    try {
+      // /api/finding/{id} 的形状是 {finding:{…}, sources:[…], chain:[…], cluster, similar}；
+      // sources 在**顶层**，不在 finding 里面（这里写错过一次，详情页会一直显示"没有来源"）。
+      const detail = await api(`/api/finding/${id}`);
+      const rows = Array.isArray(detail.sources) ? detail.sources
+        : (detail.finding && detail.finding.sources) || [];
+      if (rows.length) {
+        f.sources = rows;
+        await local.put(S.trash.some((t) => t.id === id) ? 'trash' : 'findings',
+          { ...f, sources: rows });
+      }
+    } catch (e) { /* 取不到就退回"N 源"的显示 */ }
+  }
+  // full 档优先用原图，没有就退到缩略图（两种都在本地或都没有）
+  const full = (await assetUrl(KEY.findingFull(id)))
+    || (await assetUrl(KEY.findingThumb(id)))
+    || (await assetUrl(KEY.trashThumb(id)));
+  const chain = await buildLocalChain(f);
+  const sources = Array.isArray(f.sources) ? (f.sources.map((s) => `
+    <div class="src">
+      <div class="row tight"><span class="tbadge">${esc(s.trust || '')}</span>
+        <span>${esc(s.platform || s.host || '')}</span><div class="spacer"></div>
+        <a href="${esc(s.url)}" target="_blank" rel="noopener">打开</a></div>
+      <div>${esc(s.title || '')}</div>
+      <div class="u">${esc(s.url)}</div>
+    </div>`).join('') || '<div class="small">没有来源记录</div>')
+    : `<div class="small">${sourceCount(f)
+        ? '这份快照为了省体积没带来源明细；连上电脑后点开这一条会自动取回并缓存到手机上。'
+        : '没有来源记录'}</div>`;
+  const chainHtml = chain.map((n, i) => `
+    ${i ? '<div class="small" style="padding-left:14px">↓</div>' : ''}
+    <div class="n"><span class="ty">${esc(n.type)}</span><span>${esc(n.title)}</span></div>`).join('');
+
+  $('#sheetTitle').textContent = f.title || `结果 #${f.id}`;
+  $('#sheetBody').innerHTML = `
+    ${full ? `<img class="hero" src="${full}" alt="">` : '<div class="empty">这张图没有下载到本地</div>'}
+    <div class="row" style="margin-top:10px">
+      <span class="tbadge ${f.triage}">${TRIAGE[f.triage] || f.triage}</span>
+      <span class="tbadge">${esc(f.status)}</span>
+      <span class="pill">E ${num(f.explore_value)}</span>
+      ${f.archived_at ? '<span class="tbadge archived">已归档</span>' : ''}
+    </div>
+    <dl class="kv">
+      <dt>探索价值</dt><dd>相似 ${num(f.similarity)} · 新颖 ${num(f.novelty)} · 桥接 ${num(f.bridging)} · 元数据 ${num(f.metadata_score)}</dd>
+      <dt>来源潜力</dt><dd>${num(f.potential)}</dd>
+      <dt>引擎</dt><dd>${esc(f.engine || '')} · 队列项 #${f.job_id || 0}</dd>
+      <dt>尺寸</dt><dd>${f.width || 0}×${f.height || 0} · ${Math.round((f.bytes || 0) / 1024)} KB</dd>
+      <dt>标签</dt><dd>${esc((f.tags || []).map((t) => t.name).join(' / ') || '-')}</dd>
+      <dt>发现时间</dt><dd>${f.created_at ? new Date(f.created_at * 1000).toLocaleString('zh-CN') : '-'}</dd>
+    </dl>
+    <h3 style="font-size:14px;margin:16px 0 8px">来源聚合（${(f.sources || []).length}）</h3>
+    ${sources}
+    <h3 style="font-size:14px;margin:16px 0 8px">搜索链回放</h3>
+    <div class="chain">${chainHtml || '<div class="small">无链路</div>'}</div>
+    ${S.online ? `<div class="row" style="margin-top:14px">
+      <button class="btn primary" id="dPromote">选为下一轮种子</button>
+      <button class="btn" id="dArch">归档这一个</button>
+      <button class="btn danger" id="dTrash">移进回收站</button></div>` : `
+      <div class="gate" style="margin-top:14px">离线中：回流 / 归档 / 回收需要连上电脑上的工作台。
+        联网后回到这里即可操作。</div>`}
+  `;
+  openSheet();
+  if (S.online) {
+    $('#dPromote').onclick = async () => {
+      try {
+        const out = await post('/api/findings/promote', { finding_ids: [f.id], engines: ['baidu'] });
+        toast(out.promoted ? '已回流为新种子（电脑端已入队）' : '回流失败：图取不到？', !out.promoted);
+        await syncSnapshot();
+      } catch (e) { toast(e.message, true); }
+    };
+    $('#dArch').onclick = async () => {
+      try {
+        const out = await post('/api/archives', { finding_ids: [f.id], name: '手机归档 1 个' });
+        toast(`已归档 ${out.archived} 个`); closeSheet(); await syncSnapshot();
+      } catch (e) { toast(e.message, true); }
+    };
+    $('#dTrash').onclick = async () => {
+      try {
+        await post('/api/findings/trash', { finding_ids: [f.id] });
+        toast('已移进回收站'); closeSheet(); await syncSnapshot();
+      } catch (e) { toast(e.message, true); }
+    };
+  }
+}
+
+/* 本地回放链：手机端不连电脑也能看出这张图是怎么来的 */
+async function buildLocalChain(f) {
+  const out = [];
+  const variant = S.variants.find((v) => v.id === f.variant_id);
+  const seed = S.seeds.find((s) => s.id === (variant ? variant.seed_id : f.seed_id));
+  out.push({ type: '结果图', title: f.title || `#${f.id}` });
+  if (f.sources && f.sources[0]) out.push({ type: '来源页', title: f.sources[0].platform || f.sources[0].host || f.sources[0].url });
+  if (variant) out.push({ type: '检索变体', title: `${variant.label || variant.kind}${variant.meta && variant.meta.crop ? `（框选 ${variant.meta.crop.w}×${variant.meta.crop.h}）` : ''}` });
+  if (seed) out.push({ type: '种子图', title: seed.title || `#${seed.id}` });
+  return out;
+}
+
+/* ---------------------------------------------------------------- 队列 */
+/* ---------------------------------------------------------------- 队列：筛选 */
+const QUEUE_KIND_LABEL = {
+  full: '全图', crop: '框选', crop_center_50: '中心裁剪', quad_tl: '左上四分一',
+  quad_tr: '右上四分一', quad_bl: '左下四分一', quad_br: '右下四分一',
+  gray: '灰度', edges: '边缘', bright_up: '提亮', bright_down: '压暗',
+  contrast_up: '加对比', blur: '模糊', sharpen: '锐化', flip_h: '左右翻转',
+  rotate_90: '旋转90°', thumb_small: '小图',
+};
+
+function queueFilterActive() {
+  return Boolean(S.queueSeed || S.queueEngines.size || S.queueKinds.size
+    || S.queueText.trim() || S.queueResults);
+}
+
+/** 状态筛选（todo 是"还没结论的"三合一）。 */
+function queueStatusMatch(job) {
+  if (S.queueStatus === 'todo') return ['pending', 'running', 'review'].includes(job.status);
+  return job.status === S.queueStatus;
+}
+
+/** 除状态以外的筛选条件（列表与「删除筛选结果」共用同一套判定，避免两边不一致）。 */
+function queueMatchFilters(job) {
+  if (S.queueSeed && String(job.seed_id) !== String(S.queueSeed)) return false;
+  if (S.queueEngines.size && !S.queueEngines.has(job.engine)) return false;
+  if (S.queueKinds.size && !S.queueKinds.has(job.variant_kind)) return false;
+  if (S.queueResults === 'with' && !(job.findings > 0)) return false;
+  if (S.queueResults === 'without' && job.findings > 0) return false;
+  const q = S.queueText.trim().toLowerCase();
+  if (q) {
+    const hay = [job.engine, job.engine_name, job.variant_kind, job.variant_label,
+      job.seed_title, job.note].join(' ').toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+function queueRows() {
+  return S.jobs
+    .filter((j) => queueStatusMatch(j) && queueMatchFilters(j))
+    .sort((a, b) => (b.findings || 0) - (a.findings || 0) || a.id - b.id);
+}
+
+/** 筛选控件：种子下拉 + 引擎/变体芯片（都带基数，方便看出"哪个筛出来有东西"）。 */
+function renderQueueFilters(rows) {
+  // 种子下拉：只列队列里出现过的种子，按条数降序
+  const seedCount = {};
+  for (const j of S.jobs) {
+    const id = j.seed_id;
+    if (!id) continue;
+    seedCount[id] = seedCount[id] || { total: 0, with: 0, title: j.seed_title || '' };
+    seedCount[id].total += 1;
+    if (j.findings) seedCount[id].with += 1;
+  }
+  const select = $('#queueSeed');
+  const wanted = String(S.queueSeed || '');
+  const options = Object.entries(seedCount)
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([id, v]) => `<option value="${id}" ${wanted === String(id) ? 'selected' : ''}>
+      #${id} ${esc((v.title || '').slice(0, 20))} · ${v.with}/${v.total}</option>`).join('');
+  select.innerHTML = `<option value="">全部种子</option>${options}`;
+
+  // 引擎芯片
+  const engines = {};
+  for (const j of S.jobs) {
+    const e = j.engine || '?';
+    engines[e] = engines[e] || { total: 0, with: 0 };
+    engines[e].total += 1;
+    if (j.findings) engines[e].with += 1;
+  }
+  $('#queueFilterEngines').innerHTML = Object.entries(engines)
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([key, v]) => `<span class="chip ${S.queueEngines.has(key) ? 'on' : ''}" data-engine="${esc(key)}">
+      ${esc(key)} <span class="n">${v.with}/${v.total}</span></span>`).join('')
+    || '<span class="small">没有队列项</span>';
+  $$('#queueFilterEngines .chip').forEach((chip) => {
+    chip.onclick = () => {
+      const key = chip.dataset.engine;
+      if (S.queueEngines.has(key)) S.queueEngines.delete(key); else S.queueEngines.add(key);
+      renderQueue();
+    };
+  });
+
+  // 变体类型芯片
+  const kinds = {};
+  for (const j of S.jobs) {
+    const k = j.variant_kind || '(未知)';
+    kinds[k] = kinds[k] || { total: 0, with: 0 };
+    kinds[k].total += 1;
+    if (j.findings) kinds[k].with += 1;
+  }
+  $('#queueFilterKinds').innerHTML = Object.entries(kinds)
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([key, v]) => `<span class="chip ${S.queueKinds.has(key) ? 'on' : ''}" data-kind="${esc(key)}">
+      ${esc(QUEUE_KIND_LABEL[key] || key)} <span class="n">${v.with}/${v.total}</span></span>`).join('')
+    || '<span class="small">-</span>';
+  $$('#queueFilterKinds .chip').forEach((chip) => {
+    chip.onclick = () => {
+      const key = chip.dataset.kind;
+      if (S.queueKinds.has(key)) S.queueKinds.delete(key); else S.queueKinds.add(key);
+      renderQueue();
+    };
+  });
+
+  // 摘要
+  const bits = [];
+  if (S.queueSeed) bits.push(`种子 #${S.queueSeed}`);
+  if (S.queueEngines.size) bits.push(`${S.queueEngines.size} 个引擎`);
+  if (S.queueKinds.size) bits.push(`${S.queueKinds.size} 种变体`);
+  if (S.queueText.trim()) bits.push(`“${S.queueText.trim()}”`);
+  if (S.queueResults) bits.push(S.queueResults === 'with' ? '有产出' : '无产出');
+  $('#queueFilterSummary').textContent = queueFilterActive()
+    ? `· 筛出 ${rows.length} 条（${bits.join(' + ')}）`
+    : `· 未筛选（共 ${S.jobs.length} 条）`;
+}
+
+/** 操作条：平常只给「选择」和「删除筛选结果」；多选模式下换成删除/全选/取消。 */
+function renderQueueActions(rows) {
+  const host = $('#queueActions');
+  const selected = S.queueSelected.size;
+  if (S.queueSelectMode) {
+    host.innerHTML = `
+      <span class="pill on">已选 ${selected}</span>
+      <button class="btn sm" id="queueSelAll">全选本页(${rows.length})</button>
+      <button class="btn sm danger" id="queueDeleteSel" ${selected ? '' : 'disabled'}>删除选中</button>
+      <button class="btn sm ghost" id="queueSelCancel">取消</button>`;
+    $('#queueSelAll').onclick = () => {
+      if (rows.every((j) => S.queueSelected.has(j.id))) S.queueSelected.clear();
+      else rows.forEach((j) => S.queueSelected.add(j.id));
+      renderQueue();
+    };
+    $('#queueDeleteSel').onclick = () => deleteQueueJobs(Array.from(S.queueSelected), '选中的');
+    $('#queueSelCancel').onclick = () => {
+      S.queueSelectMode = false; S.queueSelected.clear(); renderQueue();
+    };
+    return;
+  }
+  host.innerHTML = `
+    <button class="btn sm" id="queueSelBtn">选择</button>
+    <button class="btn sm danger" id="queueDeleteFiltered"
+      ${rows.length ? '' : 'disabled'}>删除筛选结果（${rows.length}）</button>`;
+
+  // 按引擎批量删的预设：某个引擎的「待处理」全部清掉（一个引擎往往整批没结果，
+  // 比如被验证码挡着的那种）。只列确实有待处理任务的引擎。
+  const pendingByEngine = {};
+  for (const j of S.jobs) {
+    if (!['pending', 'running', 'review'].includes(j.status)) continue;
+    pendingByEngine[j.engine] = (pendingByEngine[j.engine] || 0) + 1;
+  }
+  const presets = Object.entries(pendingByEngine)
+    .sort((a, b) => b[1] - a[1])
+    .map(([engine, n]) => `<button class="btn sm ghost" data-preset-engine="${esc(engine)}">
+        清 ${esc(engine)} 待处理 ${n}</button>`).join('');
+  if (presets) {
+    host.innerHTML += `<div class="row tight" style="margin-top:8px;flex-basis:100%">
+      <span class="small">按引擎清理：</span>${presets}</div>`;
+  }
+
+  $('#queueSelBtn').onclick = () => { S.queueSelectMode = true; renderQueue(); };
+  $('#queueDeleteFiltered').onclick = () => deleteQueueJobs(rows.map((j) => j.id), '当前筛选下的');
+  $$('#queueActions [data-preset-engine]').forEach((btn) => {
+    btn.onclick = () => {
+      const engine = btn.dataset.presetEngine;
+      const ids = S.jobs
+        .filter((j) => j.engine === engine && ['pending', 'running', 'review'].includes(j.status))
+        .map((j) => j.id);
+      deleteQueueJobs(ids, `「${engine}」的待处理`);
+    };
+  });
+}
+
+/** 删除队列项（只删队列记录，已产出的结果不动）。 */
+async function deleteQueueJobs(ids, label) {
+  if (!ids.length) return toast('没有可删除的队列项');
+  if (!S.online) return toast('删除队列项需要连上电脑上的工作台', true);
+  const ok = confirm(`删除${label} ${ids.length} 个队列项？\n只删队列记录，已经产出的结果和种子都不受影响。`);
+  if (!ok) return;
+  try {
+    const out = await post('/api/queue/delete', { job_ids: ids });
+    S.queueSelectMode = false;
+    S.queueSelected.clear();
+    toast(`已删除 ${out.removed} 个队列项`);
+    await refreshQueueFromServer();
+  } catch (e) {
+    toast(`删除失败：${e.message}`, true);
+  }
+}
+
+/** 从电脑重拉队列（删除后用它同步本地库，避免界面与电脑不一致）。 */
+async function refreshQueueFromServer(opts) {
+  const silent = !!(opts && opts.silent);
+  try {
+    const data = await api('/api/queue?status=all&limit=1200');
+    const rows = data.jobs || [];
+    // 手机端的排序跟快照一致：先按状态（搜索中→待搜索→待复查→已完成），同状态**最新在前**。
+    // 桌面的 /api/queue 是 id 升序（FIFO 派发语义），手机上更关心"刚导入的那几条"。
+    const priority = { running: 0, pending: 1, review: 2, done: 3 };
+    rows.sort((a, b) => (priority[a.status] ?? 4) - (priority[b.status] ?? 4)
+      || (b.id - a.id));
+    await local.clear('jobs');
+    for (const row of rows) await local.put('jobs', row);
+    S.jobs = rows;
+    S.queueDirty = false;
+    if (S.tab === 'queue') renderQueue();
+  } catch (e) {
+    if (!silent) toast(`队列刷新失败：${e.message}`, true);
+    if (S.tab === 'queue') renderQueue();
+  }
+}
+
+function renderQueue() {
+  const gate = $('#queueGate');
+  if (!S.online) {
+    gate.innerHTML = `<div class="gate">离线中：队列操作需要电脑上的工作台。
+      <br>「自动识图」要靠电脑上的无头浏览器（手机跑不了），「打开识图」也走电脑派发的入口。
+      筛选和浏览不受影响；删除队列项需要连上电脑。
+      下面显示的是最近一次同步时的队列快照。</div>`;
+  } else if (!S.caps.available) {
+    gate.innerHTML = `<div class="gate">电脑端语义引擎不可用 —— 工作台会退化成文件层 + 感知哈希层，
+      去重与排序仍可用，但没有语义邻居检索。</div>`;
+  } else {
+    gate.innerHTML = '';
+  }
+
+  const counts = {};
+  for (const j of S.jobs) counts[j.status] = (counts[j.status] || 0) + 1;
+  const produced = S.jobs.filter((j) => (j.findings || 0) > 0).length;
+  $('#queueStats').innerHTML = [
+    ['待处理', (counts.pending || 0) + (counts.review || 0) + (counts.running || 0)],
+    ['已产出', produced],
+    ['已完成', counts.done || 0],
+    ['失败', counts.failed || 0],
+  ].map(([l, n]) => `<div class="metric"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
+
+  const rows = queueRows();
+  renderQueueFilters(rows);
+  renderQueueActions(rows);
+
+  $('#queueList').innerHTML = rows.map((j) => {
+    const thumb = thumbSrcMap()[`job:${j.id}`] || '';
+    const browser = j.engine === 'baidu' || j.engine === 'so360';
+    const picked = S.queueSelected.has(j.id);
+    return `<div class="job ${picked ? 'sel' : ''}" data-id="${j.id}">
+      ${thumb ? `<img src="${thumb}" alt="">`
+        : `<img alt="" style="opacity:.25" data-want-job-thumb="${j.id}">`}
+      <div>
+        <div class="t1">${esc(j.engine_name || j.engine)} · ${esc(j.variant_label || QUEUE_KIND_LABEL[j.variant_kind] || j.variant_kind || '')}
+          <span class="st ${j.status}">${STATUS[j.status] || j.status}</span>
+          ${j.findings ? `<span class="st done">产出 ${j.findings}</span>` : ''}</div>
+        <div class="t2">#${j.id} 种子「${esc((j.seed_title || '').slice(0, 18))}」</div>
+        <div class="row tight" style="margin-top:6px">
+          ${S.queueSelectMode
+            ? `<button class="btn sm ${picked ? 'primary' : ''}" data-act="pick" data-id="${j.id}">${picked ? '✓ 已选' : '选它'}</button>`
+            : `${browser
+              ? `<button class="btn sm ${S.online ? 'primary' : ''}" data-act="auto" data-id="${j.id}"
+                   ${S.online ? '' : 'disabled'}>自动识图</button>`
+              : `<button class="btn sm" data-act="open" data-id="${j.id}"
+                   ${S.online ? '' : 'disabled'}>打开识图</button>`}
+               <button class="btn sm ghost" data-act="del" data-id="${j.id}"
+                 ${S.online ? '' : 'disabled'}>删除</button>`}
+        </div>
+      </div>
+    </div>`;
+  }).join('') || '<div class="empty">这个筛选下没有队列项</div>';
+
+  // 先画已有的，再补缺的（只补当前显示出来的这些，几百条不必全下）
+  hydrateJobThumbs(rows).then(() => {
+    paintJobThumbs();
+    const missing = rows.filter((j) => !thumbSrcMap()[`job:${j.id}`]);
+    if (missing.length) {
+      ensureJobThumbs(missing).then((n) => {
+        paintJobThumbs();
+        if (n) console.log(`[vsw] 补齐了 ${n} 张队列缩略图`);
+      });
+    }
+  });
+
+  $$('#queueList [data-act]').forEach((btn) => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const jobId = Number(btn.dataset.id);
+      if (btn.dataset.act === 'pick') {
+        if (S.queueSelected.has(jobId)) S.queueSelected.delete(jobId); else S.queueSelected.add(jobId);
+        renderQueue();
+        return;
+      }
+      if (btn.dataset.act === 'del') {
+        return deleteQueueJobs([jobId], '这个');
+      }
+      if (!S.online) return toast('离线中：这个操作要在电脑上执行', true);
+      try {
+        if (btn.dataset.act === 'auto') {
+          await post(`/api/job/${jobId}/browser`, { timeout_ms: 90000 });
+          toast('已在电脑上启动自动识图，跑完同步一次即可看到结果');
+        } else {
+          const out = await post(`/api/job/${jobId}/execute`, {});
+          window.open(out.dispatch_url, '_blank', 'noopener');
+          toast('已在电脑上派发；结果页内容回填到电脑端即可');
+        }
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+
+  // 长按卡片进入多选（手机上没有悬停，长按是最自然的"选中多个"手势）
+  $$('#queueList .job').forEach((card) => {
+    let timer = null;
+    card.addEventListener('touchstart', () => {
+      timer = setTimeout(() => {
+        if (!S.queueSelectMode) { S.queueSelectMode = true; }
+        S.queueSelected.add(Number(card.dataset.id));
+        renderQueue();
+      }, 550);
+    }, { passive: true });
+    const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    card.addEventListener('touchend', cancel, { passive: true });
+    card.addEventListener('touchmove', cancel, { passive: true });
+    card.oncontextmenu = (ev) => { ev.preventDefault(); };
+  });
+}
+
+/** 队列筛选控件的绑定（只绑一次，在 boot 里调用）。 */
+function bindQueueFilters() {
+  const txt = $('#queueText');
+  if (txt) {
+    txt.value = S.queueText;
+    let timer = null;
+    txt.oninput = (ev) => {
+      S.queueText = ev.target.value;
+      clearTimeout(timer);
+      timer = setTimeout(renderQueue, 250);   // 打字时不要每按一下就重画
+    };
+  }
+  const seed = $('#queueSeed');
+  if (seed) seed.onchange = (ev) => { S.queueSeed = ev.target.value; renderQueue(); };
+  const res = $('#queueResults');
+  if (res) {
+    res.value = S.queueResults;
+    res.onchange = (ev) => { S.queueResults = ev.target.value; renderQueue(); };
+  }
+  const clear = $('#queueFilterClear');
+  if (clear) {
+    clear.onclick = () => {
+      S.queueSeed = ''; S.queueText = ''; S.queueResults = '';
+      S.queueEngines.clear(); S.queueKinds.clear();
+      if (txt) txt.value = '';
+      if (res) res.value = '';
+      renderQueue();
+    };
+  }
+}
+
+/**
+ * 队列项的缩略图：优先变体自己的小图（这才看得出"这一条派发的是哪个变体"），
+ * 没有就退回种子缩略图；都没有就先占位，等补图。
+ *
+ * 修过的真 bug：原来键写作 `thumb:{变体id}`，而结果/回收站/变体三张表 id 大量重号
+ * （实测结果↔变体重叠 39 个、回收站↔变体重叠 99 个），于是队列里会显示成**别的图**
+ * 或者空白。现在键带命名空间（见 KEY），互不干扰。
+ */
+async function resolveJobThumb(job) {
+  const variantKey = job.variant_id ? KEY.variantThumb(job.variant_id) : '';
+  if (variantKey) {
+    const url = await assetUrl(variantKey);
+    if (url) return { url, key: variantKey };
+  }
+  if (job.seed_id) {
+    const seedKey = KEY.seedThumb(job.seed_id);
+    const url = await assetUrl(seedKey);
+    if (url) return { url, key: seedKey };
+  }
+  return { url: '', key: '' };
+}
+
+async function hydrateJobThumbs(rows) {
+  const map = thumbSrcMap();
+  let changed = false;
+  for (const j of rows) {
+    const key = `job:${j.id}`;
+    if (map[key] !== undefined) continue;
+    map[key] = (await resolveJobThumb(j)).url || '';
+    changed = true;
+  }
+  if (changed && rows.length) {
+    // 只换图片，不重画整棵树（否则滚动位置会跳）
+    const cards = $$('#queueList .job');
+    cards.forEach((el, index) => {
+      const row = rows[index];
+      if (!row) return;
+      const src = map[`job:${row.id}`];
+      const img = el.querySelector('img');
+      if (img && src) img.src = src;
+    });
+  }
+}
+
+/** 队列页的补图：变体图缺就补变体图，变体也没有就补种子图。 */
+async function ensureJobThumbs(rows) {
+  if (!rows || !rows.length || !S.server) return 0;
+  const map = thumbSrcMap();
+  let got = 0;
+  for (const j of rows) {
+    if (map[`job:${j.id}`]) continue;
+    const variant = S.variants.find((v) => v.id === j.variant_id);
+    const seed = S.seeds.find((s) => s.id === j.seed_id);
+    let filled = false;
+    if (variant && variant.thumb) {
+      filled = await fetchInto(KEY.variantThumb(variant.id), variant.thumb);
+    }
+    if (!filled && seed && (seed.thumb_path || seed.rel_path)) {
+      filled = await fetchInto(KEY.seedThumb(seed.id), seed.thumb_path || seed.rel_path);
+    }
+    const resolved = await resolveJobThumb(j);
+    map[`job:${j.id}`] = resolved.url || '';
+    if (resolved.url) got += 1;
+  }
+  return got;
+}
+
+
+/** 打开一个归档批次：列出它的对象（缩略图 + 标题 + 队列），点一条看详情。 */
+async function openArchiveBatch(archiveId) {
+  const batch = S.archives.find((a) => Number(a.id) === Number(archiveId)) || {};
+  let items = S.archived.filter((f) => Number(f.archive_id) === Number(archiveId));
+  // 本地没有（例如这次快照没带归档）就从电脑取一次，并缓存进本地库
+  if (!items.length && S.online) {
+    try {
+      const detail = await api(`/api/archive/${archiveId}?limit=300`);
+      const rows = (detail.findings || []).filter((f) => !f.dup_of);
+      for (const row of rows) await local.put('archived', row);
+      S.archived = await local.all('archived');
+      items = S.archived.filter((f) => Number(f.archive_id) === Number(archiveId));
+      ensureThumbs(items, 'archived').then(() => paintArchiveThumbs());
+    } catch (e) { /* 下面会给提示 */ }
+  }
+
+  $('#sheetTitle').textContent = `归档 · ${batch.name || ('批次 #' + archiveId)}`;
+  $('#cropConfirm').classList.add('hide');
+  $('#cropStage').innerHTML = '';
+  const map = thumbSrcMap();
+  $('#sheetBody').innerHTML = `
+    <div class="small">对象 ${batch.findings || items.length} · 来源 ${batch.sources || '-'}
+      · 平台 ${batch.platforms || '-'} · 覆盖 ${esc(batch.date_from || '-')} ~ ${esc(batch.date_to || '-')}</div>
+    ${batch.note ? `<div class="small">${esc(batch.note)}</div>` : ''}
+    <div class="flist" id="archiveBatchList" style="margin-top:12px">
+      ${items.map((f) => `
+        <div class="fcard" data-id="${f.id}">
+          ${map[f.id] ? `<img src="${map[f.id]}" alt="">`
+            : `<img alt="" style="opacity:.25" data-want-thumb="${f.id}">`}
+          <div class="meta2">
+            <div class="tt">${esc(f.title || `#${f.id}`)}</div>
+            <div class="ln"><span class="tbadge ${f.triage}">${TRIAGE[f.triage] || f.triage || ''}</span>
+              <span class="mono">E ${num(f.explore_value)}</span>
+              <span>${sourceCount(f)} 源</span></div>
+          </div>
+        </div>`).join('') || '<div class="empty">这个批次里没有可显示的对象</div>'}
+    </div>`;
+  openSheet();
+  $$('#archiveBatchList .fcard').forEach((card) => {
+    card.onclick = () => openDetail(Number(card.dataset.id));
+  });
+  // 缺图的补齐（同一个补图逻辑，只是键用 athumb:）
+  if (!S.online) return;
+  ensureThumbs(items, 'archived').then(() => {
+    const m2 = thumbSrcMap();
+    $$('#archiveBatchList [data-want-thumb]').forEach((img) => {
+      const id = Number(img.getAttribute('data-want-thumb'));
+      if (m2[id]) img.src = m2[id];
+    });
+  });
+}
+
+function paintArchiveThumbs() {
+  const map = thumbSrcMap();
+  $$('#archiveBatchList [data-want-thumb]').forEach((img) => {
+    const id = Number(img.getAttribute('data-want-thumb'));
+    if (map[id]) img.src = map[id];
+  });
+}
+
+/* ---------------------------------------------------------------- 合并相册
+ * 「合并相册」= 把勾选的几个归档批次当成一个相册看 / 一起打包下载。
+ * 只读合并：数据库里的批次归属不变，跨批次按 id 去重、按发散度排序。
+ * 手机端优先用本地归档库（离线也能看），缺的批次再联网补一次。
+ */
+function mergedAlbumItems() {
+  const seen = new Map();
+  for (const f of S.archived) {
+    if (!S.albumPick.has(Number(f.archive_id))) continue;
+    if (f.dup_of) continue;
+    seen.set(Number(f.id), f);
+  }
+  return Array.from(seen.values())
+    .sort((a, b) => (Number(b.explore_value) || 0) - (Number(a.explore_value) || 0));
+}
+
+function syncAlbumBar() {
+  const n = S.albumPick.size;
+  const look = $('#archiveMergeLook');
+  const save = $('#archiveMergeSave');
+  const clear = $('#archiveMergeClear');
+  const hint = $('#archiveMergeHint');
+  if (look) {
+    look.disabled = n === 0;
+    look.textContent = n ? `合并查看（${n}）` : '合并查看';
+  }
+  if (save) {
+    save.disabled = n === 0;
+    save.textContent = n ? `合并保存 zip（${n}）` : '合并保存 zip';
+  }
+  if (clear) clear.style.display = n ? '' : 'none';
+  if (hint) {
+    hint.textContent = n
+      ? `已勾选 ${Array.from(S.albumPick).map((i) => `#${i}`).join(' ')} · 跨批次去重后按发散度排序`
+      : '勾选下面的批次，把几批合成一个相册看';
+  }
+}
+
+async function openMergedAlbum() {
+  const ids = Array.from(S.albumPick);
+  if (!ids.length) return;
+  let items = mergedAlbumItems();
+  // 本地没有的批次，联网补一次（补进来的同样落本地库，之后离线也能看）
+  const missing = ids.filter((id) => !S.archived.some((f) => Number(f.archive_id) === Number(id)));
+  if (missing.length && S.online) {
+    toast('正在补齐合并相册…');
+    for (const id of missing) {
+      try {
+        const detail = await api(`/api/archive/${id}?limit=300`);
+        for (const row of (detail.findings || []).filter((f) => !f.dup_of)) {
+          await local.put('archived', row);
+        }
+      } catch (e) { /* 单批失败不影响其余批次 */ }
+    }
+    S.archived = await local.all('archived');
+    items = mergedAlbumItems();
+  }
+
+  const totalSources = items.reduce((n, f) => n + sourceCount(f), 0);
+  const plats = new Set();
+  items.forEach((f) => (f.sources || []).forEach((s) => plats.add(s.platform || '(未识别)')));
+  const batches = ids.map((id) => S.archives.find((a) => Number(a.id) === Number(id)) || { id });
+  $('#sheetTitle').textContent = `合并相册 ${ids.map((i) => `#${i}`).join(' + ')}`;
+  $('#cropConfirm').classList.add('hide');
+  $('#cropStage').innerHTML = '';
+  const map = thumbSrcMap();
+  $('#sheetBody').innerHTML = `
+    <div class="small">批次 ${ids.length} · 对象 ${items.length} · 来源 ${totalSources}
+      ${plats.size ? `· 平台 ${plats.size}` : ''}</div>
+    <div class="small">${batches.map((b) => `${esc(b.name || `#${b.id}`)}（${(b.findings || 0)}）`).join(' · ')}</div>
+    <div class="flist" id="archiveBatchList" style="margin-top:12px">
+      ${items.map((f) => `
+        <div class="fcard" data-id="${f.id}">
+          ${map[f.id] ? `<img src="${map[f.id]}" alt="">`
+            : `<img alt="" style="opacity:.25" data-want-thumb="${f.id}">`}
+          <div class="meta2">
+            <div class="tt">${esc(f.title || `#${f.id}`)}</div>
+            <div class="ln"><span class="tbadge ${f.triage}">${TRIAGE[f.triage] || f.triage || ''}</span>
+              <span class="mono">E ${num(f.explore_value)}</span>
+              <span>${sourceCount(f)} 源</span>
+              <span class="small">#${esc(f.archive_id)}</span></div>
+          </div>
+        </div>`).join('') || '<div class="empty">这几批里没有可显示的对象</div>'}
+    </div>`;
+  openSheet();
+  $$('#archiveBatchList .fcard').forEach((card) => {
+    card.onclick = () => openDetail(Number(card.dataset.id));
+  });
+  if (!S.online) return;
+  ensureThumbs(items, 'archived').then(() => paintArchiveThumbs());
+}
+
+function saveMergedZip() {
+  const ids = Array.from(S.albumPick);
+  if (!ids.length) return;
+  if (!S.online) return toast('离线中：需要连上电脑才能打包', true);
+  const url = withKey(S.server.replace(/\/+$/, '') + `/api/archive/merge/zip?ids=${ids.join(',')}`);
+  // 同理「保存到手机」：交给系统下载（APK 里 DownloadListener 存到「下载」）
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'archive-merge.zip';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  toast(`正在打包 ${ids.length} 个批次，完成后在手机「下载」里打开`);
+}
+
+
+/* ---------------------------------------------------------------- 归档 / 回收站 */
+function renderArchive() {
+  const live = S.findings.filter((f) => !f.dup_of && !f.archived_at);
+  const selected = S.selection.size;
+  $('#archiveHint').textContent = selected
+    ? `将只归档选中的 ${selected} 个`
+    : `将归档全部 ${live.length} 个活动对象`;
+  const snap = S.snap || {};
+  const stats = (snap.stats) || {};
+  $('#archiveMetrics').innerHTML = [
+    ['活动对象', live.length],
+    ['已归档', S.findings.filter((f) => f.archived_at).length],
+    ['批次', S.archives.length],
+    ['回收站', S.trash.length],
+  ].map(([l, n]) => `<div class="metric"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
+
+  $('#archiveList').innerHTML = S.archives.map((a) => {
+    const items = S.archived.filter((f) => Number(f.archive_id) === Number(a.id));
+    const picked = S.albumPick.has(Number(a.id));
+    return `
+    <div class="card ${picked ? 'is-picked' : ''}" data-batch="${a.id}">
+      <div class="row">
+        <label class="pickbox" title="勾选后可以合并">
+          <input type="checkbox" data-pick="${a.id}"${picked ? ' checked' : ''}>
+        </label>
+        <b>${esc(a.name)}</b><div class="spacer"></div>
+        <span class="small">${new Date((a.created_at || 0) * 1000).toLocaleDateString('zh-CN')}</span></div>
+      <div class="small">对象 ${a.findings}${a.trashed ? `（+${a.trashed} 回收站）` : ''} · 来源 ${a.sources} · 平台 ${a.platforms} ·
+        ${esc(a.date_from || '-')} ~ ${esc(a.date_to || '-')}${a.empty ? ' · <b style="color:#ffb020">空批次</b>' : ''}</div>
+      ${a.note ? `<div class="small">${esc(a.note)}</div>` : ''}
+      <div class="row tight" style="margin-top:8px">
+        <button class="btn sm primary" data-open="${a.id}">查看（${items.length}）</button>
+        <button class="btn sm" data-save="${a.id}"
+          ${S.online ? '' : 'disabled'}>保存到手机</button>
+        <button class="btn sm ghost" data-folder="${a.id}"
+          ${S.online ? '' : 'disabled'}>在电脑上打开</button>
+        ${S.online ? `<button class="btn sm ghost" data-undo="${a.id}">取消归档</button>` : ''}
+      </div>
+      <div class="small" id="archivePath-${a.id}" style="margin-top:6px"></div>
+    </div>`;
+  }).join('') || '<div class="empty">还没有归档批次</div>';
+
+  // 合并相册的勾选
+  $$('#archiveList [data-pick]').forEach((box) => {
+    box.onchange = () => {
+      const id = Number(box.dataset.pick);
+      if (box.checked) S.albumPick.add(id); else S.albumPick.delete(id);
+      const card = box.closest('[data-batch]');
+      if (card) card.classList.toggle('is-picked', box.checked);
+      syncAlbumBar();
+    };
+  });
+  syncAlbumBar();
+
+  // 查看：打开批次内容（离线也能看 —— 归档对象在快照里单独带了一份）
+  $$('#archiveList [data-open]').forEach((btn) => {
+    btn.onclick = () => openArchiveBatch(Number(btn.dataset.open));
+  });
+
+  // 保存到手机：把这一批（图片 + manifest）打包成 zip 下载到手机的「下载」目录。
+  // 手机本地打不开电脑上的目录，所以"在手机上看到归档文件夹"只能靠把文件真正拿到手机上。
+  $$('#archiveList [data-save]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = Number(btn.dataset.save);
+      const host = $(`#archivePath-${id}`);
+      if (!S.online) return toast('离线中：需要连上电脑才能取这一批文件', true);
+      const raw = S.server.replace(/\/+$/, '') + `/api/archive/${id}/zip`;
+      if (host) host.textContent = '正在打包下载…';
+      try {
+        // 先探一下服务端能不能打包（出错时给明确提示，而不是静默失败）
+        const head = await netFetch(raw, { method: 'HEAD' });
+        if (!head.ok) throw new Error(`HTTP ${head.status}`);
+        const size = Number(head.headers.get('content-length') || 0);
+        // 交给系统下载（APK 里有 DownloadListener，会存到「下载」并通知）
+        const a = document.createElement('a');
+        a.href = withKey(raw);
+        a.download = `archive-${id}.zip`;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        if (host) host.textContent = size
+          ? `已开始下载（${(size / 1048576).toFixed(1)} MB）：完成后在手机的「下载」里打开`
+          : '已开始下载：完成后在手机的「下载」里打开';
+        toast('已开始下载，完成后在手机「下载」里打开');
+      } catch (e) {
+        if (host) host.textContent = '';
+        toast(`打包失败：${e.message}`, true);
+      }
+    };
+  });
+
+  // 在电脑上打开：让电脑生成并弹出那个目录（手机自己打不开电脑目录）。
+  // 离线时退化为显示路径（可复制），用户回到电脑前照样找得到。
+  $$('#archiveList [data-folder]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = Number(btn.dataset.folder);
+      const host = $(`#archivePath-${id}`);
+      if (!S.online) {
+        if (host) host.textContent = '离线中：连上电脑后才能生成文件夹或在电脑上打开。';
+        return toast('离线中：需要连上电脑才能生成归档文件夹', true);
+      }
+      try {
+        btn.disabled = true;
+        const info = await api(`/api/archive/${id}/paths?export=1`);
+        if (host) host.textContent = `电脑上的文件夹：${info.dir}`;
+        const opened = await post('/api/reveal', { path: info.dir });
+        toast(opened.opened
+          ? `已在电脑上打开（${info.count} 个文件）`
+          : `已生成，但电脑没能自动打开，路径见下方`);
+      } catch (e) {
+        toast(`打开失败：${e.message}`, true);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  });
+  $$('#archiveList [data-undo]').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        const out = await post('/api/archives/unarchive', { archive_id: Number(btn.dataset.undo) });
+        toast(`已恢复 ${out.restored} 个对象`);
+        await syncSnapshot();
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+
+  $('#trashHint').textContent = S.trash.length ? `${S.trash.length} 个` : '空的';  $('#trashList').innerHTML = S.trash.map((f) => `
+    <div class="fcard" data-tid="${f.id}">
+      ${thumbSrcMap()[f.id]
+        ? `<img src="${thumbSrcMap()[f.id]}" alt="">`
+        : '<img alt="" style="opacity:.25" data-want-thumb="' + f.id + '">'}
+      <div class="meta2">
+        <div class="tt">${esc(f.title || f.image_url || `#${f.id}`)}</div>
+        <div class="ln">${esc(f.trash_reason || '')} · ${sourceCount(f)} 源</div>
+        ${S.online ? `<div class="row tight">
+          <button class="btn sm" data-restore="${f.id}">恢复</button>
+          <button class="btn sm danger" data-purge="${f.id}">彻底删除</button></div>` : ''}
+      </div>
+    </div>`).join('') || '<div class="empty">回收站是空的</div>';
+
+  // 缺图的补齐统一在 loadLocal() 里做（数据进内存的唯一入口），这里只负责把已有的填进 DOM
+  paintThumbs('#trashList');
+  $$('#trashList [data-restore]').forEach((btn) => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      try {
+        await post('/api/findings/trash/restore', { finding_ids: [Number(btn.dataset.restore)] });
+        toast('已恢复'); await syncSnapshot();
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+  $$('#trashList [data-purge]').forEach((btn) => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      if (!confirm('彻底删除？图片文件也会删掉，不可恢复。')) return;
+      try {
+        await post('/api/findings/trash/purge', { finding_ids: [Number(btn.dataset.purge)], confirm: true });
+        toast('已彻底删除'); await syncSnapshot();
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+}
+
+/* ---------------------------------------------------------------- 框选（触屏） */
+const CROP = { img: null, sel: null, drag: null, box: null, source: null, blob: null };
+
+function openCrop(source, title, onDone) {
+  CROP.source = source;
+  CROP.sel = null;
+  CROP.drag = null;
+  CROP.blob = source.blob || null;
+  CROP.onDone = onDone || null;      // 走完之后回到哪（导入面板用它回到导入列表）
+  $('#sheetTitle').textContent = title || '框选';
+  $('#cropConfirm').classList.remove('hide');
+  $('#cropStage').innerHTML = `<div class="cropwrap" id="cropWrap">
+      <img id="cropImg" alt="">
+      <svg class="cropveil" id="cropVeil">
+        <defs><mask id="cropMask"><rect x="0" y="0" width="100%" height="100%" fill="white"></rect>
+          <rect id="cropHole" x="0" y="0" width="0" height="0" fill="black"></rect></mask></defs>
+        <rect x="0" y="0" width="100%" height="100%" fill="rgba(6,10,16,.6)" mask="url(#cropMask)"></rect>
+      </svg>
+      <div class="cropsel" id="cropSel" style="left:0;top:0;width:0;height:0">
+        <span class="cnr tl"></span><span class="cnr tr"></span>
+        <span class="cnr bl"></span><span class="cnr br"></span>
+        <span class="tag" id="cropTag"></span>
+      </div>
+    </div>
+    <div class="croptip">拖动框选 · 拖四角缩放 · 双指捏合可缩放整个选区 · 双击清空</div>`;
+  openSheet();
+  const img = $('#cropImg');
+  img.onload = () => {
+    CROP.img = img;
+    CROP.sel = { x: 0.2, y: 0.2, w: 0.6, h: 0.6 };
+    syncCrop();
+  };
+  img.src = source.url;
+  bindCropStage();
+}
+
+function cropRect() {
+  const img = CROP.img;
+  if (!img) return null;
+  const r = img.getBoundingClientRect();
+  return { r, sel: CROP.sel };
+}
+
+function syncCrop() {
+  const info = cropRect();
+  if (!info || !info.sel) return;
+  const { x, y, w, h } = info.sel;
+  const el = $('#cropSel');
+  el.style.left = `${x * 100}%`;
+  el.style.top = `${y * 100}%`;
+  el.style.width = `${w * 100}%`;
+  el.style.height = `${h * 100}%`;
+  const hole = $('#cropHole');
+  const wrap = $('#cropWrap').getBoundingClientRect();
+  hole.setAttribute('x', x * wrap.width);
+  hole.setAttribute('y', y * wrap.height);
+  hole.setAttribute('width', w * wrap.width);
+  hole.setAttribute('height', h * wrap.height);
+  const px = Math.round(w * CROP.img.naturalWidth);
+  const py = Math.round(h * CROP.img.naturalHeight);
+  $('#cropTag').textContent = `${px}×${py} · ${(w * h * 100).toFixed(0)}%`;
+}
+
+function bindCropStage() {
+  const wrap = $('#cropWrap');
+  const point = (ev) => {
+    const r = CROP.img.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)),
+      y: Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height)),
+    };
+  };
+  const handleAt = (ev) => {
+    const info = cropRect();
+    if (!info || !info.sel) return 'new';
+    const r = info.r;
+    const { x, y, w, h } = info.sel;
+    const x1 = r.left + x * r.width, y1 = r.top + y * r.height;
+    const x2 = x1 + w * r.width, y2 = y1 + h * r.height;
+    const tol = 26;
+    const near = (a, b) => Math.abs(a - b) <= tol;
+    const inside = ev.clientX >= x1 - tol && ev.clientX <= x2 + tol
+      && ev.clientY >= y1 - tol && ev.clientY <= y2 + tol;
+    if (!inside) return 'new';
+    let tag = '';
+    if (near(ev.clientY, y1)) tag += 'n';
+    if (near(ev.clientY, y2)) tag += 's';
+    if (near(ev.clientX, x1)) tag += 'w';
+    if (near(ev.clientX, x2)) tag += 'e';
+    return tag || 'move';
+  };
+  let pinchStart = null;
+  wrap.addEventListener('pointerdown', (ev) => {
+    if (!CROP.img) return;
+    const p = point(ev);
+    const mode = handleAt(ev);
+    CROP.drag = { mode, start: p, origin: { ...(CROP.sel || { x: p.x, y: p.y, w: 0, h: 0 }) } };
+    if (mode === 'new') CROP.sel = { x: p.x, y: p.y, w: 0.001, h: 0.001 };
+    syncCrop();
+    ev.preventDefault();
+  });
+  wrap.addEventListener('pointermove', (ev) => {
+    if (!CROP.drag || !CROP.img) return;
+    const p = point(ev);
+    const drag = CROP.drag;
+    let sel;
+    if (drag.mode === 'new') {
+      sel = { x: Math.min(drag.start.x, p.x), y: Math.min(drag.start.y, p.y),
+              w: Math.abs(p.x - drag.start.x), h: Math.abs(p.y - drag.start.y) };
+    } else if (drag.mode === 'move') {
+      sel = { x: Math.min(1 - drag.origin.w, Math.max(0, drag.origin.x + (p.x - drag.start.x))),
+              y: Math.min(1 - drag.origin.h, Math.max(0, drag.origin.y + (p.y - drag.start.y))),
+              w: drag.origin.w, h: drag.origin.h };
+    } else {
+      const o = drag.origin;
+      let x1 = o.x, y1 = o.y, x2 = o.x + o.w, y2 = o.y + o.h;
+      if (drag.mode.includes('w')) x1 = p.x;
+      if (drag.mode.includes('e')) x2 = p.x;
+      if (drag.mode.includes('n')) y1 = p.y;
+      if (drag.mode.includes('s')) y2 = p.y;
+      sel = { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+    }
+    CROP.sel = sel;
+    syncCrop();
+    ev.preventDefault();
+  });
+  const end = () => {
+    if (!CROP.drag) return;
+    CROP.drag = null;
+    if (CROP.sel && (CROP.sel.w < 0.03 || CROP.sel.h < 0.03)) {
+      CROP.sel = { x: 0.2, y: 0.2, w: 0.6, h: 0.6 };
+      toast('选区太小，已重置');
+    }
+    syncCrop();
+  };
+  wrap.addEventListener('pointerup', end);
+  wrap.addEventListener('pointercancel', end);
+  wrap.addEventListener('dblclick', () => { CROP.sel = null; syncCrop(); });
+  // 双指捏合 = 缩放整个选区（手机上最难的是"稍微收一点/放一点"）
+  wrap.addEventListener('touchmove', (ev) => {
+    if (ev.touches.length !== 2 || !CROP.sel || !CROP.img) return;
+    const [a, b] = ev.touches;
+    const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    if (!pinchStart) { pinchStart = { dist, sel: { ...CROP.sel } }; return; }
+    const scale = dist / pinchStart.dist;
+    const base = pinchStart.sel;
+    const cx = base.x + base.w / 2, cy = base.y + base.h / 2;
+    let w = Math.min(1, base.w * scale), h = Math.min(1, base.h * scale);
+    CROP.sel = { x: Math.min(1 - w, Math.max(0, cx - w / 2)),
+                 y: Math.min(1 - h, Math.max(0, cy - h / 2)), w, h };
+    syncCrop();
+    ev.preventDefault();
+  }, { passive: false });
+  wrap.addEventListener('touchend', () => { pinchStart = null; });
+}
+
+async function confirmCrop() {
+  if (!CROP.sel || !CROP.img) return toast('先框一块区域', true);
+  const img = CROP.img;
+  const { x, y, w, h } = CROP.sel;
+  const canvas = document.createElement('canvas');
+  const sx = x * img.naturalWidth, sy = y * img.naturalHeight;
+  const sw = Math.max(24, w * img.naturalWidth), sh = Math.max(24, h * img.naturalHeight);
+  canvas.width = Math.round(sw);
+  canvas.height = Math.round(sh);
+  canvas.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.92));
+  const name = `框选 ${canvas.width}×${canvas.height}`;
+  const dataUrl = await blobToDataUrl(blob);
+  const onDone = CROP.onDone;
+  if (S.online) {
+    try {
+      const res = await post('/api/mobile/sync', {
+        imports: [{ name, data_url: dataUrl, note: `手机框选 ${Math.round(w * 100)}%×${Math.round(h * 100)}%`,
+                    auto_enqueue: true, engines: ['baidu'] }],
+      });
+      const imported = (res.imported || [])[0];
+      toast(imported ? `已建成种子 #${imported.seed_id} 并排队` : '同步失败，可重试');
+      await syncSnapshot();
+    } catch (e) {
+      toast(`同步失败：${e.message}`, true);
+    }
+  } else {
+    await queuePending('import', {
+      name, data_url: dataUrl, note: '手机离线框选', auto_enqueue: true, engines: ['baidu'],
+    });
+    toast('离线：已存进离线收件箱');
+  }
+  // 从导入面板进来的就回导入面板（继续处理剩下那些），不要把人丢回上一页
+  CROP.onDone = null;
+  $('#cropConfirm').classList.add('hide');
+  $('#cropStage').innerHTML = '';
+  if (typeof onDone === 'function') onDone();
+  else closeSheet();
+}
+
+/* 地址归一化。踩过的坑：在 file:// 页面里 location.origin 是字符串 "null"，
+   直接拿来当"已设地址"会让首次引导被跳过、对方打开只看到空白页。 */
+function sanitizeServer(value) {
+  const text = String(value == null ? '' : value).trim().replace(/\/+$/, '');
+  if (!/^https?:\/\/[^\s]+$/i.test(text)) return '';
+  return text;
+}
+
+function storedServer() {
+  return sanitizeServer(localStorage.getItem('vsw.server'));
+}
+
+/* ---------------------------------------------------------------- 首次启动引导 */
+function showIntro(show) {
+  $('#intro').classList.toggle('hide', !show);
+  if (show) {
+    $('#introServer').value = S.server || '';
+    localStorage.setItem('vsw.introSeen', '1');
+  }
+}
+
+function introNeeded() {
+  // 没地址、本地库也空 —— 这种状态下打开就是一片空白，必须先引导
+  const empty = !S.findings.length && !S.trash.length && !S.archives.length;
+  return empty && !S.server;
+}
+
+function bindIntro() {
+  const connect = async () => {
+    const value = $('#introServer').value.trim().replace(/\/+$/, '');
+    if (!value) return toast('先填电脑地址，或选「导入数据集」', true);
+    if (!/^https?:\/\//i.test(value)) return toast('地址要以 http:// 开头', true);
+    S.server = value;
+    localStorage.setItem('vsw.server', value);
+    if (await checkOnline()) {
+      showIntro(false);
+      toast('连接成功，正在同步…');
+      await syncSnapshot();
+      switchTab('board');
+    } else {
+      toast('连不上。检查：电脑上的工作台开着吗？两端在同一 WiFi 吗？地址对吗？', true);
+    }
+  };
+  $('#introConnect').onclick = connect;
+  $('#introServer').onkeydown = (ev) => { if (ev.key === 'Enter') connect(); };
+  $('#introScan').onclick = () => scanQrCode((url) => {
+    $('#introServer').value = url;
+    connect();
+  });
+  $('#introImport').onclick = () => $('#introFile').click();
+  $('#introFile').onchange = async (ev) => {
+    await importDataset(ev.target.files[0]);
+    showIntro(false);
+  };
+  $('#introSkip').onclick = () => {
+    showIntro(false);
+    switchTab('me');
+    toast('可以先在「我的」里连接电脑或导入数据集');
+  };
+  $('#introAgainBtn').onclick = () => showIntro(true);
+  return introNeeded() ? showIntro(true) : undefined;
+}
+
+/** 扫码取工作台地址。
+ *  APK 里走原生桥（系统扫码界面，不需要相机权限）；网页版退回提示手填。 */
+function scanQrCode(onResult) {
+  $('#qrBox').classList.remove('hide');
+  if (ENV.canScanQR) {
+    try {
+      window.AndroidBridge.scanQR();
+      window.__vswQrResult = (text) => {
+        if (!text) return toast('没扫到内容，重试或手填地址', true);
+        const url = normalizeScannedUrl(text);
+        if (!url) return toast(`扫到的不是工作台地址：${text.slice(0, 40)}`, true);
+        onResult(url);
+      };
+      return;
+    } catch (e) {
+      toast(`扫码失败：${e.message}`, true);
+    }
+  }
+  // 浏览器里没有原生扫码接口：引导用户用系统相机/微信扫，或用「导入数据集」
+  if (S.server) {
+    const img = $('#qrImg');
+    img.src = withKey(S.server.replace(/\/+$/, '') + '/api/mobile/qr.png');
+    toast('用系统相机或微信扫这个码，把地址复制回来后填进去');
+  } else {
+    toast('先填一个地址（或让对方把启动日志里的地址发给你）', true);
+  }
+}
+
+/** 扫到的东西可能是地址、也可能带参数/换行，尽量救回来。 */
+function normalizeScannedUrl(text) {
+  const cleaned = String(text || '').trim();
+  const match = cleaned.match(/https?:\/\/[^\s"'<>]+/i);
+  if (!match) return '';
+  return match[0].replace(/\/+$/, '');
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(blob);
+  });
+}
+
+/* ---------------------------------------------------------------- 导入（拍照/相册） */
+function bindImport() {
+  $('#importFab').onclick = () => openImportSheet();
+}
+
+/* 导入队列：一次可以选/拍多张，每张各自有状态。
+ *
+ * 之前的实现有两个真 bug（用户实测反馈）：
+ *   1. 导入成功后直接 closeSheet() —— 把整个导入面板关掉，人被弹回上一页；
+ *   2. 面板一关，列表里其它文件就再也不会被导入（它们只是按钮，没有队列）。
+ * 现在：面板不关，每张显示自己的状态，另外给一个「全部导入」把没做的都做掉。 */
+const IMPORT_QUEUE = [];
+
+function filesToQueue(fileList) {
+  const list = Array.from(fileList || []);
+  list.forEach((file, i) => {
+    IMPORT_QUEUE.push({
+      id: `${Date.now()}-${i}-${Math.random().toString(36).slice(2, 7)}`,
+      file,
+      name: file.name || `图片 ${IMPORT_QUEUE.length + 1}`,
+      size: file.size || 0,
+      status: 'idle',      // idle | sending | done | queued | failed
+      detail: '',
+    });
+  });
+  return list.length;
+}
+
+function importStatusLabel(entry) {
+  if (entry.status === 'sending') return '<span class="small">正在导入…</span>';
+  if (entry.status === 'done') return `<span class="small" style="color:var(--diff)">✓ ${esc(entry.detail || '已导入')}</span>`;
+  if (entry.status === 'queued') return `<span class="small" style="color:var(--track)">✓ ${esc(entry.detail || '已存进离线收件箱')}</span>`;
+  if (entry.status === 'failed') return `<span class="small" style="color:var(--danger)">✗ ${esc(entry.detail || '失败')}</span>`;
+  return '';
+}
+
+function renderImportList() {
+  const host = $('#importList');
+  if (!host) return;
+  if (!IMPORT_QUEUE.length) { host.innerHTML = ''; return; }
+  const done = IMPORT_QUEUE.filter((e) => e.status === 'done' || e.status === 'queued').length;
+  const failed = IMPORT_QUEUE.filter((e) => e.status === 'failed').length;
+  const pending = IMPORT_QUEUE.length - done - failed;
+  host.innerHTML = `
+    <div class="row" style="margin:14px 0 8px">
+      <span class="pill">共 ${IMPORT_QUEUE.length} 张</span>
+      <span class="pill on">已导入 ${done}</span>
+      ${pending ? `<span class="pill warn">待处理 ${pending}</span>` : ''}
+      ${failed ? `<span class="pill off">失败 ${failed}</span>` : ''}
+      <div class="spacer"></div>
+      ${pending > 1 ? '<button class="btn sm primary" id="importAll">全部导入</button>' : ''}
+    </div>
+    ${IMPORT_QUEUE.map((entry) => `
+    <div class="card" data-id="${entry.id}">
+      <div class="row"><b>${esc(entry.name)}</b>
+        <div class="spacer"></div><span class="small">${Math.round(entry.size / 1024)} KB</span></div>
+      <div class="row tight" style="margin-top:8px">
+        ${entry.status === 'idle' || entry.status === 'failed' ? `
+          <button class="btn sm primary" data-do="send" data-id="${entry.id}">直接导入</button>
+          <button class="btn sm" data-do="crop" data-id="${entry.id}">先框选再导入</button>` : ''}
+        ${importStatusLabel(entry)}
+      </div>
+    </div>`).join('')}`;
+
+  const all = $('#importAll');
+  if (all) all.onclick = () => importAllPending();
+  $$('#importList [data-do]').forEach((btn) => {
+    btn.onclick = async () => {
+      const entry = IMPORT_QUEUE.find((e) => e.id === btn.dataset.id);
+      if (!entry || entry.status === 'sending') return;
+      if (btn.dataset.do === 'crop') {
+        // 框选：走完回导入面板继续处理剩下的，而不是把人丢回上一页
+        openCrop({ url: URL.createObjectURL(entry.file), blob: entry.file },
+                 `框选：${entry.name}`, () => { closeSheet(); openImportSheet(); });
+      } else {
+        await importOne(entry);
+        renderImportList();
+      }
+    };
+  });
+}
+
+/** 把还没处理的按顺序做完（串行，避免同时发几十个请求）。 */
+async function importAllPending() {
+  const pending = IMPORT_QUEUE.filter((e) => e.status === 'idle' || e.status === 'failed');
+  if (!pending.length) return toast('没有待导入的图片');
+  if (!S.online) {
+    // 离线也能"全部导入"：只是都进离线收件箱
+    for (const entry of pending) { await importOne(entry); renderImportList(); }
+    toast(`已放进离线收件箱 ${pending.length} 张，回连后一键推回`);
+    return;
+  }
+  let ok = 0;
+  for (const entry of pending) {
+    await importOne(entry);
+    if (entry.status === 'done') ok += 1;
+    renderImportList();
+  }
+  await refreshQueueFromServer({ silent: true });
+  const queued = S.jobs.filter((j) => ['pending', 'running', 'review'].includes(j.status)).length;
+  toast(`导入完成：${ok}/${pending.length} 张成功 · 待处理队列 ${queued} 条`);
+}
+
+function openImportSheet() {
+  $('#sheetTitle').textContent = '导入图片';
+  // 记住上次选的入队变体，别每次都要重选
+  const kindsWanted = localStorage.getItem('vsw.importKinds') || 'full';
+  $('#cropConfirm').classList.add('hide');
+  $('#cropStage').innerHTML = '';
+  $('#sheetBody').innerHTML = `
+    <p class="small">拍一张或从相册选图（可多选）。选中后可以直接导入，也可以先在手机上框选一块
+      再导入 —— 手机上框选不经过电脑，反而比鼠标顺手。</p>
+    <div class="row">
+      <button class="btn primary" id="pickCamera">拍照</button>
+      <button class="btn" id="pickGallery">从相册选</button>
+      ${IMPORT_QUEUE.length ? '<button class="btn ghost" id="clearImport">清空列表</button>' : ''}
+    </div>
+    <label class="field" style="margin-top:10px"><span>入队变体（决定导入后往队列里加几条）</span>
+      <select id="importKinds">
+        <option value="full" selected>仅全图（每张 1 条，推荐）</option>
+        <option value="all">全部变体（每张约 16 条）</option>
+      </select></label>
+    <input type="file" id="fileCamera" accept="image/*" capture="environment" class="hide">
+    <input type="file" id="fileGallery" accept="image/*" multiple class="hide">
+    <div id="importList"></div>
+    <p class="small" id="importHint" style="margin-top:12px"></p>`;
+  openSheet();
+  $('#pickCamera').onclick = () => $('#fileCamera').click();
+  $('#pickGallery').onclick = () => $('#fileGallery').click();
+  const clear = $('#clearImport');
+  if (clear) clear.onclick = () => { IMPORT_QUEUE.length = 0; renderImportList(); openImportSheet(); };
+  $('#fileCamera').onchange = (ev) => {
+    const added = filesToQueue(ev.target.files);
+    ev.target.value = '';           // 允许再次选同一个文件
+    if (added) openImportSheet();
+  };
+  $('#fileGallery').onchange = (ev) => {
+    const added = filesToQueue(ev.target.files);
+    ev.target.value = '';
+    if (added) openImportSheet();
+  };
+  const kindsSelect = $('#importKinds');
+  if (kindsSelect) {
+    kindsSelect.value = kindsWanted;
+    kindsSelect.onchange = () => localStorage.setItem('vsw.importKinds', kindsSelect.value);
+  }
+  const hint = $('#importHint');
+  if (hint) {
+    hint.textContent = S.online
+      ? '连上电脑时：导入即在工作台建成种子，并按你设置的引擎入队。'
+      : '当前离线：导入的图片会先存进「离线收件箱」，回到同一 WiFi 后点「推回电脑」一次提交。';
+  }
+  renderImportList();
+}
+
+/** 导入单张。**不关面板** —— 关面板这个动作留给用户（返回按钮）。 */
+async function importOne(entry) {
+  const kindsMode = localStorage.getItem('vsw.importKinds') || 'full';
+  const payload = {
+    name: entry.name || '手机导入',
+    data_url: await blobToDataUrl(entry.file),
+    auto_enqueue: true,
+    engines: ['baidu'],
+    // 手机快拍通常只需要全图那一条；想要全套变体再切"全部变体"
+    variants: kindsMode === 'all' ? null : ['full'],
+  };
+  entry.status = 'sending';
+  entry.detail = '';
+  renderImportList();
+  if (S.online) {
+    try {
+      const res = await post('/api/mobile/sync', { imports: [payload] });
+      const imported = (res.imported || [])[0];
+      if (imported && imported.seed_id) {
+        const queued = (imported.job_ids || []).length;
+        const existed = imported.created === false;
+        entry.status = 'done';
+        entry.detail = queued
+          ? `${existed ? '已存在' : '已建成'}种子 #${imported.seed_id} · 入队 ${queued} 条`
+          : `${existed ? '已存在' : '已建成'}种子 #${imported.seed_id}（未入队）`;
+        // 关键：导入完必须把队列同步下来，否则队列页看不到刚生成的任务。
+        // 因为一次导入会为每个变体 × 引擎各建一条任务（默认 16 条），用户很容易以为"没进队列"。
+        await refreshQueueFromServer({ silent: true });
+      } else {
+        const why = (res.errors && res.errors[0] && res.errors[0].error) || '电脑端没有接受这张图';
+        entry.status = 'failed';
+        entry.detail = why;
+      }
+    } catch (e) {
+      entry.status = 'failed';
+      entry.detail = e.message;
+    }
+  } else {
+    // 离线：进收件箱，等回连再推。这也算"处理完了"，所以标成 queued 而不是 idle。
+    try {
+      await queuePending('import', payload);
+      entry.status = 'queued';
+      entry.detail = '已存进离线收件箱';
+    } catch (e) {
+      entry.status = 'failed';
+      entry.detail = e.message;
+    }
+  }
+  return entry;
+}
+
+/* ---------------------------------------------------------------- 账号 */
+/* 手机端两种身份：
+   - 账号（名字 + 密码）→ 每人有自己的私人工作区，也能切到别人邀请协作的工作区；
+   - 访客密钥（VSW-…）→ 主人发的一条只读/可操作通道。
+   APK 里页面是 file://，服务器源的 cookie 带不上，所以登录后把令牌存本地、每次塞进
+   `X-VSW-Session` 头（服务端 `_session_token()` 会读这个头）。 */
+
+function showLock(msg) {
+  // 401 的统一出口：提示 + 把人带到「我的」页去登录/填密钥。
+  toast(msg || '需要登录或访问密钥', true);
+  if (S.tab !== 'me') switchTab('me');
+  renderAccount();
+}
+
+function saveSid(token) {
+  S.sid = token || '';
+  if (S.sid) localStorage.setItem('vsw.sid', S.sid);
+  else localStorage.removeItem('vsw.sid');
+}
+
+function loadCreds() {
+  S.sid = localStorage.getItem('vsw.sid') || '';
+  S.key = localStorage.getItem('vsw.key') || '';
+}
+
+async function refreshAccount() {
+  if (!S.server) { S.me = null; renderAccount(); return null; }
+  try {
+    const me = await api('/api/auth');
+    S.me = me;
+    renderAccount();
+    // 这台电脑开了账号、而我还没进去 —— 直接把「我的」摆到面前，别让人对着空结果板发呆
+    if (me && me.accounts && !me.logged_in && S.tab !== 'me') switchTab('me');
+    return me;
+  } catch (e) {
+    S.me = null;
+    renderAccount();
+    return null;
+  }
+}
+
+function renderAccount() {
+  const me = S.me;
+  const state = $('#accState');
+  const who = $('#accWho');
+  const logged = $('#accLogged');
+  const out = $('#accLoggedOut');
+  if (!state) return;
+  const on = !!(me && me.accounts);
+  if (!on) {
+    state.textContent = S.key ? '访客密钥' : '未上锁';
+    who.innerHTML = S.key
+      ? `这台电脑还没开账号，你现在用密钥访问：<code>${esc(S.key)}</code>`
+      : '这台电脑还没开账号，谁连上都能用。要分人用，就在电脑上建第一个账号。';
+    logged.classList.add('hide');
+    out.classList.add('hide');
+    return;
+  }
+  if (me.logged_in) {
+    const u = me.user || {};
+    const w = me.workspace || {};
+    state.textContent = '已登录';
+    who.innerHTML = `<b>${esc(u.name || '')}</b> · 现在在「${esc(w.name || '')}」（${esc(me.role_label || '')}）
+      ${S.key ? `<br>另外还带着访客密钥 <code>${esc(S.key)}</code>` : ''}`;
+    logged.classList.remove('hide');
+    out.classList.add('hide');
+    const sel = $('#accWs');
+    const list = me.workspaces || [];
+    sel.innerHTML = list.map((w2) => `<option value="${w2.id}"${w2.id === (w.id || 0) ? ' selected' : ''}>${esc(w2.name || '')}${w2.kind === 'personal' ? '（私人）' : '（共享）'}</option>`).join('');
+  } else {
+    state.textContent = '未登录';
+    who.textContent = me.can_setup
+      ? '这台电脑还没建账号：请在电脑浏览器里建第一个账号。'
+      : '输名字和密码进来；没有账号就让主人发邀请码。';
+    logged.classList.add('hide');
+    out.classList.remove('hide');
+    $('#accInviteBox').classList.add('hide');
+  }
+}
+
+async function accLogin() {
+  const name = ($('#accName').value || '').trim();
+  const password = $('#accPass').value || '';
+  if (!name || !password) { toast('名字和密码都要填', true); return; }
+  try {
+    const out = await post('/api/auth/login', { name, password });
+    saveSid(out.token || '');
+    $('#accPass').value = '';
+    toast(`进来了：${(out.user || {}).name || name}`);
+    await afterLogin();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function accRegister() {
+  const code = ($('#accInvite').value || '').trim();
+  const name = ($('#accName').value || '').trim();
+  const password = $('#accPass').value || '';
+  if (!code) { toast('先填邀请码', true); return; }
+  try {
+    const out = await post('/api/auth/register', { code, name, password });
+    saveSid(out.token || '');
+    $('#accPass').value = '';
+    toast(`注册好了：${(out.user || {}).name || name}`);
+    await afterLogin();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function accSwitch() {
+  const ws = Number($('#accWs').value || 0);
+  try {
+    await post('/api/auth/workspaces/switch', { ws });
+    toast('换好了');
+    await afterLogin();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function accLogout() {
+  try { await post('/api/auth/logout', {}); } catch (e) { /* 忽略 */ }
+  saveSid('');
+  // 退出后本地库还是上一个工作区的：清掉，免得下一个人看到别人的东西。
+  for (const store of ['findings', 'trash', 'archived', 'archives', 'jobs', 'seeds', 'variants']) {
+    await local.clear(store);
+  }
+  await local.clear('assets');
+  await local.put('meta', { key: 'snapshot', value: null });
+  S.snap = null;
+  S.findings = []; S.trash = []; S.archived = []; S.archives = [];
+  S.jobs = []; S.seeds = []; S.variants = [];
+  toast('已退出，本地缓存清空了');
+  await refreshAccount();
+  await loadLocal();
+}
+
+async function afterLogin() {
+  await refreshAccount();
+  await checkOnline();
+  // 换了身份就是换了数据目录：把本地库清掉，重新同步这个工作区的。
+  for (const store of ['findings', 'trash', 'archived', 'archives', 'jobs', 'seeds', 'variants']) {
+    await local.clear(store);
+  }
+  await local.clear('assets');
+  await local.put('meta', { key: 'snapshot', value: null });
+  S.snap = null;
+  await loadLocal();
+  if (S.online) { try { await syncSnapshot(); } catch (e) { /* 同步失败也别挡着用 */ } }
+  render();
+}
+
+async function accUseKey(code) {
+  const key = (code || '').trim();
+  if (!key) { toast('先填密钥', true); return; }
+  S.key = key;
+  localStorage.setItem('vsw.key', key);
+  saveSid('');                       // 账号会话和访客密钥只留一个，避免打架
+  await checkOnline();
+  await refreshAccount();
+  await afterLogin();
+}
+
+async function accDropKey() {
+  S.key = '';
+  localStorage.removeItem('vsw.key');
+  await refreshAccount();
+  toast('密钥已清掉');
+}
+
+function bindAccount() {
+  $('#accKeyGo').onclick = () => accUseKey($('#accKey').value);
+  $('#accKeyClear').onclick = accDropKey;
+  $('#accLoginBtn').onclick = accLogin;
+  $('#accRegisterBtn').onclick = () => $('#accInviteBox').classList.toggle('hide');
+  $('#accRegGo').onclick = accRegister;
+  $('#accSwitchBtn').onclick = accSwitch;
+  $('#accLogoutBtn').onclick = accLogout;
+  $('#accPass').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') accLogin(); });
+}
+
+/* ---------------------------------------------------------------- 我的页 */
+async function openSettings() {
+  $('#serverInput').value = S.server || window.location.origin;
+  refreshAccount();
+  const snap = (await local.get('meta', 'snapshot')) || null;
+  S.snap = snap ? snap.value : null;
+  $('#snapInfo').textContent = S.snap
+    ? `上次同步 ${new Date(S.snap.at).toLocaleString('zh-CN')}`
+    : '还没同步过';
+  if (S.server) {
+    $('#qrBox').classList.remove('hide');
+    $('#qrImg').src = withKey(S.server.replace(/\/+$/, '') + '/api/mobile/qr.png');
+    $('#qrImg').onerror = () => { $('#qrBox').classList.add('hide'); };
+  }
+  const rows = await local.all('pending');
+  $('#pendingInfo').textContent = rows.length ? `${rows.length} 条待同步` : '没有待同步的内容';
+  $('#pendingList').innerHTML = '';
+  await refreshPending();
+  if (navigator.storage && navigator.storage.estimate) {
+    const est = await navigator.storage.estimate();
+    $('#storagePill').textContent = `本地占用 ${(est.usage / 1024 / 1024).toFixed(1)} MB`;
+  } else {
+    $('#storagePill').textContent = '';
+  }
+}
+
+function bindMe() {
+  $('#serverInput').onchange = (ev) => {
+    S.server = ev.target.value.trim().replace(/\/+$/, '');
+    localStorage.setItem('vsw.server', S.server);
+    checkOnline().then(render);
+  };
+  $('#pingBtn').onclick = async () => {
+    const ok = await checkOnline();
+    toast(ok ? '连接正常，电脑端工作台可用' : '连不上，检查地址与 WiFi', !ok);
+    render();
+  };
+  $('#scanQrBtn').onclick = () => {
+    $('#qrBox').classList.toggle('hide');
+    if (S.server) {
+      $('#qrImg').src = withKey(S.server.replace(/\/+$/, '') + '/api/mobile/qr.png');
+      toast('用电脑屏幕上的二维码对准手机扫；也可以把地址手打进来');
+    } else {
+      toast('先填一个电脑地址，才能取到它的二维码', true);
+    }
+  };
+  $('#syncBtn').onclick = syncSnapshot;
+  $('#flushBtn').onclick = flushPending;
+  $('#exportBtn').onclick = exportDataset;
+  $('#importFileBtn').onclick = () => $('#importFile').click();
+  $('#importFile').onchange = (ev) => importDataset(ev.target.files[0]);
+  $('#clearLocalBtn').onclick = async () => {
+    if (!confirm('清空手机本地库？电脑上的数据不受影响，下次同步会重新拉。')) return;
+    await Promise.all(['findings', 'trash', 'archives', 'jobs', 'seeds', 'variants', 'assets', 'meta']
+      .map((s) => local.clear(s)));
+    toast('本地库已清空');
+    await loadLocal();
+  };
+}
+
+/* 导出：把本地库打包成一个文件，可以用数据线/微信传给别的手机或电脑 */
+async function exportDataset() {
+  const payload = { version: 1, at: Date.now(), host: S.snap ? S.snap.host : '',
+                    findings: S.findings, trash: S.trash, archives: S.archives,
+                    jobs: S.jobs, seeds: S.seeds, variants: S.variants, assets: [] };
+  const assets = await local.all('assets');
+  for (const record of assets) {
+    // 缩略图一起带上（离线看图全靠它）；原图体积太大，留给同步。
+    // 键有命名空间：fthumb:/tthumb:/sthumb:/vthumb:，原图是 ffull:。
+    if (!/^(fthumb|tthumb|sthumb|vthumb):/.test(record.key)) continue;
+    payload.assets.push({ key: record.key, data_url: await blobToDataUrl(record.blob) });
+  }
+  const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `vsw-mobile-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  toast(`已导出（含 ${payload.assets.length} 张缩略图）`);
+}
+
+async function importDataset(file) {
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    for (const store of ['findings', 'trash', 'archives', 'jobs', 'seeds', 'variants']) {
+      await local.clear(store);
+      for (const row of data[store] || []) await local.put(store, row);
+    }
+    for (const asset of data.assets || []) {
+      const blob = await (await fetch(asset.data_url)).blob();
+      await local.put('assets', { key: asset.key, blob, at: Date.now() });
+    }
+    await local.put('meta', { key: 'snapshot', value: {
+      at: Date.now(), mode: 'dataset', host: data.host || '（导入的数据集）',
+      counts: { findings: (data.findings || []).length, seeds: (data.seeds || []).length,
+                jobs: (data.jobs || []).length, trash: (data.trash || []).length,
+                archives: (data.archives || []).length },
+    } });
+    toast(`已导入数据集：对象 ${(data.findings || []).length} 个`);
+    await loadLocal();
+    switchTab('board');
+  } catch (e) {
+    toast(`导入失败：${e.message}`, true);
+  }
+}
+
+/* ---------------------------------------------------------------- 壳：标签、面板 */
+function openSheet() {
+  $('#sheet').classList.add('open');
+  history.pushState({ sheet: 1 }, '');   // 让系统返回键先关面板，而不是退出应用
+}
+function closeSheet() {
+  $('#sheet').classList.remove('open');
+}
+
+function switchTab(tab) {
+  S.tab = tab;
+  $$('nav button[data-v]').forEach((b) => b.classList.toggle('active', b.dataset.v === tab));
+  $$('main > section').forEach((s) => s.classList.toggle('hide', s.id !== `v-${tab}`));
+  $('#title').textContent = { board: '结果板', queue: '队列', archive: '归档与回收站', me: '我的' }[tab];
+  const sub = $('#hsub');
+  sub.innerHTML = {
+    board: `<span class="pill">${S.findings.filter((f) => !f.dup_of && !f.archived_at).length} 个对象</span>
+            <span class="pill">${S.selection.size} 已选</span>`,
+    queue: `<span class="pill">${S.jobs.length} 条队列</span>`,
+    archive: `<span class="pill">${S.archives.length} 个批次</span><span class="pill">回收站 ${S.trash.length}</span>`,
+    me: '',
+  }[tab];
+  if (tab === 'queue') {
+    renderQueue();
+    // 离线期间导入的东西、或别的设备改了队列：切回来时静默重拉一次
+    if (S.online) {
+      refreshQueueFromServer({ silent: true }).then(() => {
+        if (S.tab === 'queue') renderQueue();
+      });
+    }
+  }
+  if (tab === 'archive') renderArchive();
+  if (tab === 'me') openSettings();
+}
+
+function renderNet() {
+  $('#netPill').className = `pill ${S.online ? 'on' : 'off'}`;
+  $('#netPill').textContent = S.online ? '已连电脑' : (S.server ? '离线' : '未设地址');
+  const snap = S.snap;
+  $('#dataPill').textContent = snap
+    ? `快照 ${new Date(snap.at).toLocaleDateString('zh-CN')}`
+    : '本地库';
+}
+
+async function render() {
+  renderNet();
+  if (S.tab === 'board') renderBoard();
+  if (S.tab === 'queue') renderQueue();
+  if (S.tab === 'archive') renderArchive();
+}
+
+/* ---------------------------------------------------------------- 启动 */
+async function loadLocal() {
+  S.findings = await local.all('findings');
+  S.trash = await local.all('trash');
+  S.archived = await local.all('archived');
+  S.archives = await local.all('archives');
+  S.jobs = await local.all('jobs');
+  S.seeds = await local.all('seeds');
+  S.variants = await local.all('variants');
+  S.selection.clear();
+  S._thumbs = {};
+  await hydrateThumbs(S.findings, 'finding');
+  await hydrateThumbs(S.trash, 'trash');
+  await hydrateThumbs(S.archived, 'archived');
+  const snap = await local.get('meta', 'snapshot');
+  S.snap = snap ? snap.value : null;
+  await refreshPending();
+  render();
+  switchTab(S.tab);
+
+  // 加载完顺手补齐本地缺失的图片，然后只把 <img> 补上（不重画整棵树，避免滚动位置丢失）。
+  // 放在这里而不是"切到某个标签页时"：图片缺不缺和用户切到哪一页无关，而 loadLocal
+  // 是数据进内存的唯一入口（启动、同步完成、导入数据集都会走它）。
+  Promise.resolve()
+    .then(() => ensureThumbs(S.findings, 'finding'))
+    .then(() => ensureThumbs(S.trash, 'trash'))
+    // 归档图**不在启动时补**：归档对象可能上百个，启动时全补会把补图排队堵死
+    // （实测拖到回收站那几张都补不出来）。等用户点开某个批次时再按需补（见 openArchiveBatch）。
+    .then(() => ensureThumbs(S.seeds, 'seed'))
+    .then(() => paintThumbs('#boardList') || paintThumbs('#trashList'))
+    .catch(() => { /* 离线或没有可补的图时静默跳过 */ });
+}
+
+async function boot() {
+  // 地址来源：本地存的（清洗过）→ 浏览器里跑时的同源地址 → 空（触发首次引导）
+  if (!S.server) S.server = storedServer();
+  if (!S.server && /^https?:$/i.test(location.protocol)) {
+    S.server = sanitizeServer(location.origin);
+  }
+  if (S.server) localStorage.setItem('vsw.server', S.server);
+  loadCreds();
+  $('#serverInput').value = S.server || '';
+  bindAccount();
+  $$('nav button[data-v]').forEach((b) => { b.onclick = () => switchTab(b.dataset.v); });
+  $$('#triageSeg button').forEach((b) => {
+    b.onclick = () => {
+      $$('#triageSeg button').forEach((x) => x.classList.toggle('on', x === b));
+      S.triage = b.dataset.t;
+      renderBoard();
+    };
+  });
+  $$('#queueSeg button').forEach((b) => {
+    b.onclick = () => {
+      $$('#queueSeg button').forEach((x) => x.classList.toggle('on', x === b));
+      S.queueStatus = b.dataset.s;
+      S.queueSelected.clear();          // 换状态时清掉选择，避免删到看不见的条目
+      renderQueue();
+    };
+  });
+  bindQueueFilters();
+  $('#boardSearch').oninput = (ev) => { S.search = ev.target.value; renderBoard(); };
+  $('#selAllBtn').onclick = () => {
+    const visible = S.findings.filter((f) => !f.dup_of).map((f) => f.id);
+    const allSelected = visible.every((id) => S.selection.has(id));
+    S.selection.clear();
+    if (!allSelected) visible.forEach((id) => S.selection.add(id));
+    renderBoard();
+  };
+  $('#sheetClose').onclick = closeSheet;
+  $('#cropConfirm').onclick = confirmCrop;
+  bindImport();
+  bindMe();
+  $('#archiveSelectedBtn').onclick = archiveSelection;
+  // 合并相册
+  $('#archiveMergeLook').onclick = async () => {
+    try { await openMergedAlbum(); } catch (e) { toast(e.message, true); }
+  };
+  $('#archiveMergeSave').onclick = saveMergedZip;
+  $('#archiveMergeClear').onclick = () => {
+    S.albumPick.clear();
+    $$('#archiveList [data-pick]').forEach((box) => { box.checked = false; });
+    $$('#archiveList [data-batch]').forEach((card) => card.classList.remove('is-picked'));
+    syncAlbumBar();
+  };
+  $('#archiveAllBtn').onclick = async () => {
+    if (!S.online) return toast('离线中：整批归档要在电脑上执行', true);
+    try {
+      const out = await post('/api/archives', { name: `手机整批归档 ${new Date().toLocaleString('zh-CN')}` });
+      toast(`已归档 ${out.archived} 个对象`); await syncSnapshot();
+    } catch (e) { toast(e.message, true); }
+  };
+  $('#trashRestoreAll').onclick = async () => {
+    if (!S.online) return toast('离线中：恢复需要连上电脑', true);
+    try {
+      const out = await post('/api/findings/trash/restore', { all: true });
+      toast(`已恢复 ${(out.restored || []).length} 个`); await syncSnapshot();
+    } catch (e) { toast(e.message, true); }
+  };
+  $('#trashPurgeAll').onclick = async () => {
+    if (!S.online) return toast('离线中：彻底删除需要连上电脑', true);
+    if (!confirm('清空回收站：图片文件会被永久删除，不可恢复。')) return;
+    try {
+      const out = await post('/api/findings/trash/purge', { all: true, confirm: true });
+      toast(`已清空（删除 ${(out.purged || []).length} 条 / ${out.files_removed || 0} 个文件）`);
+      await syncSnapshot();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  await loadLocal();
+  bindIntro();
+  await checkOnline();
+  renderNet();
+  // 离线优先：先渲染本地库，联网检查在后台进行（不要让它挡住首屏）
+  checkOnline().then(() => { render(); refreshAccount(); });
+
+  if (ENV.canUseServiceWorker) {
+    navigator.serviceWorker.register('/m/sw.js').then(() => {
+      $('#swPill').textContent = '离线外壳已就绪';
+      $('#swPill').classList.add('on');
+    }).catch(() => { $('#swPill').textContent = '离线外壳不可用'; });
+  } else if (ENV.isFile) {
+    $('#swPill').textContent = '应用内置（无需离线外壳）';
+    $('#swPill').classList.add('on');
+  }
+  window.addEventListener('online', () => checkOnline().then(render));
+  window.addEventListener('offline', () => { S.online = false; renderNet(); });
+
+  // 系统返回键（APK）：先把面板/引导关掉，再考虑退出应用
+  window.vswHandleBack = () => {
+    if ($('#sheet').classList.contains('open')) { closeSheet(); return true; }
+    if (!$('#intro').classList.contains('hide')) { showIntro(false); return true; }
+    return false;
+  };
+  window.addEventListener('popstate', () => {
+    if ($('#sheet').classList.contains('open')) closeSheet();
+  });
+  if (ENV.isAndroidApp) {
+    // 页面已经跑起来了：让原生层把启动屏收掉。这也顺便证明 JS 没挂在半路。
+    try {
+      if (typeof window.AndroidBridge.hideSplash === 'function') {
+        window.AndroidBridge.hideSplash();
+      }
+    } catch (e) { /* 网页版没有这个接口 */ }
+  }
+}
+
+/* 原生扫码结果回调（QrScanActivity 用 evaluateJavascript 调它）。
+   定义在最外层，保证 WebView 注入脚本时一定能找到。 */
+window.vswQrResult = function (text) {
+  const handler = window.__vswQrResult;
+  if (typeof handler === 'function') handler(text || '');
+};
+
+window.addEventListener('DOMContentLoaded', boot);
+</script>
+
+<!-- 全屏面板：详情与框选共用 -->
+<aside class="sheet" id="sheet">
+  <div class="shead">
+    <button class="btn sm ghost" id="sheetClose">返回</button>
+    <b id="sheetTitle" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></b>
+    <button class="btn sm primary" id="cropConfirm">确认框选</button>
+  </div>
+  <div class="sbody">
+    <div id="cropStage"></div>
+    <div id="sheetBody"></div>
+  </div>
+</aside>
+</body>
+</html>

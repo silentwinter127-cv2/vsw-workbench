@@ -11,30 +11,12 @@ import base64
 import json
 import os
 import sys
-import sys
 import time
 import urllib.request
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _cli import image_dir, positional, usage, wants_help  # noqa: E402
-
-_ARGS = positional()
-BASE = _ARGS[0] if len(_ARGS) > 0 else "http://127.0.0.1:8799"
-FOLDER = _ARGS[1] if len(_ARGS) > 1 else ""
+BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8799"
+FOLDER = sys.argv[2] if len(sys.argv) > 2 else r"D:\images\和幸(春熙路群光广场店)"
 AUTO_SEARCH = "--no-auto" not in sys.argv
-
-USAGE = [
-    "python scripts/vsw-verify-crop.py [工作台地址] [图片目录] [--no-auto]",
-    "",
-    "验证**手工框选**全链路：选区 → crop 变体（带矩形与归一化坐标）→ 入队 →",
-    "自动识图 → 引擎把我们自己的框选图回显时被判为重复而不是新发现。",
-    "",
-    "参数：",
-    "  工作台地址  默认 http://127.0.0.1:8799",
-    "  图片目录    必填，装着 .jpg/.png 的文件夹",
-    "  --no-auto   跳过自动识图那一段（不依赖 Node/浏览器，更快）",
-]
 
 failures: list[str] = []
 
@@ -55,24 +37,16 @@ def request(path: str, payload: dict | None = None, timeout: float = 300) -> dic
 
 
 def main() -> int:
-    if wants_help():
-        return usage("vsw-verify-crop.py", USAGE)
-    names = image_dir(FOLDER, label="图片目录")
-    if names is None:
-        print("       用法见 --help。")
-        return 2
+    names = sorted((n for n in os.listdir(FOLDER)
+                    if os.path.splitext(n)[1].lower() in (".jpg", ".jpeg", ".png")),
+                   key=lambda n: os.path.getsize(os.path.join(FOLDER, n)), reverse=True)
     with open(os.path.join(FOLDER, names[0]), "rb") as fh:
         blob = base64.b64encode(fh.read()).decode()
-    try:
-        seed = request("/api/import", {
-            "kind": "upload",
-            "uploads": [{"name": names[0], "data_url": "data:image/jpeg;base64," + blob}],
-            "variants": ["full"], "auto_enqueue": False,
-        })["imported"][0]
-    except Exception as exc:  # noqa: BLE001
-        print(f"[错误] 连不上 {BASE} 或导入失败：{exc}")
-        print("       先确认工作台已经在运行（例如双击 start_vsw.bat）。")
-        return 2
+    seed = request("/api/import", {
+        "kind": "upload",
+        "uploads": [{"name": names[0], "data_url": "data:image/jpeg;base64," + blob}],
+        "variants": ["full"], "auto_enqueue": False,
+    })["imported"][0]
     seed_id = seed["seed_id"]
     print(f"     种子 #{seed_id}")
 

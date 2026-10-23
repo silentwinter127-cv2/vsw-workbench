@@ -23,10 +23,54 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import engines as engines_mod
 from . import imaging
+from .access import (AccessStore, ROLE_EDIT, ROLE_LABEL, ROLE_OWNER, ROLE_RANK,
+                     ROLE_VIEW, ensure_owner_key, looks_like_code)
+from .accounts import (AccountError, AccountStore, SESSION_COOKIE, SESSION_DAYS,
+                       WORKSPACE_COOKIE, default_auth_path, public_user)
+from .hub import WorkspaceHub
 from .service import ServiceError, Workbench
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MAX_BODY = 64 * 1024 * 1024
+
+ACCESS_COOKIE = "vsw_key"
+COOKIE_MAX_AGE = 30 * 24 * 3600
+
+# 把工作台开放给别人时，哪些动作必须是"主人"。
+# 原则：**不可逆的、动到这台机器的、改全局口径的**，一律主人。
+_OWNER_WRITES = (
+    "/api/reveal",              # 在电脑上打开资源管理器（动的是这台机器）
+    "/api/findings/trash/purge",  # 彻底删除文件（不可逆）
+    "/api/queue/clear",         # 清空队列
+    "/api/reindex",             # 重建索引
+    "/api/rescore",             # 重算发散度
+    "/api/settings",            # 改阈值/权重（全局口径）
+)
+_OWNER_DELETES = ("/api/finding/",)   # 删一条结果
+
+
+def required_role(method: str, path: str) -> Optional[str]:
+    """这条请求至少需要什么角色。``None`` = 不需要密钥（健康检查之类）。
+
+    读一律 ``view``；写一律 ``edit``；上面那张表里的是 ``owner``。
+    """
+    if path in ("/api/ping", "/api/health"):
+        return None
+    # 页面壳子（index.html / app.js / app.css / 图标 / 手机端单文件）必须能加载：
+    # 解锁框就长在这些文件里。它们不含任何数据，真正的数据全在 /api 与 /media 后面。
+    if not (path.startswith("/api/") or path.startswith("/media/")):
+        return None
+    if method in ("GET", "HEAD", "OPTIONS"):
+        return ROLE_VIEW
+    if method == "DELETE":
+        for prefix in _OWNER_DELETES:
+            if path.startswith(prefix):
+                return ROLE_OWNER
+        return ROLE_EDIT
+    for prefix in _OWNER_WRITES:
+        if path.startswith(prefix):
+            return ROLE_OWNER
+    return ROLE_EDIT
 
 
 def _json_default(value: Any) -> Any:
@@ -56,10 +100,35 @@ class _Raw:
         self.headers = headers or {}
 
 
+class ServiceProxy:
+    """按请求切换的工作区门面。
+
+    路由是在启动时一次性注册的，处理器闭包里抓的是**一个** ``service``。
+    有了工作区之后同一个进程要服务好几套数据，所以这里放一个薄代理：
+    处理器照旧写 ``svc.store.seeds(...)``，真正落到哪个工作区由每个请求先 ``bind()``。
+
+    ThreadingHTTPServer 是一请求一线程，所以用 ``threading.local`` 就够隔离。
+    """
+
+    def __init__(self, fallback: Workbench) -> None:
+        object.__setattr__(self, "_local", threading.local())
+        object.__setattr__(self, "_fallback", fallback)
+
+    def bind(self, service: Optional[Workbench]) -> Optional[Workbench]:
+        self._local.service = service or self._fallback
+        return self._local.service
+
+    def current(self) -> Workbench:
+        return getattr(self._local, "service", None) or self._fallback
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.current(), name)
+
+
 class Router:
     """Tiny declarative router: ``/api/seed/*`` style patterns, JSON in/out."""
 
-    def __init__(self, service: Workbench):
+    def __init__(self, service: Any):
         self.service = service
         self.routes: List[Tuple[str, re.Pattern, Callable[..., Any]]] = []
         self._register()
@@ -655,8 +724,12 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     router: Router
-    service: Workbench
+    service: Any                     # ServiceProxy（多工作区）或单个 Workbench（自测/老调用）
     root: str
+    access: Optional[AccessStore] = None      # 单工作区模式的访客密钥库（兼容老入口）
+    auth: Optional[AccountStore] = None       # 账号库；没有它就是"没开账号"的熟人模式
+    hub: Optional[WorkspaceHub] = None        # 工作区仓库；按请求给不同的 Workbench
+    share: Callable[[], Dict[str, Any]] = staticmethod(lambda: {})
 
     # ------------------------------------------------------------------ plumbing
     def log_message(self, fmt: str, *args: Any) -> None:  # quieter console
@@ -677,6 +750,14 @@ class Handler(BaseHTTPRequestHandler):
             data = payload.encode("utf-8")
         else:
             data = payload
+        pending: List[str] = []
+        key_cookie = getattr(self, "_set_cookie", "")
+        if key_cookie:
+            pending.append(f"{ACCESS_COOKIE}={urllib.parse.quote(key_cookie)}; "
+                           f"Path=/; HttpOnly; SameSite=Lax; Max-Age={COOKIE_MAX_AGE}")
+            self._set_cookie = ""
+        pending.extend(getattr(self, "_cookies", []) or [])
+        self._cookies = []
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
@@ -690,6 +771,8 @@ class Handler(BaseHTTPRequestHandler):
                          "Content-Disposition, Content-Length, Content-Type")
         for key, value in (extra or {}).items():
             self.send_header(key, value)
+        for cookie in pending:
+            self.send_header("Set-Cookie", cookie)
         self.end_headers()
         if head_only:
             # HEAD 请求：头照发（长度、类型、文件名都对），体不发
@@ -699,8 +782,708 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    # ------------------------------------------------------------------- 密钥
+    def _client_ip(self) -> str:
+        # 反代后面才需要看 X-Forwarded-For；直连时它可伪造，所以只认对端地址。
+        return str((self.client_address or ("?",))[0] or "?")
+
     def _query(self) -> Dict[str, List[str]]:
         return urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+
+    def _code_from_request(self) -> str:
+        """从请求里捞出密钥。四种携带方式，覆盖三种客户端：
+
+        - ``X-VSW-Key`` / ``Authorization: Bearer``：手机 APK（file:// 跨源）与脚本；
+        - ``Cookie``：电脑浏览器打开一次之后，``<img src>`` 这种带不了头的请求靠它；
+        - ``?key=``：分享链接（扫码/转发）第一次打开时用。
+        """
+        for name in ("X-VSW-Key", "X-Access-Key"):
+            value = (self.headers.get(name) or "").strip()
+            if value:
+                return value
+        auth = (self.headers.get("Authorization") or "").strip()
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        query = self._query()
+        for name in ("key", "k", "access_key"):
+            values = query.get(name) or []
+            if values and values[0].strip():
+                return values[0].strip()
+        cookie = self.headers.get("Cookie") or ""
+        for part in cookie.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == ACCESS_COOKIE and value:
+                return urllib.parse.unquote(value)
+        return ""
+
+    def _cookie_value(self, name: str) -> str:
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == name:
+                return urllib.parse.unquote(value or "")
+        return ""
+
+    def _has_cookie(self) -> bool:
+        cookie = self.headers.get("Cookie") or ""
+        return any(part.strip().partition("=")[0] == ACCESS_COOKIE for part in cookie.split(";"))
+
+    def _wants_key_auth(self) -> bool:
+        """请求里带了访客密钥的痕迹吗（头 / ?key= / 密钥 cookie）。
+
+        有账号以后密钥只是"访客通道"：带着它的请求就要按密钥判身份，
+        不能再当成"浏览器里已登录的人"。
+        """
+        if (self.headers.get("X-VSW-Key") or self.headers.get("X-Access-Key")
+                or self.headers.get("Authorization") or "").strip():
+            return True
+        if (self._query().get("key") or self._query().get("access_key")):
+            return True
+        return bool(self._cookie_value(ACCESS_COOKIE))
+
+    # ------------------------------------------------------------------- 身份
+    def _legacy_workspace(self) -> Dict[str, Any]:
+        """没开账号时的那个"唯一工作区"，就是老的数据目录。"""
+        return {"id": 0, "name": "本机工作台", "dir": self.root, "kind": "personal"}
+
+    def _workspaces_for(self, user_id: int) -> Dict[int, str]:
+        """这人能进哪些工作区、各自什么角色。
+
+        注意 ``memberships_of`` 返回的是 ``workspaces.*`` 加一列 role，
+        工作区 id 在 ``id`` 上，不是 ``ws_id``（这里踩过一次 KeyError）。
+        """
+        if self.auth is None:
+            return {}
+        out: Dict[int, str] = {}
+        for row in self.auth.memberships_of(int(user_id)):
+            out[int(row["id"])] = row.get("role") or ROLE_VIEW
+        return out
+
+    def _pick_workspace(self, mine: Dict[int, str], user_id: int) -> Optional[int]:
+        """这次请求该看哪个工作区：头/Query 指名的 > cookie 记住的 > 默认的。"""
+        wanted = 0
+        raw = (self.headers.get("X-VSW-Workspace") or "").strip() \
+            or (self._query().get("ws") or [""])[0].strip() \
+            or self._cookie_value(WORKSPACE_COOKIE)
+        if raw:
+            try:
+                wanted = int(raw)
+            except ValueError:
+                wanted = 0
+        if wanted and wanted in mine:
+            return wanted
+        if self.auth is None:
+            return None
+        row = self.auth.default_workspace(int(user_id))
+        if row and int(row["id"]) in mine:
+            return int(row["id"])
+        return next(iter(mine), None)
+
+    def _session_token(self) -> str:
+        """会话令牌的来源：cookie 优先，其次是请求头和 ?sid=。
+
+        手机端（尤其是 APK 里 file:// 起的页面）拿不到服务器源的 cookie，
+        只能把登录时拿到的令牌存本地、每次塞进 ``X-VSW-Session`` 头。
+        """
+        token = self._cookie_value(SESSION_COOKIE)
+        if token:
+            return token
+        for name in ("X-VSW-Session", "X-Session", "X-Auth-Token"):
+            got = (self.headers.get(name) or "").strip()
+            if got:
+                return got
+        auth = self.headers.get("Authorization") or ""
+        if auth.lower().startswith("bearer "):
+            got = auth[7:].strip()
+            if got:
+                return got
+        query = urllib.parse.urlparse(self.path).query
+        for key in ("sid", "session"):
+            vals = urllib.parse.parse_qs(query).get(key) or []
+            if vals and vals[0].strip():
+                return vals[0].strip()
+        return ""
+
+    def _resolve_user(self) -> Optional[Dict[str, Any]]:
+        if self.auth is None or not self.auth.has_users():
+            return None
+        token = self._session_token()
+        if not token:
+            return None
+        user = self.auth.session_user(token)
+        if not user:
+            return None
+        mine = self._workspaces_for(int(user["id"]))
+        if not mine:
+            return None
+        ws_id = self._pick_workspace(mine, int(user["id"]))
+        if not ws_id:
+            return None
+        row = self.auth.workspace(ws_id) or {}
+        return {
+            "mode": "user",
+            "user": public_user(user),
+            "ws_id": ws_id,
+            "ws": row,
+            "role": mine.get(ws_id, ROLE_VIEW),
+            "label": user.get("name") or "",
+        }
+
+    def _key_store_for(self, ws_id: int) -> Optional[AccessStore]:
+        if self.hub is not None and ws_id:
+            return self.hub.access(ws_id)
+        return self.access
+
+    def _resolve_key(self) -> Optional[Dict[str, Any]]:
+        """访客通道：拿一把工作区密钥进来。
+
+        密钥是**工作区局部**的 —— 逐个已知工作区试，命中哪个就进哪个。
+        只对"这个人本来进不去的工作区"生效，所以主人不用密钥也不会被挡住。
+        """
+        code = self._code_from_request()
+        if not code:
+            return None
+        ip = self._client_ip()
+        candidates: List[Dict[str, Any]] = []
+        if self.auth is not None and self.auth.has_users():
+            candidates = self.auth.workspaces()
+        else:
+            candidates = [self._legacy_workspace()]
+        for row in candidates:
+            ws_id = int(row["id"])
+            store = self._key_store_for(ws_id)
+            if store is None or not store.enabled():
+                continue
+            if store.blocked_for(ip) > 0:
+                continue
+            who = store.verify(code, ip)
+            if who is None:
+                continue
+            if not self._has_cookie():
+                # 用 ?key= / 头进来的，顺手种一颗 cookie：接下来 <img src="/media/...">
+                # 这类带不了自定义头的请求才有身份。
+                self._set_cookie = code
+            return {"mode": "key", "key_id": who.get("id"), "label": who.get("label") or "访客",
+                    "role": who.get("role") or ROLE_VIEW, "ws_id": ws_id, "ws": row}
+        return None
+
+    def _key_locked(self) -> float:
+        for row in (self.auth.workspaces() if (self.auth and self.auth.has_users())
+                    else [self._legacy_workspace()]):
+            store = self._key_store_for(int(row["id"]))
+            if store is not None and store.enabled():
+                wait = store.blocked_for(self._client_ip())
+                if wait > 0:
+                    return wait
+        return 0.0
+
+    def _resolve(self) -> Optional[Dict[str, Any]]:
+        """这次请求是谁：账号会话 / 访客密钥 / 没开锁的本机。None = 没有身份。"""
+        if self._wants_key_auth():
+            return self._resolve_key()
+        who = self._resolve_user()
+        if who is not None:
+            return who
+        if self.auth is None or not self.auth.has_users():
+            # 还没建账号：跟以前一样，本机（或同一局域网）直接就是主人 —— 除非
+            # 这个工作区自己上了锁（--protect / 访客密钥），那还是要密钥。
+            store = self._key_store_for(0) or self.access
+            if store is not None and store.enabled():
+                return self._resolve_key()
+            return {"mode": "open", "role": ROLE_OWNER, "label": "本机",
+                    "ws_id": 0, "ws": self._legacy_workspace(), "open": True}
+        if self._key_store_for(0) is None and self.access is None:
+            return None
+        # 开了账号、但手里只有一个浏览器：看是不是"这个浏览器以前拿密钥进来过"。
+        return self._resolve_key()
+
+    def _bind(self, ctx: Optional[Dict[str, Any]]) -> None:
+        """把这次请求的工作区挂到 service 代理上；后面所有 `svc.xxx` 都落到它。"""
+        self._ctx = ctx or {}
+        ws_id = int(self._ctx.get("ws_id") or 0)
+        chosen: Optional[Workbench] = None
+        if ctx and self.hub is not None and ws_id:
+            try:
+                chosen = self.hub.service(ws_id)
+            except Exception:  # noqa: BLE001 - 目录坏了也要给个能解释的错误
+                chosen = None
+        if isinstance(self.service, ServiceProxy):
+            self.service.bind(chosen)
+
+    def _access_store(self) -> Optional[AccessStore]:
+        ws_id = int((getattr(self, "_ctx", None) or {}).get("ws_id") or 0)
+        return self._key_store_for(ws_id)
+
+    def _identity(self) -> Optional[Dict[str, Any]]:
+        """当前请求是谁（给密钥面板和权限判断用）。"""
+        ctx = getattr(self, "_ctx", None) or {}
+        mode = ctx.get("mode")
+        if mode == "user":
+            user = ctx.get("user") or {}
+            return {"id": user.get("id", 0), "label": user.get("name") or "", "user": user,
+                    "role": ctx.get("role") or ROLE_VIEW}
+        if mode == "key":
+            return {"id": ctx.get("key_id") or 0, "label": ctx.get("label") or "访客",
+                    "role": ctx.get("role") or ROLE_VIEW}
+        if mode == "open":
+            return {"id": 0, "label": "本机", "role": ROLE_OWNER, "open": True}
+        return None
+
+    def _guard(self, method: str, path: str) -> bool:
+        """鉴权闸门。返回 False 表示已经把响应写回去了（401/403/429）。"""
+        need = required_role(method, path)
+        if need is None:
+            # 页面壳子本身不设防：解锁框、登录框就长在这些文件里。
+            self._bind(self._resolve())
+            return True
+        wait = self._key_locked()
+        if wait > 0:
+            self._send(429, {"error": f"试错太多次了，{int(wait) + 1} 秒后再试",
+                             "retry_after": int(wait) + 1})
+            return False
+        ctx = self._resolve()
+        if ctx is None:
+            accounts = bool(self.auth is not None and self.auth.has_users())
+            self._bind({"mode": "", "ws_id": 0, "role": ""})
+            payload: Dict[str, Any] = {"error": "需要登录" if accounts else "需要访问密钥"}
+            if accounts:
+                payload["need_login"] = True
+                payload["hint"] = "这个工作台已经开了账号；用邀请码注册一个，或者用主人给的密码登录。"
+            else:
+                payload["need_key"] = True
+                payload["hint"] = "这个工作台已经设了密钥；在「共享」里拿一条，或者在地址后面加 ?key=…"
+            self._send(401, payload)
+            return False
+        self._bind(ctx)
+        who = self._identity() or {}
+        if ROLE_RANK.get(who.get("role", ""), 0) < ROLE_RANK.get(need, ROLE_VIEW):
+            self._send(403, {
+                "error": f"当前身份是「{ROLE_LABEL.get(who.get('role'), who.get('role'))}」，"
+                         f"这个操作需要「{ROLE_LABEL.get(need, need)}」",
+                "role": who.get("role"), "need": need, "read_only": who.get("role") == ROLE_VIEW,
+            })
+            return False
+        self._who = who
+        return True
+
+    def _handle_access(self, method: str, path: str) -> None:
+        """密钥相关的接口。放在 Handler 里（而不是 Router），因为要读写这颗 cookie。"""
+        self._bind(self._resolve())
+        store = self._access_store()
+        accounts = bool(self.auth is not None and self.auth.has_users())
+        query = self._query()
+        tail = path[len("/api/access"):].strip("/")
+        if store is None:
+            self._send(200, {"enabled": False, "accounts": accounts, "keys": [],
+                             "me": self._identity(), "roles": [], "share": self.share()})
+            return
+
+        if method == "GET" and tail == "":
+            who = self._identity()
+            payload: Dict[str, Any] = {
+                "enabled": store.enabled() or accounts,
+                "accounts": accounts,
+                "keys_on": store.enabled(),
+                "me": who,
+                "roles": store.roles(),
+                "share": self.share(),
+                "cookie": self._has_cookie(),
+            }
+            if who is None:
+                payload["need_key"] = True
+            elif ROLE_RANK.get(who.get("role", ""), 0) >= ROLE_RANK[ROLE_OWNER]:
+                payload["keys"] = store.keys()
+            self._send(200, payload)
+            return
+
+        if method == "POST" and tail == "login":
+            body, _ = self._read_body()
+            code = str(body.get("key") or query.get("key", [""])[0] or "").strip()
+            ip = self._client_ip()
+            wait = store.blocked_for(ip)
+            if wait > 0:
+                self._send(429, {"error": f"试错太多次了，{int(wait) + 1} 秒后再试",
+                                 "retry_after": int(wait) + 1})
+                return
+            who = store.verify(code, ip) if code else None
+            if who is None:
+                left = store.note_failure(ip)
+                self._send(401, {"error": "密钥不对" if looks_like_code(code)
+                                 else "密钥格式不对（形如 VSW-XXXX-XXXX-XXXX）",
+                                 "remaining": left, "attempts_left": left})
+                return
+            store.note_success(ip)
+            self._set_cookie = code
+            self._send(200, {"me": who, "enabled": True})
+            return
+
+        if method == "POST" and tail == "logout":
+            self._set_cookie = ""
+            self._send(200, {"ok": True},
+                       extra={"Set-Cookie": f"{ACCESS_COOKIE}=; Path=/; HttpOnly; "
+                                            "SameSite=Lax; Max-Age=0"})
+            return
+
+        # 以下都是主人的活
+        who = self._identity()
+        if store.enabled() and (who is None or
+                                ROLE_RANK.get(who.get("role", ""), 0) < ROLE_RANK[ROLE_OWNER]):
+            self._send(401 if who is None else 403,
+                       {"error": "只有主人能管理密钥", "need": ROLE_OWNER,
+                        "need_key": who is None})
+            return
+
+        if method == "POST" and tail == "keys":
+            body, _ = self._read_body()
+            label = str(body.get("label") or query.get("label", [""])[0] or "").strip()
+            role = str(body.get("role") or query.get("role", [ROLE_VIEW])[0]
+                       or ROLE_VIEW).strip()
+            made = store.create(label, role)
+            # 第一次开锁的人不该被自己关在门外：建完直接把这条种进 cookie。
+            if who is None or who.get("open"):
+                self._set_cookie = made["code"]
+            self._send(200, {"key": made, "keys": store.keys(), "enabled": True})
+            return
+
+        parts = tail.split("/")
+        if method in ("POST", "DELETE") and len(parts) >= 2 and parts[0] == "keys":
+            try:
+                key_id = int(parts[1])
+            except ValueError:
+                self._send(400, {"error": "密钥 id 不对"})
+                return
+            if method == "DELETE":
+                ok = store.delete(key_id)
+                self._send(200 if ok else 404,
+                           {"ok": ok, "keys": store.keys(),
+                            "enabled": store.enabled()} if ok else {"error": "没有这条密钥"})
+                return
+            action = parts[2] if len(parts) > 2 else "revoke"
+            body, _ = self._read_body()
+            if action == "revoke":
+                if store.active_count() <= 1 and store.enabled():
+                    row = next((k for k in store.keys() if k["id"] == key_id), None)
+                    if row and row["active"]:
+                        self._send(400, {"error": "这是最后一条有效密钥，撤掉就没人能进来了；"
+                                                  "先建一条新的再撤"})
+                        return
+                ok = store.revoke(key_id)
+            elif action == "restore":
+                ok = store.restore(key_id)
+            elif action == "rename":
+                ok = store.rename(key_id, str(body.get("label") or ""))
+            else:
+                self._send(404, {"error": "未知动作"})
+                return
+            self._send(200 if ok else 404,
+                       {"ok": ok, "keys": store.keys(), "enabled": store.enabled()})
+            return
+
+        self._send(404, {"error": "未知的密钥接口"})
+
+    # ------------------------------------------------------------------- 账号
+    def _is_loopback(self) -> bool:
+        host = self._client_ip()
+        return host in ("::1", "localhost", "0:0:0:0:0:0:0:1") or host.startswith("127.")
+
+    def _set_session(self, token: str) -> None:
+        self._cookies = getattr(self, "_cookies", []) or []
+        self._cookies.append(f"{SESSION_COOKIE}={urllib.parse.quote(token)}; Path=/; HttpOnly; "
+                            f"SameSite=Lax; Max-Age={SESSION_DAYS * 86400}")
+
+    def _set_ws_cookie(self, ws_id: int) -> None:
+        self._cookies = getattr(self, "_cookies", []) or []
+        self._cookies.append(f"{WORKSPACE_COOKIE}={int(ws_id)}; Path=/; SameSite=Lax; "
+                            f"Max-Age={SESSION_DAYS * 86400}")
+
+    def _me_payload(self, user: Optional[Dict[str, Any]] = None,
+                    ws_id: Optional[int] = None) -> Dict[str, Any]:
+        """当前身份 + 能进的工作区 + 这个工作区里的角色。前端登录后全靠它渲染。
+
+        ``user`` / ``ws_id`` 可以显式传：登录、建账号这类"刚种下 cookie 还没回环"的
+        请求里，本次请求自己还读不到那颗 cookie。
+        """
+        ctx = getattr(self, "_ctx", None) or {}
+        if user is None:
+            user = ctx.get("user") or None
+        if not user:
+            return {"logged_in": False, "accounts": bool(self.auth and self.auth.has_users()),
+                    "can_setup": bool(self.auth and not self.auth.has_users()
+                                      and self._is_loopback())}
+        mine: List[Dict[str, Any]] = []
+        for row in self.auth.memberships_of(int(user["id"])) if self.auth else []:
+            mine.append({"id": int(row["id"]), "name": row.get("name"), "kind": row.get("kind"),
+                         "role": row.get("role"), "role_label": ROLE_LABEL.get(row.get("role"), ""),
+                         "members": int(row.get("members") or 1)})
+        if ws_id is None:
+            ws_id = int((ctx.get("ws") or {}).get("id") or 0)
+        role = self.auth.role_of(int(ws_id), int(user["id"])) if (self.auth and ws_id) else None
+        ws = (self.auth.workspace(int(ws_id)) if (self.auth and ws_id) else None) or {}
+        return {
+            "logged_in": True,
+            "accounts": True,
+            "user": public_user(user),
+            "workspace": {"id": int(ws.get("id") or ws_id or 0), "name": ws.get("name"),
+                          "kind": ws.get("kind"), "role": role},
+            "role": role,
+            "role_label": ROLE_LABEL.get(role, role or ""),
+            "workspaces": mine,
+            "share": self.share(),
+        }
+
+    def _ws_role(self, ws_id: int, user_id: int) -> Optional[str]:
+        return self.auth.role_of(int(ws_id), int(user_id)) if self.auth else None
+
+    def _deny(self, status: int, message: str, **extra: Any) -> None:
+        payload: Dict[str, Any] = {"error": message}
+        payload.update(extra)
+        self._send(status, payload)
+
+    def _handle_auth(self, method: str, path: str) -> None:
+        """登录 / 注册 / 工作区 / 成员 / 邀请码。
+
+        放在 Handler 里而不是 Router：它要种会话 cookie，还要按"当前这个人"决定返回什么。
+        """
+        tail = path[len("/api/auth"):].strip("/")
+        parts = [p for p in tail.split("/") if p]
+        self._bind(self._resolve())
+        if self.auth is None:
+            self._send(200, {"accounts": False, "off": True, "can_setup": False})
+            return
+
+        if method == "GET" and (not parts or parts[0] in ("me", "status")):
+            payload = self._me_payload()
+            payload["users"] = self.auth.user_count()
+            self._send(200, payload)
+            return
+
+        # 剩下的都是「得有个账号」的接口。拿访客密钥进来的人没法开工作区、管成员，
+        # 别回 401 need_login（他压根没有密码可登），直接说清楚该找谁。
+        if self._ctx is not None and self._ctx.get("mode") == "key":
+            self._deny(403, "访客密钥不够用：这个操作要账号登录（找主人给你开一个账号）")
+            return
+
+        if method == "POST" and parts[:1] == ["setup"]:
+            if self.auth.has_users():
+                self._deny(400, "已经有账号了：让主人给你开一个，或者用邀请码注册")
+                return
+            if not self._is_loopback():
+                self._deny(403, "第一次建账号只能在跑服务的那台电脑上做（浏览器打开 127.0.0.1 那个地址）")
+                return
+            body, _ = self._read_body()
+            name = str(body.get("name") or "").strip()
+            password = str(body.get("password") or "")
+            label = str(body.get("workspace") or "").strip() or f"{name}的工作区"
+            user = self.auth.create_user(name, password, is_admin=True)
+            row = self.auth.create_workspace(label, self.root, owner_id=int(user["id"]),
+                                             kind="personal")
+            self.auth.set_workspace_dir(int(row["id"]), self.root)
+            self.auth.add_member(int(row["id"]), int(user["id"]), ROLE_OWNER)
+            self.auth.mark_login(int(user["id"]))
+            token = self.auth.create_session(int(user["id"]), self._client_ip(),
+                                            self.headers.get("User-Agent") or "")
+            self._set_session(token)
+            self._set_ws_cookie(int(row["id"]))
+            payload = self._me_payload(user=user, ws_id=int(row["id"]))
+            payload["token"] = token
+            payload["created"] = {"user": public_user(user), "workspace": row,
+                                  "adopted": os.path.abspath(self.root)}
+            self._send(200, payload)
+            return
+
+        if method == "POST" and parts[:1] == ["register"]:
+            body, _ = self._read_body()
+            name = str(body.get("name") or "").strip()
+            password = str(body.get("password") or "")
+            code = str(body.get("code") or body.get("invite") or "").strip()
+            if not self.auth.peek_invite(code):
+                self._deny(400, "邀请码不对、已经用过，或者过期了")
+                return
+            if self.auth.user_by_name(name):
+                self._deny(400, "这个名字已经有人用了，换一个")
+                return
+            user = self.auth.create_user(name, password)
+            joined = self.auth.use_invite(code, int(user["id"]))
+            self.auth.mark_login(int(user["id"]))
+            token = self.auth.create_session(int(user["id"]), self._client_ip(),
+                                            self.headers.get("User-Agent") or "")
+            self._set_session(token)
+            self._set_ws_cookie(int(joined["ws_id"]))
+            payload = self._me_payload(user=user, ws_id=int(joined["ws_id"]))
+            payload["token"] = token
+            payload["joined"] = {"workspace": joined["workspace"], "role": joined["role"]}
+            self._send(200, payload)
+            return
+
+        if method == "POST" and parts[:1] == ["login"]:
+            body, _ = self._read_body()
+            name = str(body.get("name") or body.get("user") or "").strip()
+            password = str(body.get("password") or "")
+            ip = self._client_ip()
+            wait = self.auth.blocked_for(ip)
+            if wait > 0:
+                self._send(429, {"error": f"试错太多次了，{int(wait) + 1} 秒后再试",
+                                 "retry_after": int(wait) + 1})
+                return
+            user = self.auth.verify_login(name, password)
+            if not user:
+                left = self.auth.note_failure(ip)
+                self._send(401, {"error": "名字或密码不对", "attempts_left": left,
+                                 "remaining": left})
+                return
+            self.auth.note_success(ip)
+            token = self.auth.create_session(int(user["id"]), ip,
+                                            self.headers.get("User-Agent") or "")
+            self._set_session(token)
+            auto = self.auth.default_workspace(int(user["id"])) or {}
+            if auto:
+                self._set_ws_cookie(int(auto["id"]))
+            payload = self._me_payload(user=user, ws_id=int(auto.get("id") or 0))
+            payload["token"] = token
+            self._send(200, payload)
+            return
+
+        if method == "POST" and parts[:1] == ["logout"]:
+            token = self._session_token()
+            if token:
+                self.auth.drop_session(token)
+            self._send(200, {"ok": True}, extra={"Set-Cookie": f"{SESSION_COOKIE}=; Path=/; "
+                                                               "HttpOnly; SameSite=Lax; Max-Age=0"})
+            return
+
+        # ---- 以下都要已登录
+        ctx = getattr(self, "_ctx", None) or {}
+        user = ctx.get("user") or None
+        if ctx.get("mode") != "user" or not user:
+            accounts = self.auth.has_users()
+            self._send(401, {"error": "需要登录" if accounts else "还没建账号",
+                             "need_login": accounts, "need_setup": not accounts,
+                             "can_setup": bool(not accounts and self._is_loopback()),
+                             "hint": "用邀请码注册，或者用主人给的密码登录"})
+            return
+
+        uid = int(user["id"])
+
+        if method == "POST" and parts[:1] == ["password"]:
+            body, _ = self._read_body()
+            old = str(body.get("old") or body.get("old_password") or "")
+            new = str(body.get("new") or body.get("new_password") or "")
+            if not self.auth.verify_login(user["name"], old):
+                self._deny(400, "原密码不对")
+                return
+            self.auth.set_password(uid, new)
+            token = self._cookie_value(SESSION_COOKIE)
+            if token:
+                self.auth.drop_session(token)
+            fresh = self.auth.create_session(uid, self._client_ip(),
+                                             self.headers.get("User-Agent") or "")
+            self._set_session(fresh)
+            self._send(200, {"ok": True, "hint": "其它设备上的登录已经全部失效"})
+            return
+
+        if not parts or parts[0] != "workspaces":
+            self._send(404, {"error": "未知的账号接口"})
+            return
+
+        # GET /api/auth/workspaces
+        if method == "GET" and len(parts) == 1:
+            self._send(200, self._me_payload())
+            return
+
+        # POST /api/auth/workspaces  —— 自己开一个新的私人工作区
+        if method == "POST" and len(parts) == 1:
+            body, _ = self._read_body()
+            name = str(body.get("name") or "").strip()
+            kind = "personal" if str(body.get("kind") or "personal") == "personal" else "shared"
+            row = self.hub.create_workspace(name, owner_id=uid, kind=kind) if self.hub else None
+            if row is None:
+                self._deny(500, "工作区仓库没接上")
+                return
+            self._set_ws_cookie(int(row["id"]))
+            self._send(200, {"ok": True, "workspace": row, "me": self._me_payload()})
+            return
+
+        if method == "POST" and len(parts) >= 2 and parts[1] == "switch":
+            body, _ = self._read_body()
+            try:
+                ws_id = int(body.get("ws") or body.get("workspace") or 0)
+            except (TypeError, ValueError):
+                self._deny(400, "工作区 id 不对")
+                return
+            role = self._ws_role(ws_id, uid)
+            if not role:
+                self._deny(403, "你不在这个工作区里")
+                return
+            self._set_ws_cookie(ws_id)
+            self._send(200, self._me_payload(user=user, ws_id=ws_id))
+            return
+
+        # /api/auth/workspaces/<id>/...
+        try:
+            ws_id = int(parts[1])
+        except (IndexError, ValueError):
+            self._deny(400, "工作区 id 不对")
+            return
+        role = self._ws_role(ws_id, uid)
+        if not role:
+            self._deny(403, "你不在这个工作区里")
+            return
+        sub = parts[2] if len(parts) > 2 else ""
+
+        if method == "GET" and sub == "members":
+            self._send(200, {"workspace": self.auth.workspace(ws_id), "role": role,
+                             "members": self.auth.members(ws_id),
+                             "roles": self.auth.roles(),
+                             "is_owner": ROLE_RANK.get(role, 0) >= ROLE_RANK[ROLE_OWNER]})
+            return
+
+        if sub in ("members", "invites") and ROLE_RANK.get(role, 0) < ROLE_RANK[ROLE_OWNER]:
+            self._deny(403, "只有这个工作区的主人能管成员和邀请码")
+            return
+
+        if method == "GET" and sub == "invites":
+            self._send(200, {"invites": self.auth.invites(ws_id),
+                             "workspace": self.auth.workspace(ws_id)})
+            return
+
+        if method == "POST" and sub == "invites":
+            body, _ = self._read_body()
+            want = str(body.get("role") or ROLE_EDIT).strip()
+            hours = float(body.get("hours") or 72)
+            made = self.auth.create_invite(ws_id, want, created_by=uid, hours=hours)
+            self._send(200, {"invite": made, "invites": self.auth.invites(ws_id)})
+            return
+
+        if method == "POST" and sub == "members" and len(parts) == 3:
+            body, _ = self._read_body()
+            name = str(body.get("name") or "").strip()
+            want = str(body.get("role") or ROLE_EDIT).strip()
+            target = self.auth.user_by_name(name)
+            if not target:
+                self._deny(404, f"没有叫「{name}」的账号：先给他一条邀请码让他注册")
+                return
+            self.auth.add_member(ws_id, int(target["id"]), want)
+            self._send(200, {"members": self.auth.members(ws_id)})
+            return
+
+        if sub == "members" and len(parts) >= 4:
+            try:
+                target_id = int(parts[3])
+            except ValueError:
+                self._deny(400, "成员 id 不对")
+                return
+            if method == "POST":
+                body, _ = self._read_body()
+                self.auth.set_member_role(ws_id, target_id,
+                                          str(body.get("role") or ROLE_VIEW).strip())
+            elif method == "DELETE":
+                self.auth.remove_member(ws_id, target_id)
+            else:
+                self._deny(405, "不支持的方法")
+                return
+            self._send(200, {"members": self.auth.members(ws_id)})
+            return
+
+        self._send(404, {"error": "未知的工作区接口"})
 
     def _read_body(self) -> Tuple[Dict[str, Any], bytes]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -724,6 +1507,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(parsed.path)
+        if path.startswith("/api/access") or path.startswith("/api/auth"):
+            self._safely(self._handle_access if path.startswith("/api/access")
+                         else self._handle_auth, "GET", path)
+            return
+        if not self._guard("GET", path):
+            return
         if path.startswith("/api/"):
             status, payload = self.router.dispatch("GET", path, self._query(), {}, b"")
             self._send(status, payload)
@@ -736,10 +1525,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(parsed.path)
+        if path.startswith("/api/access") or path.startswith("/api/auth"):
+            self._safely(self._handle_access if path.startswith("/api/access")
+                         else self._handle_auth, "POST", path)
+            return
         try:
             body, raw = self._read_body()
         except ServiceError as exc:
             self._send(400, {"error": str(exc)})
+            return
+        if not self._guard("POST", path):
             return
         if path.startswith("/api/"):
             status, payload = self.router.dispatch("POST", path, self._query(), body, raw)
@@ -750,6 +1545,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(parsed.path)
+        if path.startswith("/api/access") or path.startswith("/api/auth"):
+            self._safely(self._handle_access if path.startswith("/api/access")
+                         else self._handle_auth, "DELETE", path)
+            return
+        if not self._guard("DELETE", path):
+            return
         status, payload = self.router.dispatch("DELETE", path, self._query(), {}, b"")
         self._send(status, payload)
 
@@ -765,11 +1566,24 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self._head_only = False
 
+    def _safely(self, handler: Callable[[str, str], None], method: str, path: str) -> None:
+        """账号/密钥接口的统一兜底：业务错误回 400，别把栈直接甩给浏览器。"""
+        try:
+            handler(method, path)
+        except (AccountError, ServiceError) as exc:
+            self._send(400, {"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            if os.environ.get("VSW_VERBOSE"):
+                traceback.print_exc()
+            self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+
     def do_OPTIONS(self) -> None:
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers",
+                         "Content-Type, X-VSW-Key, X-VSW-Session, X-VSW-Workspace, Authorization")
+        self.send_header("Access-Control-Max-Age", "600")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -864,18 +1678,60 @@ def open_in_file_manager(path: str) -> bool:
         return False
 
 
-def build_server(service: Workbench, host: str = "127.0.0.1", port: int = 8787) -> ThreadingHTTPServer:
-    router = Router(service)
+def build_server(service: Workbench, host: str = "127.0.0.1", port: int = 8787,
+                 access: Optional[AccessStore] = None,
+                 auth: Optional[AccountStore] = None,
+                 hub: Optional[WorkspaceHub] = None) -> ThreadingHTTPServer:
+    """起一个 HTTP 服务。
+
+    ``service`` 可以是单个 Workbench（自测、单工作区老调用），也可以装在 ServiceProxy 里
+    （多工作区：每个请求按身份绑到自己的工作区）。
+    """
+    content = service if isinstance(service, ServiceProxy) else service
+    router = Router(content)
 
     class BoundHandler(Handler):
         pass
 
     BoundHandler.router = router  # type: ignore[attr-defined]
-    BoundHandler.service = service  # type: ignore[attr-defined]
+    BoundHandler.service = content  # type: ignore[attr-defined]
+    BoundHandler.access = access  # type: ignore[attr-defined]
+    BoundHandler.auth = auth  # type: ignore[attr-defined]
+    BoundHandler.hub = hub  # type: ignore[attr-defined]
+    fallback = content if isinstance(content, Workbench) else content.current()
+    BoundHandler.root = getattr(fallback, "root", "")  # type: ignore[attr-defined]
+    BoundHandler.share = staticmethod(  # type: ignore[attr-defined]
+        lambda: _share_info(host, fallback))
     server = ThreadingHTTPServer((host, port), BoundHandler)
     server.daemon_threads = True
     _BOUND["port"] = server.server_address[1]
+    _BOUND["host"] = host
     return server
+
+
+def _share_info(host: str, service: Workbench) -> Dict[str, Any]:
+    """分享给别人的那几条地址（手机端 + 电脑端）。
+
+    只做填空题：给的是**不带密钥**的基础地址，密钥由界面拼上去 ——
+    这样"复制邀请链接"才不会把别人的密钥写进服务器日志/页面源码。
+    """
+    port = bound_port()
+    if host in ("0.0.0.0", "::", ""):
+        addresses = lan_addresses()
+        base = [f"http://{addr}:{port}" for addr in addresses] or [f"http://127.0.0.1:{port}"]
+        wildcard = True
+    else:
+        base = [f"http://{host}:{port}"]
+        wildcard = False
+    return {
+        "port": port,
+        "host": host,
+        "wildcard": wildcard,
+        "desktop": base,
+        "phone": [f"{url}/m/" for url in base],
+        "lan": lan_addresses() if wildcard else [],
+        "root": service.root,
+    }
 
 
 def create_service(root: str, *, allow_private: bool = False,
@@ -1078,6 +1934,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--allow-private", action="store_true",
                         help="允许抓取内网/回环地址的图片（只在本地自测时用；默认拒绝，"
                              "防止工作台被诱导去探测内网）")
+    parser.add_argument("--protect", "--share", dest="protect", action="store_true",
+                        help="开门就要密钥：没有密钥就先建一条主人密钥并打印出来。"
+                             "一旦有过密钥，之后一律带锁启动（不设这个参数也一样）")
+    parser.add_argument("--key", default="",
+                        help="指定主人密钥的码（形如 VSW-XXXX-XXXX-XXXX）；"
+                             "只在第一次建密钥时生效。不填就随机生成")
+    parser.add_argument("--unprotect", action="store_true",
+                        help="临时拆锁：本次启动不校验密钥（密钥仍留在库里，"
+                             "下次不带这个参数又会上锁）")
     args = parser.parse_args(argv)
 
     root = os.path.abspath(args.root)
@@ -1086,13 +1951,48 @@ def main(argv: Optional[List[str]] = None) -> int:
     service = Workbench(root, log=lambda msg: print(f"[vsw] {msg}"),
                         allow_private=args.allow_private)
 
+    access = AccessStore(os.path.join(root, "workbench.sqlite3"))
+    auth = AccountStore(default_auth_path(root))
+    hub = WorkspaceHub(auth, root, log=lambda msg: print(f"[vsw] {msg}"),
+                       allow_private=args.allow_private)
+    proxy = ServiceProxy(service)
+
+    if auth.has_users():
+        people = auth.users()
+        bosses = [u for u in people if u.get("is_admin")]
+        print(f"[vsw] 👤 账号模式：{len(people)} 个账号 / {len(auth.workspaces())} 个工作区；"
+              f"第一个主人是「{bosses[0]['name'] if bosses else '?'}」")
+        print("[vsw]      新账号只能由主人发邀请码注册；访客密钥仍然可用（工作区局部）")
+    else:
+        print("[vsw] 还没建账号 —— 现在和以前一样，本机/局域网直接可用。")
+        print("[vsw]      在页面上建第一个账号，就变成「各人私人工作区 + 可协作」的工作台。")
+
+    if args.unprotect:
+        print("[vsw] ⚠ --unprotect：本次启动不校验密钥（局域网内任何人可读写）")
+    elif access.enabled():
+        print(f"[vsw] 🔒 已上锁：{access.active_count()} 条有效密钥；"
+              "浏览器第一次打开要在页面上填一次密钥（或点分享链接）")
+    elif args.protect:
+        made = ensure_owner_key(access, "主人", args.key)
+        print("[vsw] 🔑 已开门并上锁，主人密钥：")
+        print(f"[vsw]      {made.get('code', '')}")
+        print("[vsw]      这条码只显示这一次；请记下来（或用界面里的「复制邀请链接」）")
+    elif not auth.has_users():
+        print("[vsw] 未设密钥（仅本机/熟人局域网用）；想开放给别人：--protect")
+    elif not access.enabled():
+        print("[vsw] 没有访客密钥：对外只有账号登录这一条路（想发访客链接就在「共享」里建一把）")
+
     port = pick_port(args.host, args.port)
-    server = build_server(service, args.host, port)
+    server = build_server(proxy, args.host, port, access=access, auth=auth, hub=hub)
     url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{port}/"
     print(f"[vsw] 工作台已启动：{url}")
     ok, reason = service.vision.available()
     print(f"[vsw] 语义引擎：{'就绪 ' + service.vision.model_dir if ok else '不可用 - ' + reason}")
     print_phone_hint(args.host, port)
+    if args.host in ("0.0.0.0", "::") and not access.enabled() and not args.unprotect \
+            and not auth.has_users():
+        print("[vsw] ⚠ 已监听 0.0.0.0 但没有密钥：同一网络里的人都能读写你的工作台。"
+              "要收口就重启并加 --protect")
     if not args.no_browser and args.host not in ("0.0.0.0", "::"):
         threading.Thread(target=lambda: (__import__("time").sleep(0.6), webbrowser.open(url)),
                          daemon=True).start()
@@ -1102,7 +2002,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("\n[vsw] 已停止")
     finally:
         server.server_close()
+        hub.close()
         service.store.close()
+        auth.close()
+        access.close()
     return 0
 
 
