@@ -463,3 +463,8 @@ input[type=password]:focus { outline: none; border-color: var(--accent); }
 .memrow .who{flex:1;min-width:0}
 .memrow select{width:auto}
 .memrow .btn{flex:0 0 auto}
+
+/* 顶栏一挤，按钮文字就折成两行（「建第一个 / 账号」）。别让它们缩，也别换行。 */
+.topbar > * { flex: 0 0 auto; }
+.topbar .tabs { flex: 1 1 auto; min-width: 0; }
+.topbar button, .topbar .pill { white-space: nowrap; }

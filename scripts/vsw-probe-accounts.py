@@ -108,7 +108,7 @@ def run(tmp: str) -> int:
     th.start()
 
     try:
-        return probe(base, root, svc, auth, access)
+        return probe(base, root, svc, auth, access, hub_ref=hub)
     finally:
         httpd.shutdown()
         hub.close()
@@ -117,7 +117,7 @@ def run(tmp: str) -> int:
         svc.store.close()
 
 
-def probe(base, root, svc, auth, access) -> int:
+def probe(base, root, svc, auth, access, hub_ref=None) -> int:
     # 造一点数据：一条种子 + 一张 1×1 的图，用来验证「数据目录 = 工作区」。
     import base64
     png = base64.b64decode(
@@ -307,6 +307,17 @@ def probe(base, root, svc, auth, access) -> int:
     check("H /api/auth 支持 HEAD", st == 200, f"{st}")
     st, data, _ = owner.get("/?key=" + urllib.parse.quote(code))
     check("H 页面壳子公开（哪怕带废密钥）", st == 200, f"{st}")
+
+    # ------------------------------------------------- I 语义引擎是全进程共用的
+    # 一个工作区一个数据目录，但 SigLIP2 只该加载一份：否则每开一个工作区就多占几百 MB。
+    all_ws = auth.workspaces()
+    if len(all_ws) >= 2:
+        a, b = all_ws[0]["id"], all_ws[1]["id"]
+        sa, sb = hub_ref.service(a), hub_ref.service(b)
+        check("I 两个工作区是不同的 Workbench 实例", sa is not sb)
+        check("I 但共用同一个语义引擎实例", sa.vision is sb.vision,
+              f"{type(sa.vision).__name__} / same={sa.vision is sb.vision}")
+        check("I 共用的是 VisionEngine 单例", sa.vision is type(sa.vision).instance())
 
     print()
     total = PASS + FAIL

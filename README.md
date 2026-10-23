@@ -102,6 +102,11 @@ vsw/data/                     ← 第一个账号（主人）的工作区，老�
 切工作区只换 `X-VSW-Workspace` / `vsw_ws` cookie，服务端按工作区把请求绑到对应实例，
 互不可见。协作 = 被加进同一个工作区，看到的是同一份数据。
 
+**但语义模型是共用的一份。** SigLIP2 是 `VisionEngine.instance()` 的全进程单例，
+工作区只各自持有自己的数据（向量存在各自的库里），模型文件只加载一次 ——
+开十个工作区不会加载十份 1.5 GB 的权重，也不会多占十份内存。
+所以"每人一个私人工作区"的代价只有数据目录，不含模型。
+
 ### 三种角色，谁都不能越界
 
 | 角色 | 能做什么 |
@@ -187,7 +192,7 @@ python scripts/vsw-check-syntax.py                                            # 
 
 ```bash
 python scripts/vsw-probe-access.py      # 45 项：密钥、角色分级、限速、页面壳子免检
-python scripts/vsw-probe-accounts.py    # 58 项：建号、邀请码、工作区隔离、协作、会话头
+python scripts/vsw-probe-accounts.py    # 61 项：建号、邀请码、工作区隔离、协作、会话头、共用语义引擎
 ```
 
 ## 仓库结构

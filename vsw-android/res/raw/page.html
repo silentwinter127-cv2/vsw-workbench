@@ -2506,7 +2506,9 @@ function renderAccount() {
     state.textContent = S.key ? '访客密钥' : '未上锁';
     who.innerHTML = S.key
       ? `这台电脑还没开账号，你现在用密钥访问：<code>${esc(S.key)}</code>`
-      : '这台电脑还没开账号，谁连上都能用。要分人用，就在电脑上建第一个账号。';
+      : '这台电脑还没开账号，谁连上都能用。要分人用（每人一个私人工作区、还能邀请别人协作），'
+        + '得在<b>跑服务的那台电脑</b>上用 <code>http://127.0.0.1:8799/</code> 打开页面，'
+        + '点右上角「建第一个账号」。手机上建不了 —— 谁先建谁是主人，这是刻意的。';
     logged.classList.add('hide');
     out.classList.add('hide');
     return;

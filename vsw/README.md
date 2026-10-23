@@ -239,6 +239,11 @@ python -m vsw.server --root vsw/data --host 127.0.0.1 --port 8799
 [`vsw/hub.py`](hub.py)（工作区句柄表）、[`vsw/access.py`](access.py)（访客密钥）、
 [`vsw/server.py`](server.py) 的 `_resolve/_bind/_guard`（每请求定身份 + 绑工作区）。
 
+**语义模型只有一份。** 工作区各占一个数据目录，但 `VisionEngine` 是 `VisionEngine.instance()`
+的全进程单例（`[engine.py](engine.py)` 的 `_lock`/`_instance`，`[service.py](service.py:75)`
+`self.vision = vision or VisionEngine.instance(...)`）：权重只加载一次，向量存各自库里。
+开多少工作区都不增加模型内存，`/api/health` 里的 `vision.available` 对所有工作区一致。
+
 ### 手机版（PWA / 安卓 APK，可离线独立使用）
 
 手机端不是"把桌面网页缩小"，而是一个**自己的本地库 + 可离线用的 App**。

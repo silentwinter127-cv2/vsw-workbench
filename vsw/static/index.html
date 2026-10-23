@@ -28,6 +28,7 @@ body { margin: 0; background: #0e1116; color: #e6ecf3; }
   <span class="pill" id="statPill">—</span>
   <span class="pill" id="rolePill" hidden></span>
   <button class="btn ghost" id="userBtn" hidden title="账号与工作区"></button>
+  <button class="btn ghost" id="setupAccBtn" hidden title="这台电脑还没开账号；要分人用就先建一个">建第一个账号</button>
   <button class="btn ghost" id="shareBtn" title="把这个工作台开放给别人：账号、成员、密钥">共享 / 账号</button>
 </header>
 
@@ -574,7 +575,7 @@ body { margin: 0; background: #0e1116; color: #e6ecf3; }
 
     <h3>别人怎么进来</h3>
     <div class="keylist" id="shareLinks"></div>
-    <p class="hint small">链接里带着密钥，谁拿到谁就能进来 —— 发给信得过的人，别贴到公开群里。</p>
+    <p class="hint small" id="shareFoot"></p>
   </div>
 </div>
 

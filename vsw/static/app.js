@@ -1840,7 +1840,9 @@ function authMode(mode) {
   if (login) login.hidden = mode !== 'login';
   if (mode === 'setup') {
     if (title) title.textContent = '建第一个账号';
-    if (hint) hint.textContent = '这台机器还没有账号。你建的这个就是主人，现在这份数据会归到你的私人工作区。';
+    if (hint) hint.textContent =
+      '这台机器还没有账号。你建的这个就是主人，现在这份数据会归到你的私人工作区。'
+      + '（只能在跑服务的那台电脑上建。）';
     const name = $('#setupName');
     if (name) setTimeout(() => name.focus(), 30);
   } else {
@@ -1883,6 +1885,7 @@ async function bootAuth() {
   AUTH_ON = !!(me && me.accounts);
   ME = me || null;
   const btn = $('#userBtn');
+  syncSetupEntry();
   if (!AUTH_ON) {           // 还没建账号：跟以前一模一样，谁打开都能用
     if (btn) btn.hidden = true;
     hideAuth();
@@ -1894,6 +1897,18 @@ async function bootAuth() {
   }
   applyMe(me);
   return true;
+}
+
+// 还没建账号时，header 上常驻一个「建第一个账号」—— 藏进面板里没人找得到。
+function syncSetupEntry() {
+  const btn = $('#setupAccBtn');
+  if (!btn) return;
+  // 有账号了就不显示；还没账号时一直显示 —— 从局域网打开也算，点进去会解释为什么建不了。
+  const open = !!(ME && ME.accounts === false);
+  btn.hidden = !open;
+  btn.title = (ME && ME.can_setup)
+    ? '这台电脑还没开账号；要分人用就先建一个'
+    : '账号只能在跑服务的那台电脑上建 —— 点这里看怎么弄';
 }
 
 // ------------------------------------------------------------ 工作区面板
@@ -2120,7 +2135,9 @@ function renderShare(info) {
   const who = info && info.enabled
     ? `${roleBadge(me.role, me.label || '未知')} <span class="meta">${esc((roles.find((r) => r.role === me.role) || {}).note || '')}</span>`
     : '<span class="meta">没上锁 —— 同一网络里的人都能读写。</span>';
-  const noAccounts = !!(ME && ME.accounts === false && ME.can_setup);
+  const noAcc = !!(ME && ME.accounts === false);
+  const noAccounts = noAcc && !!(ME && ME.can_setup);
+  const needLocal = noAcc && !(ME && ME.can_setup);
   $('#shareMe').innerHTML = `
     <div class="memrow">
       <div class="who"><span class="role">我现在是</span>${who}</div>
@@ -2130,7 +2147,10 @@ function renderShare(info) {
       </div>
     </div>
     ${noAccounts ? `<p class="hint small">建了账号以后：每人一个私人工作区（一个工作区 = 一个数据目录），
-      你还能邀请别人协作。现在这份数据会归到第一个账号名下。</p>` : ''}`;
+      你还能邀请别人协作。现在这份数据会归到第一个账号名下。</p>` : ''}
+    ${needLocal ? `<p class="hint small">建账号只能在跑服务的那台电脑上做 —— 在那台机器上用
+      <code>http://127.0.0.1:8799/</code> 打开这个页面，右上角就有「建第一个账号」。
+      这是刻意的：谁能第一次建号，谁就是这个工作台的主人。</p>` : ''}`;
   const makeAcc = $('#shareMakeAccount');
   if (makeAcc) makeAcc.onclick = () => {
     closeShare();
@@ -2184,6 +2204,9 @@ function renderShare(info) {
       b.onclick = () => copyText(b.dataset.copy);
     });
   }
+  // 面板底部只留一句提醒（没有密钥就没有这句话——别让人误以为地址本身是钥匙）
+  const foot = $('#shareFoot');
+  if (foot) foot.textContent = '';
 
   loadWorkspaceBits();
 }
@@ -2342,6 +2365,13 @@ async function loadWorkspaceBits() {
 
 async function openShare() {
   $('#shareLayer').hidden = false;
+  // 页面可能是「服务重开之前」加载的：先问一句现在到底有没有账号，否则
+  // 建号入口会是空的 —— 明明没账号，却一个按钮都看不见。
+  try {
+    ME = await fetch('/api/auth').then((r) => r.json());
+    AUTH_ON = !!(ME && ME.accounts);
+    syncSetupEntry();
+  } catch (e) { /* 拿不到就按老状态渲染 */ }
   try {
     renderShare(await api('/api/access'));
   } catch (e) {
@@ -2420,6 +2450,13 @@ function bindAccessPanel() {
   if (input) input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') unlock(); });
   const share = $('#shareBtn');
   if (share) share.onclick = openShare;
+  const setupAcc = $('#setupAccBtn');
+  if (setupAcc) {
+    setupAcc.onclick = () => {
+      if (ME && ME.can_setup) showAuth('setup', '');
+      else openShare();      // 建不了就告诉他为什么、以及在哪儿能建
+    };
+  }
   const close = $('#shareClose');
   if (close) close.onclick = closeShare;
   const make = $('#newKeyGo');
