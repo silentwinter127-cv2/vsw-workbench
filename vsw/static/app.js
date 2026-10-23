@@ -20,6 +20,7 @@ const S = {
   includeDups: false,
   selectedJobs: new Set(),
   selectedFindings: new Set(),
+  archivesPicked: new Set(),   // 归档表格里勾中的批次 → 可以合并成一个相册
   graph: { nodes: [], edges: [] },
   graphView: { scale: 1, x: 0, y: 0, drag: null },
   lastParse: null,
@@ -1281,7 +1282,9 @@ async function loadArchives() {
     const dist = Object.keys(triage).length
       ? Object.entries(triage).map(([k, v]) => `${TRIAGE_SHORT[k] || k} ${v}`).join(' · ')
       : '-';
-    return `<tr>
+    const picked = S.archivesPicked.has(Number(a.id));
+    return `<tr data-row="${a.id}" class="${picked ? 'is-picked' : ''}">
+      <td class="pick"><input type="checkbox" class="archpick" data-id="${a.id}"${picked ? ' checked' : ''}></td>
       <td><b>${esc(a.name)}</b>${a.note ? `<div class="small">${esc(a.note)}</div>` : ''}</td>
       <td class="small">${esc(new Date((a.created_at || 0) * 1000).toLocaleString('zh-CN'))}</td>
       <td class="num">${a.findings}</td>
@@ -1297,7 +1300,20 @@ async function loadArchives() {
         <button class="btn" data-act="undo" data-id="${a.id}">取消归档</button>
       </td>
     </tr>`;
-  }).join('') || '<tr><td colspan="9" class="small">还没有归档批次</td></tr>';
+  }).join('') || '<tr><td colspan="10" class="small">还没有归档批次</td></tr>';
+
+  // 合并相册：勾选几个批次 → 一起看 / 一起导出（不改数据库里的批次归属）
+  $$('#archiveTable .archpick').forEach((box) => {
+    box.onclick = (ev) => ev.stopPropagation();
+    box.onchange = () => {
+      const id = Number(box.dataset.id);
+      if (box.checked) S.archivesPicked.add(id); else S.archivesPicked.delete(id);
+      const row = $(`#archiveTable tr[data-row="${id}"]`);
+      if (row) row.classList.toggle('is-picked', box.checked);
+      syncArchiveMergeBar();
+    };
+  });
+  syncArchiveMergeBar();
 
   $$('#archiveTable [data-act]').forEach((btn) => {
     btn.onclick = async () => {
@@ -1319,22 +1335,15 @@ async function loadArchives() {
           toast(`已取消归档，${out.restored} 个对象回到结果板`);
           $('#archiveDetailCard').hidden = true;
         } else {
-          const detail = await api(`/api/archive/${archiveId}?limit=200`);
+          const detail = await api(`/api/archive/${archiveId}?limit=400`);
+          // 口径要说清楚：批次的"对象数"是归档当时的数量；其中一部分后来可能被移进回收站。
+          // 以前这里只显示未进回收站的那些，于是整批看着是空的（真实 bug）。
+          const bits = [`${detail.count} 个在归档`];
+          if (detail.trashed) bits.push(`${detail.trashed} 个在回收站`);
+          if (detail.carriers) bits.push(`${detail.carriers} 个重复载体`);
           $('#archiveDetailTitle').textContent =
-            `归档 #${archiveId} · ${detail.archive.name} · ${detail.count} 个对象`;
-          $('#archiveBoard').innerHTML = (detail.findings || []).map((f) => `
-            <div class="fcard" data-id="${f.id}">
-              <div class="pic">
-                <img loading="lazy" src="${media(f.thumb_path) || media(f.rel_path)}" alt="">
-                <span class="val">E ${num(f.explore_value)}</span>
-                <span class="dups">${f.dup_of ? '重复载体' : `${f.sources.length} 源`}</span>
-              </div>
-              <div class="meta">
-                <div class="title">${esc(f.title || f.image_url || `结果 #${f.id}`)}</div>
-                <div class="sources small">${esc((f.sources[0] || {}).platform || '-')} ·
-                  ${esc(f.status)}</div>
-              </div>
-            </div>`).join('') || '<div class="empty">这个批次没有对象</div>';
+            `归档 #${archiveId} · ${detail.archive.name} · ${bits.join(' · ')}`;
+          $('#archiveBoard').innerHTML = archiveBoardHtml(detail.findings);
           $('#archiveDetailCard').hidden = false;
           $$('#archiveBoard .fcard').forEach((card) => { card.onclick = () => openDetail(Number(card.dataset.id)); });
         }
@@ -1344,6 +1353,127 @@ async function loadArchives() {
       } catch (e) { toast(e.message, true); }
     };
   });
+}
+
+function archiveBoardHtml(items) {
+  return (items || []).map((f) => `
+    <div class="fcard ${f.trashed ? 'is-trashed' : ''}" data-id="${f.id}">
+      <div class="pic">
+        <img loading="lazy" src="${media(f.thumb_path) || media(f.rel_path)}" alt="">
+        <span class="val">E ${num(f.explore_value)}</span>
+        <span class="dups">${f.dup_of ? '重复载体' : `${(f.sources || []).length} 源`}</span>
+        ${f.trashed ? '<span class="trashed-tag">回收站</span>' : ''}
+      </div>
+      <div class="meta">
+        <div class="title">${esc(f.title || f.image_url || `结果 #${f.id}`)}</div>
+        <div class="sources small">${esc((f.sources[0] || {}).platform || '-')} ·
+          ${esc(f.status)}</div>
+      </div>
+    </div>`).join('') || '<div class="empty">这里没有对象</div>';
+}
+
+// 「合并相册」：勾选多个归档批次 → 当一个相册看/导出。
+// 不合并数据库里的批次归属，只是把几个批次的图放到一起（跨批次按 id 去重、按发散度排序）。
+function syncArchiveMergeBar() {
+  const n = S.archivesPicked.size;
+  const ids = Array.from(S.archivesPicked);
+  ['#archiveMergeLook', '#archiveMergeFolder', '#archiveMergeZip'].forEach((sel) => {
+    const btn = $(sel);
+    if (!btn) return;
+    btn.disabled = n === 0;
+    btn.title = n ? `对勾选的 ${n} 个批次操作：${ids.map((i) => `#${i}`).join(' ')}` : '先勾选批次';
+  });
+  const look = $('#archiveMergeLook');
+  if (look) look.textContent = n ? `合并查看（${n}）` : '合并查看';
+  const folder = $('#archiveMergeFolder');
+  if (folder) folder.textContent = n ? `合并导出文件夹（${n}）` : '合并导出文件夹';
+  const zip = $('#archiveMergeZip');
+  if (zip) zip.textContent = n ? `合并保存 zip（${n}）` : '合并保存 zip';
+  const clear = $('#archiveMergeClear');
+  if (clear) clear.hidden = n === 0;
+  const info = $('#archivePickInfo');
+  if (info) {
+    info.textContent = n
+      ? `已勾选 ${n} 个批次（${ids.map((i) => `#${i}`).join(' / ')}）—— 合并后跨批次去重，按发散度排序。`
+      : '勾选几个批次，就能把它们合并成一个相册：一起去重看、一起导出。';
+  }
+  const all = $('#archivePickAll');
+  if (all) {
+    const total = $$('#archiveTable .archpick').length;
+    all.checked = total > 0 && n >= total;
+    all.indeterminate = n > 0 && n < total;
+  }
+}
+
+async function archiveMergeLook() {
+  const ids = Array.from(S.archivesPicked);
+  if (!ids.length) return;
+  const info = await api(`/api/archive/merge?ids=${ids.join(',')}`);
+  const bits = [`${info.count} 个在归档`];
+  if (info.trashed) bits.push(`${info.trashed} 个在回收站`);
+  bits.push(`${info.sources} 条来源`, `${info.platforms.length} 个平台`, fmtBytes(info.bytes));
+  $('#archiveDetailTitle').textContent =
+    `合并相册 ${info.batches.map((b) => `#${b.id}`).join(' + ')} · ${bits.join(' · ')}`;
+  $('#archiveBoard').innerHTML = archiveBoardHtml(info.items);
+  $('#archiveDetailCard').hidden = false;
+  $$('#archiveBoard .fcard').forEach((card) => {
+    card.onclick = () => openDetail(Number(card.dataset.id));
+  });
+  $('#archiveDetailCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function bindArchiveMerge() {
+  const all = $('#archivePickAll');
+  if (all) {
+    all.onchange = () => {
+      S.archivesPicked = new Set();
+      $$('#archiveTable .archpick').forEach((box) => {
+        box.checked = all.checked;
+        if (all.checked) S.archivesPicked.add(Number(box.dataset.id));
+      });
+      $$('#archiveTable tr[data-row]').forEach((row) => row.classList.toggle('is-picked', all.checked));
+      syncArchiveMergeBar();
+    };
+  }
+  const clear = $('#archiveMergeClear');
+  if (clear) {
+    clear.onclick = () => {
+      S.archivesPicked = new Set();
+      $$('#archiveTable .archpick').forEach((box) => { box.checked = false; });
+      $$('#archiveTable tr[data-row]').forEach((row) => row.classList.remove('is-picked'));
+      syncArchiveMergeBar();
+    };
+  }
+  const look = $('#archiveMergeLook');
+  if (look) look.onclick = async () => {
+    try { await archiveMergeLook(); } catch (e) { toast(e.message, true); }
+  };
+  const folder = $('#archiveMergeFolder');
+  if (folder) folder.onclick = async () => {
+    const ids = Array.from(S.archivesPicked);
+    if (!ids.length) return;
+    try {
+      folder.disabled = true;
+      const info = await api('/api/archive/merge/export', { method: 'POST', body: { ids } });
+      const opened = await api('/api/reveal', { method: 'POST', body: { path: info.dir } });
+      toast(opened.opened
+        ? `已把 ${info.findings} 个对象合并导出到文件夹（${info.files} 个文件）`
+        : `已合并导出到 ${info.dir}，但没能自动打开`);
+    } catch (e) { toast(e.message, true); } finally { syncArchiveMergeBar(); }
+  };
+  const zip = $('#archiveMergeZip');
+  if (zip) zip.onclick = () => {
+    const ids = Array.from(S.archivesPicked);
+    if (!ids.length) return;
+    // 浏览器自己下载：a + download，不会离开当前页面
+    const a = document.createElement('a');
+    a.href = `/api/archive/merge/zip?ids=${ids.join(',')}`;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast(`正在打包 ${ids.length} 个批次…`);
+  };
 }
 
 function bindArchivePanel() {
@@ -1700,6 +1830,7 @@ async function boot() {
   bindCropPanel();
   bindTrashPanel();
   bindArchivePanel();
+bindArchiveMerge();
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape') { closeDrawer(); closeCropDrawer(); }
   });

@@ -239,9 +239,17 @@ body { margin: 0; background: #0e1116; color: #e6ecf3; }
         <input type="text" id="archiveName" placeholder="批次名（留空自动用日期时间）" style="max-width:320px">
         <input type="text" id="archiveNote" placeholder="备注（这一轮在查什么、结论是什么）">
       </div>
+      <div class="row" style="margin-top:12px">
+        <span class="small" id="archivePickInfo">勾选几个批次，就能把它们合并成一个相册：一起去重看、一起导出。</span>
+        <div class="spacer"></div>
+        <button class="btn" id="archiveMergeLook" disabled>合并查看</button>
+        <button class="btn" id="archiveMergeFolder" disabled>合并导出文件夹</button>
+        <button class="btn" id="archiveMergeZip" disabled>合并保存 zip</button>
+        <button class="btn" id="archiveMergeClear" hidden>清除勾选</button>
+      </div>
       <div class="table-wrap" style="margin-top:12px">
         <table class="matrix">
-          <thead><tr><th>批次</th><th>时间</th><th>对象</th><th>来源</th><th>平台</th><th>队列分布</th><th>覆盖日期</th><th>体积</th><th></th></tr></thead>
+          <thead><tr><th class="pick"><input type="checkbox" id="archivePickAll" title="全选批次"></th><th>批次</th><th>时间</th><th>对象</th><th>来源</th><th>平台</th><th>队列分布</th><th>覆盖日期</th><th>体积</th><th></th></tr></thead>
           <tbody id="archiveTable"></tbody>
         </table>
       </div>

@@ -68,6 +68,10 @@ main{padding:12px 12px calc(var(--safe-b) + 84px)}
 .seg button.on{background:var(--accent-soft);border-color:var(--accent);color:var(--fg)}
 .card{background:var(--bg1);border:1px solid var(--line);border-radius:var(--radius);
   padding:12px;margin-bottom:10px}
+/* 合并相册：勾中的批次卡片换边色，一眼看出合并了什么 */
+.card.is-picked{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.pickbox{display:flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 22px}
+.pickbox input{width:18px;height:18px;accent-color:var(--accent)}
 .btn{padding:9px 14px;border-radius:10px;border:1px solid var(--line);background:var(--bg2);
   color:var(--fg);font-size:14px}
 .btn:active{background:var(--bg3)}
@@ -284,6 +288,15 @@ label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5
         <button class="btn" id="archiveAllBtn">整批归档</button>
       </div>
     </div>
+    <div id="archiveMergeBar" class="card" style="margin-bottom:10px">
+      <div class="row"><b>合并相册</b><div class="spacer"></div>
+        <span class="small" id="archiveMergeHint">勾选下面的批次，把几批合成一个相册看</span></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn primary" id="archiveMergeLook" disabled>合并查看</button>
+        <button class="btn" id="archiveMergeSave" disabled>合并保存 zip</button>
+        <button class="btn ghost" id="archiveMergeClear" style="display:none">清除勾选</button>
+      </div>
+    </div>
     <div id="archiveList"></div>
     <div class="card" style="margin-top:12px">
       <div class="row"><b>回收站</b><div class="spacer"></div>
@@ -448,6 +461,7 @@ const S = {
   trash: [],
   archived: [],      // 归档对象（按 archive_id 归入批次）
   archives: [],
+  albumPick: new Set(),   // 合并相册：勾中的批次 id
   jobs: [],
   seeds: [],
   variants: [],
@@ -1579,6 +1593,115 @@ function paintArchiveThumbs() {
   });
 }
 
+/* ---------------------------------------------------------------- 合并相册
+ * 「合并相册」= 把勾选的几个归档批次当成一个相册看 / 一起打包下载。
+ * 只读合并：数据库里的批次归属不变，跨批次按 id 去重、按发散度排序。
+ * 手机端优先用本地归档库（离线也能看），缺的批次再联网补一次。
+ */
+function mergedAlbumItems() {
+  const seen = new Map();
+  for (const f of S.archived) {
+    if (!S.albumPick.has(Number(f.archive_id))) continue;
+    if (f.dup_of) continue;
+    seen.set(Number(f.id), f);
+  }
+  return Array.from(seen.values())
+    .sort((a, b) => (Number(b.explore_value) || 0) - (Number(a.explore_value) || 0));
+}
+
+function syncAlbumBar() {
+  const n = S.albumPick.size;
+  const look = $('#archiveMergeLook');
+  const save = $('#archiveMergeSave');
+  const clear = $('#archiveMergeClear');
+  const hint = $('#archiveMergeHint');
+  if (look) {
+    look.disabled = n === 0;
+    look.textContent = n ? `合并查看（${n}）` : '合并查看';
+  }
+  if (save) {
+    save.disabled = n === 0;
+    save.textContent = n ? `合并保存 zip（${n}）` : '合并保存 zip';
+  }
+  if (clear) clear.style.display = n ? '' : 'none';
+  if (hint) {
+    hint.textContent = n
+      ? `已勾选 ${Array.from(S.albumPick).map((i) => `#${i}`).join(' ')} · 跨批次去重后按发散度排序`
+      : '勾选下面的批次，把几批合成一个相册看';
+  }
+}
+
+async function openMergedAlbum() {
+  const ids = Array.from(S.albumPick);
+  if (!ids.length) return;
+  let items = mergedAlbumItems();
+  // 本地没有的批次，联网补一次（补进来的同样落本地库，之后离线也能看）
+  const missing = ids.filter((id) => !S.archived.some((f) => Number(f.archive_id) === Number(id)));
+  if (missing.length && S.online) {
+    toast('正在补齐合并相册…');
+    for (const id of missing) {
+      try {
+        const detail = await api(`/api/archive/${id}?limit=300`);
+        for (const row of (detail.findings || []).filter((f) => !f.dup_of)) {
+          await local.put('archived', row);
+        }
+      } catch (e) { /* 单批失败不影响其余批次 */ }
+    }
+    S.archived = await local.all('archived');
+    items = mergedAlbumItems();
+  }
+
+  const totalSources = items.reduce((n, f) => n + sourceCount(f), 0);
+  const plats = new Set();
+  items.forEach((f) => (f.sources || []).forEach((s) => plats.add(s.platform || '(未识别)')));
+  const batches = ids.map((id) => S.archives.find((a) => Number(a.id) === Number(id)) || { id });
+  $('#sheetTitle').textContent = `合并相册 ${ids.map((i) => `#${i}`).join(' + ')}`;
+  $('#cropConfirm').classList.add('hide');
+  $('#cropStage').innerHTML = '';
+  const map = thumbSrcMap();
+  $('#sheetBody').innerHTML = `
+    <div class="small">批次 ${ids.length} · 对象 ${items.length} · 来源 ${totalSources}
+      ${plats.size ? `· 平台 ${plats.size}` : ''}</div>
+    <div class="small">${batches.map((b) => `${esc(b.name || `#${b.id}`)}（${(b.findings || 0)}）`).join(' · ')}</div>
+    <div class="flist" id="archiveBatchList" style="margin-top:12px">
+      ${items.map((f) => `
+        <div class="fcard" data-id="${f.id}">
+          ${map[f.id] ? `<img src="${map[f.id]}" alt="">`
+            : `<img alt="" style="opacity:.25" data-want-thumb="${f.id}">`}
+          <div class="meta2">
+            <div class="tt">${esc(f.title || `#${f.id}`)}</div>
+            <div class="ln"><span class="tbadge ${f.triage}">${TRIAGE[f.triage] || f.triage || ''}</span>
+              <span class="mono">E ${num(f.explore_value)}</span>
+              <span>${sourceCount(f)} 源</span>
+              <span class="small">#${esc(f.archive_id)}</span></div>
+          </div>
+        </div>`).join('') || '<div class="empty">这几批里没有可显示的对象</div>'}
+    </div>`;
+  openSheet();
+  $$('#archiveBatchList .fcard').forEach((card) => {
+    card.onclick = () => openDetail(Number(card.dataset.id));
+  });
+  if (!S.online) return;
+  ensureThumbs(items, 'archived').then(() => paintArchiveThumbs());
+}
+
+function saveMergedZip() {
+  const ids = Array.from(S.albumPick);
+  if (!ids.length) return;
+  if (!S.online) return toast('离线中：需要连上电脑才能打包', true);
+  const url = S.server.replace(/\/+$/, '') + `/api/archive/merge/zip?ids=${ids.join(',')}`;
+  // 同理「保存到手机」：交给系统下载（APK 里 DownloadListener 存到「下载」）
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'archive-merge.zip';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  toast(`正在打包 ${ids.length} 个批次，完成后在手机「下载」里打开`);
+}
+
+
 /* ---------------------------------------------------------------- 归档 / 回收站 */
 function renderArchive() {
   const live = S.findings.filter((f) => !f.dup_of && !f.archived_at);
@@ -1597,9 +1720,14 @@ function renderArchive() {
 
   $('#archiveList').innerHTML = S.archives.map((a) => {
     const items = S.archived.filter((f) => Number(f.archive_id) === Number(a.id));
+    const picked = S.albumPick.has(Number(a.id));
     return `
-    <div class="card">
-      <div class="row"><b>${esc(a.name)}</b><div class="spacer"></div>
+    <div class="card ${picked ? 'is-picked' : ''}" data-batch="${a.id}">
+      <div class="row">
+        <label class="pickbox" title="勾选后可以合并">
+          <input type="checkbox" data-pick="${a.id}"${picked ? ' checked' : ''}>
+        </label>
+        <b>${esc(a.name)}</b><div class="spacer"></div>
         <span class="small">${new Date((a.created_at || 0) * 1000).toLocaleDateString('zh-CN')}</span></div>
       <div class="small">对象 ${a.findings} · 来源 ${a.sources} · 平台 ${a.platforms} ·
         ${esc(a.date_from || '-')} ~ ${esc(a.date_to || '-')}</div>
@@ -1615,6 +1743,18 @@ function renderArchive() {
       <div class="small" id="archivePath-${a.id}" style="margin-top:6px"></div>
     </div>`;
   }).join('') || '<div class="empty">还没有归档批次</div>';
+
+  // 合并相册的勾选
+  $$('#archiveList [data-pick]').forEach((box) => {
+    box.onchange = () => {
+      const id = Number(box.dataset.pick);
+      if (box.checked) S.albumPick.add(id); else S.albumPick.delete(id);
+      const card = box.closest('[data-batch]');
+      if (card) card.classList.toggle('is-picked', box.checked);
+      syncAlbumBar();
+    };
+  });
+  syncAlbumBar();
 
   // 查看：打开批次内容（离线也能看 —— 归档对象在快照里单独带了一份）
   $$('#archiveList [data-open]').forEach((btn) => {
@@ -2465,6 +2605,17 @@ async function boot() {
   bindImport();
   bindMe();
   $('#archiveSelectedBtn').onclick = archiveSelection;
+  // 合并相册
+  $('#archiveMergeLook').onclick = async () => {
+    try { await openMergedAlbum(); } catch (e) { toast(e.message, true); }
+  };
+  $('#archiveMergeSave').onclick = saveMergedZip;
+  $('#archiveMergeClear').onclick = () => {
+    S.albumPick.clear();
+    $$('#archiveList [data-pick]').forEach((box) => { box.checked = false; });
+    $$('#archiveList [data-batch]').forEach((card) => card.classList.remove('is-picked'));
+    syncAlbumBar();
+  };
   $('#archiveAllBtn').onclick = async () => {
     if (!S.online) return toast('离线中：整批归档要在电脑上执行', true);
     try {

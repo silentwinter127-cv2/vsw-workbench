@@ -76,31 +76,37 @@ class Router:
     def _add(self, method: str, pattern: str):
         def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
             regex = re.compile("^" + pattern.replace("*", "(?P<wild>.*)") + "$")
-            self.routes.append((method, regex, func))
+            self.routes.append((method, regex, func, "*" in pattern))
             return func
         return decorator
 
     def dispatch(self, method: str, path: str, query: Dict[str, List[str]],
                  body: Dict[str, Any], raw: bytes) -> Tuple[int, Any]:
         allowed_other = False
-        for route_method, regex, handler in self.routes:
-            match = regex.match(path)
-            if not match:
-                continue
-            if route_method != method:
-                allowed_other = True
-                continue
-            try:
-                return 200, handler(query=query, body=body, raw=raw, **match.groupdict())
-            except ServiceError as exc:
-                return 400, {"error": str(exc)}
-            except ValueError as exc:
-                return 400, {"error": f"参数错误：{exc}"}
-            except FileNotFoundError as exc:
-                return 404, {"error": str(exc)}
-            except Exception as exc:  # noqa: BLE001
-                traceback.print_exc()
-                return 500, {"error": f"{type(exc).__name__}: {exc}"}
+        # 字面路由优先于通配路由：`/api/archive/merge/zip` 不能被 `/api/archive/*/zip`
+        # 先抢走（真踩过：通配把 "merge" 当成 id，接口直接 400）。所以先只跑不带 * 的路由，
+        # 没命中再跑带 * 的。
+        for literal_only in (True, False):
+            for route_method, regex, handler, has_wild in self.routes:
+                if has_wild == literal_only:
+                    continue
+                match = regex.match(path)
+                if not match:
+                    continue
+                if route_method != method:
+                    allowed_other = True
+                    continue
+                try:
+                    return 200, handler(query=query, body=body, raw=raw, **match.groupdict())
+                except ServiceError as exc:
+                    return 400, {"error": str(exc)}
+                except ValueError as exc:
+                    return 400, {"error": f"参数错误：{exc}"}
+                except FileNotFoundError as exc:
+                    return 404, {"error": str(exc)}
+                except Exception as exc:  # noqa: BLE001
+                    traceback.print_exc()
+                    return 500, {"error": f"{type(exc).__name__}: {exc}"}
         if allowed_other:
             return 405, {"error": f"{method} 不支持该接口"}
         return 404, {"error": "未找到该接口", "path": path}
@@ -110,6 +116,17 @@ class Router:
     def _first(query: Dict[str, List[str]], key: str, default: str = "") -> str:
         values = query.get(key)
         return values[0] if values else default
+
+    @staticmethod
+    def _ids(query: Dict[str, List[str]]) -> List[int]:
+        raw = (query.get("ids") or [""])[0]
+        out: List[int] = []
+        for part in str(raw).replace(" ", "").split(","):
+            if part.isdigit():
+                out.append(int(part))
+        if not out:
+            raise ServiceError("需要 ids=1,2,3 指定批次")
+        return out
 
     def _int(self, query: Dict[str, List[str]], key: str, default: int = 0) -> int:
         raw = self._first(query, key, "")
@@ -451,6 +468,30 @@ class Router:
             return _Raw(payload, "application/zip", {
                 "Content-Disposition":
                     f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quoted}'})
+
+        @self.get("/api/archive/merge")
+        def archive_merge(query: Dict[str, List[str]], **_kw: Any) -> Dict[str, Any]:
+            """合并多个归档批次看（合并相册）。ids=1,2,3"""
+            ids = self._ids(query)
+            return svc.merge_info(ids)
+
+        @self.get("/api/archive/merge/zip")
+        def archive_merge_zip(query: Dict[str, List[str]], **_kw: Any) -> Any:
+            info = svc.merge_zip(self._ids(query))
+            with open(info["path"], "rb") as fh:
+                payload = fh.read()
+            ascii_name = "archive-merge.zip"
+            quoted = urllib.parse.quote(info["name"], safe="")
+            return _Raw(payload, "application/zip", {
+                "Content-Disposition":
+                    f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quoted}'})
+
+        @self.post("/api/archive/merge/export")
+        def archive_merge_export(body: Dict[str, Any], **_kw: Any) -> Dict[str, Any]:
+            ids = [int(i) for i in (body.get("ids") or [])]
+            if not ids:
+                raise ServiceError("需要 ids 指定要合并的批次")
+            return svc.export_merge(ids)
 
         @self.get("/api/archive/*/paths")
         def archive_paths(wild: str, query: Dict[str, List[str]], **_kw: Any) -> Dict[str, Any]:

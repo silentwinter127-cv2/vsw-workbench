@@ -76,20 +76,26 @@ python ../scripts/vsw-verify-apk.py
 # 2) 行为面：从 APK 里解出内置页面，用同内核的浏览器跑起来验（13 项）
 node ../scripts/vsw-probe-apk-page.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
 
-# 3) 导入队列行为：真造 3 张图走一遍「逐张导入 + 全部导入」（9 项）
+# 3) 导入队列行为：真造 3 张图走一遍「逐张导入 + 全部导入」（11 项）
 node ../scripts/vsw-probe-import-queue.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
 
 # 4) 回收站图片：故意删掉本地缩略图，看会不会自动补回（5 项）
 node ../scripts/vsw-probe-trash-thumbs.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
 
-# 5) 队列缩略图：变体图/种子图、键不撞车、缺图自动补（9 项）
+# 5) 队列缩略图：变体图/种子图、键不撞车、缺图自动补（7 项）
 node ../scripts/vsw-probe-queue-thumbs.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
 
 # 6) 队列筛选与删除：自造测试数据，验完删掉（14 项）
 node ../scripts/vsw-probe-queue-filter.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
 
-# 7) 归档查看与归档文件夹（14 项）
+# 7) 归档查看与归档文件夹（18 项）
 node ../scripts/vsw-probe-archive-view.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
+
+# 8) 合并归档相册：跨批次去重/排序/打包 + 手机与桌面两处入口（40 项）
+node ../scripts/vsw-probe-archive-merge.js --apk ../vsw-workbench.apk --origin http://127.0.0.1:8799
+
+# 0) 语法闸门：内联脚本一处语法错，整页就不能点（比行为探针便宜得多，先跑它）
+python ../scripts/vsw-check-syntax.py
 ```
 
 | 层 | 查什么 | 结果 |
@@ -206,7 +212,7 @@ false，结果一张图都没补"）。另外回收站缩略图的键原来用 `
 队列项的取图顺序改为：**变体自己的小图 → 种子缩略图 → 占位**；缺图的在渲染后自动补
 （`ensureJobThumbs`，只补当前显示的那些，几百条不必全下）。
 
-探针 `scripts/vsw-probe-queue-thumbs.js`（9 项）验：同步能拉到变体图、绝大多数队列项有图、
+探针 `scripts/vsw-probe-queue-thumbs.js`（7 项，随数据增减）验：同步能拉到变体图、绝大多数队列项有图、
 图是真实数据（`blob:` 且 `naturalWidth > 0`）、有变体的项优先用变体图、
 **同 id 的结果图与变体图能共存且内容不同**（撞车 bug 的回归测试）、
 清掉本地图后能自动补回。
@@ -232,7 +238,7 @@ false，结果一张图都没补"）。另外回收站缩略图的键原来用 `
 `trashed=1 且 archived_at>0` 的行既不在归档列表、也不在回收站里，看不见、也清理不掉。
 归档与回收站本来是正交状态，现在回收站查询不再叠加归档过滤；恢复后对象回到归档视图。
 
-探针 `scripts/vsw-probe-queue-filter.js`（11 项）：为了不碰真实数据，它**先自己造几条测试
+探针 `scripts/vsw-probe-queue-filter.js`（14 项）：为了不碰真实数据，它**先自己造几条测试
 队列项**再删掉；验筛选逐项生效且可叠加、删除删的正是选中那批、电脑端与本地库都同步、
 删除不影响种子；还会从归档对象里借样本造回收站数据并在结束时还原。
 
@@ -296,6 +302,31 @@ APK 侧：
 - 新增 `HEAD`（以前一律 501，"先探大小"的客户端会直接失败）；
 - `Access-Control-Expose-Headers` 暴露 `Content-Length` / `Content-Disposition` 给跨源页面；
 - zip 文件名用 RFC 5987 编码（HTTP 头只能是 latin-1，直接写中文会让发头时崩掉）。
+
+### 合并归档相册（r11）
+
+用户要的是「把几个归档批次合成一个相册看」。这是**视图合并**：不改数据库里的批次归属
+（批次记的是"当时为什么留下它"），只是把几批的图放到一起，跨批次按 id 去重、按发散度降序。
+
+- 服务端：`GET /api/archive/merge?ids=1,2,3`、`GET /api/archive/merge/zip?ids=…`、
+  `POST /api/archive/merge/export`；`export_collection()` 统一负责落盘（图片硬链接 +
+  `manifest.json`），单批次与合并共用；
+- 手机端：归档卡片加勾选框，勾两批以上后合并条出现「合并查看（N）」「合并保存 zip（N）」
+  「清除勾选」；合并查看出的面板就地按需补缩略图（不阻塞启动）；
+- 桌面端：归档表加勾选列与合并条（查看 / 导出文件夹 / 保存 zip），全选与半选状态同步。
+
+顺手修的两个真 bug（都是"看起来好了其实没好"）：
+
+1. **字面路由被通配路由抢走**：`/api/archive/*/zip` 先注册，把 `merge` 当成批次 id 去
+   `int()` → 400 `invalid literal for int() with base 10: 'merge'`。
+   改成两趟匹配：先跑不带 `*` 的字面路由，再跑通配路由。
+2. **导出目录与查路径目录不一致**：导出写到 `archives/24`、`archive_paths()` 读
+   `archives/24-<名字>`，于是"文件夹生成了但清单是空的"。改成单批导出也用
+   `archive_dir()` 的命名（离线自测因此从 275 项里挑出 1 项失败，就是它）。
+
+`scripts/vsw-probe-archive-merge.js`（40 项）把这条链路整个验一遍：服务端去重/排序/计数自洽、
+zip 里能解出 manifest 且记着合并了哪些批次、单批 zip 与 HEAD 回归、手机端勾选→合并查看→
+保存 zip 的地址、桌面端合并板条数与服务端一致。
 
 ### ⚠ 还没验证到的（真机才能确认）
 

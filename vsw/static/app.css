@@ -188,6 +188,13 @@ button.btn:disabled { opacity: .45; cursor: not-allowed; }
   background: rgba(197, 140, 255, .9); color: #150a22; font-size: 11px; font-weight: 600;
 }
 .fcard .foot button { min-width: 0; }
+/* 归档视图里"已进回收站"的对象：仍然显示（否则整批看着是空的），但要明显区分 */
+.fcard.is-trashed .pic img { opacity: .45; filter: grayscale(1); }
+.trashed-tag {
+  position: absolute; left: 8px; bottom: 8px; z-index: 3;
+  font-size: 11px; padding: 1px 6px; border-radius: 6px;
+  background: rgba(200, 60, 60, .85); color: #fff;
+}
 .fcard .pic { position: relative; aspect-ratio: 4 / 3; background: #05080c; }
 .fcard .pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .fcard .pic .val {
@@ -249,6 +256,10 @@ table.matrix { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 table.matrix th, table.matrix td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line-soft); }
 table.matrix th { color: var(--fg-mute); font-weight: 600; }
 table.matrix td.num { text-align: right; font-family: var(--mono); }
+/* 归档表格的勾选列：勾中的行整行淡淡高亮，一眼看出合并范围 */
+table.matrix th.pick, table.matrix td.pick { width: 30px; text-align: center; padding-right: 0; }
+table.matrix th.pick input, table.matrix td.pick input { cursor: pointer; }
+table.matrix tr.is-picked td { background: var(--accent-soft); }
 .metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 10px; }
 .metric { background: var(--bg-2); border: 1px solid var(--line-soft); border-radius: 9px; padding: 10px 12px; }
 .metric .n { font-size: 22px; font-family: var(--mono); }

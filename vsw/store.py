@@ -768,16 +768,18 @@ class Store:
     def findings(self, *, triage: Optional[str] = None, status: Optional[str] = None,
                  cluster_id: Optional[int] = None, seed_id: Optional[int] = None,
                  include_dups: bool = False, limit: int = 400, offset: int = 0,
-                 order: str = "value", trashed: bool = False,
+                 order: str = "value", trashed: Optional[bool] = False,
                  not_promoted: bool = False, archived: Optional[bool] = False,
                  archive_id: Optional[int] = None) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM findings WHERE 1=1"
         args: List[Any] = []
         # Only the trashed=1 branch needs a placeholder; the normal branch is a literal,
         # otherwise the binding count and the SQL stop matching up.
-        if trashed:
+        # trashed=None 表示**不限制**回收站状态：归档批次要连已进回收站的对象一起看，
+        # 否则批次里只要对象被移进回收站，整批就会"看起来是空的"（真实踩过）。
+        if trashed is True:
             sql += " AND trashed=1"
-        else:
+        elif trashed is False:
             sql += " AND COALESCE(trashed,0)=0"
         # 归档的条目默认从"活动结果板"里消失，但仍然可以被检索/查看/恢复；
         # archived=None 表示"不限制归档状态"（归档视图用）。

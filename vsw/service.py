@@ -1879,15 +1879,16 @@ class Workbench:
 
         给了 ``finding_ids`` 就只统计这批（对应"只归档选中的图片"）。
         """
+        # 一定要走 findings()：它会把每条对象的 sources 一起带上。以前这条路径用的是
+        # store.finding()（单条、不带来源），于是归档批次一直显示「来源 0 · 平台 0」。
+        all_rows = self.store.findings(limit=100000, include_dups=True, archived=False)
         if finding_ids is not None:
             wanted = {int(i) for i in finding_ids}
-            rows = [self.store.finding(i) for i in wanted]
-            rows = [r for r in rows if r and not r.get("trashed")
-                    and not r.get("archived_at")]
+            rows = [r for r in all_rows if int(r.get("id") or 0) in wanted]
             live = [f for f in rows if not f.get("dup_of")]
             carriers = len(rows) - len(live)
         else:
-            rows = self.store.findings(limit=100000, include_dups=True, archived=False)
+            rows = all_rows
             live = [f for f in rows if not f.get("dup_of")]
             carriers = len(rows) - len(live)
         platforms: Dict[str, int] = {}
@@ -1975,14 +1976,23 @@ class Workbench:
                 "total": len(runs)}
 
     def archive_detail(self, archive_id: int, limit: int = 300) -> Dict[str, Any]:
+        """打开一个归档批次。
+
+        关键点：**已进回收站的对象也要返回**（`trashed=None` 不再过滤）。
+        归档与回收站是正交状态 —— 否则一个批次只要有条目被移进回收站，整批就"看起来是空的"
+        （真机+桌面都踩过：225 条里 209 条在回收站，于是每个批次打开都是 0 个对象）。
+        返回里分别给出 live / trashed / carriers 三个计数，界面可以如实显示。
+        """
         record = self.store.archive_run(archive_id)
         if record is None:
             raise ServiceError("归档记录不存在")
         items = self.store.findings(limit=limit, archive_id=archive_id, include_dups=True,
-                                    order="value", archived=None)
-        # 和批次的统计口径对齐：对象数只数视觉对象，重复载体单独提一句
+                                    order="value", archived=None, trashed=None)
         objects = [f for f in items if not f.get("dup_of")]
-        return {"archive": record, "findings": items, "count": len(objects),
+        live = [f for f in objects if not f.get("trashed")]
+        trashed = [f for f in objects if f.get("trashed")]
+        return {"archive": record, "findings": items, "count": len(live),
+                "count_all": len(objects), "trashed": len(trashed),
                 "carriers": len(items) - len(objects)}
 
     # --------------------------------------------------- 归档：落到磁盘的文件夹
@@ -1997,20 +2007,91 @@ class Workbench:
         name = _safe_name(str(record.get("name") or f"batch-{archive_id}"))[:60]
         return os.path.join(self.root, "archives", f"{int(archive_id)}-{name}")
 
-    def export_archive(self, archive_id: int) -> Dict[str, Any]:
-        """把批次落盘成文件夹：imgs/ 里是它的图片，manifest.json 是可读清单。
+    def merge_items(self, archive_ids: Sequence[int]) -> List[Dict[str, Any]]:
+        """把多个批次的对象合成一个列表（按 id 去重，按发散度排序）。
 
-        幂等：已经导出过的不会重复复制；图片用硬链接，失败才退回复制。
+        这就是"合并归档相册"的数据来源：几个批次的图放在一起看/一起导出，
+        不需要真的改数据库 —— 批次归属保持不变。
         """
+        seen: Dict[int, Dict[str, Any]] = {}
+        for archive_id in archive_ids:
+            rows = self.store.findings(limit=100000, archive_id=int(archive_id),
+                                       include_dups=True, order="value", archived=None,
+                                       trashed=None)
+            for row in rows:
+                if row.get("dup_of"):
+                    continue
+                seen[int(row["id"])] = row
+        out = list(seen.values())
+        out.sort(key=lambda f: (-(f.get("explore_value") or 0), -(f.get("similarity") or 0)))
+        return out
+
+    def merge_info(self, archive_ids: Sequence[int]) -> Dict[str, Any]:
+        ids = [int(i) for i in archive_ids]
+        runs = [self.store.archive_run(i) for i in ids]
+        runs = [r for r in runs if r]
+        if not runs:
+            raise ServiceError("没有可合并的归档批次")
+        items = self.merge_items(ids)
+        live = [f for f in items if not f.get("trashed")]
+        platforms: Dict[str, int] = {}
+        sources = 0
+        total_bytes = 0
+        dates: List[str] = []
+        for finding in items:
+            total_bytes += int(finding.get("bytes") or 0)
+            for source in finding.get("sources") or []:
+                sources += 1
+                key = source.get("platform") or "(未识别)"
+                platforms[key] = platforms.get(key, 0) + 1
+            if finding.get("created_at"):
+                dates.append(time.strftime("%Y-%m-%d", time.localtime(finding["created_at"])))
+        return {"batches": [{"id": r["id"], "name": r.get("name") or ""} for r in runs],
+                "items": items, "count": len(live), "count_all": len(items),
+                "trashed": len(items) - len(live), "sources": sources,
+                "platforms": sorted([{"platform": k, "n": v} for k, v in platforms.items()],
+                                    key=lambda x: -x["n"]),
+                "bytes": total_bytes, "date_from": min(dates) if dates else "",
+                "date_to": max(dates) if dates else ""}
+
+    def export_archive(self, archive_id: int) -> Dict[str, Any]:
+        """把一个批次落盘成文件夹（见 export_collection）。"""
         record = self.store.archive_run(archive_id)
         if record is None:
             raise ServiceError("归档记录不存在")
-        target = self.archive_dir(archive_id, record)
+        return self.export_collection([int(archive_id)], key=str(int(archive_id)),
+                                      label=str(record.get("name") or f"批次{archive_id}"),
+                                      target=self.archive_dir(archive_id, record))
+
+    def export_merge(self, archive_ids: Sequence[int]) -> Dict[str, Any]:
+        """把多个批次合并导出成一个文件夹（合并归档相册）。"""
+        info = self.merge_info(archive_ids)
+        key = "merge-" + "-".join(str(b["id"]) for b in info["batches"])[:40]
+        label = "合并相册 " + " + ".join(f"#{b['id']}" for b in info["batches"])
+        return self.export_collection([int(b["id"]) for b in info["batches"]], key=key,
+                                      label=label)
+
+    def export_collection(self, archive_ids: Sequence[int], *, key: str,
+                          label: str, target: str = "") -> Dict[str, Any]:
+        """把一批（可以是多个）归档批次落盘成一个文件夹。
+
+        imgs/ 里是图片（硬链接，同一卷不占额外空间），manifest.json 是可读清单。
+        幂等：已经导出过的不会重复复制。
+
+        `target` 只给单批次用：目录名必须与 `archive_dir()` 一致，否则「先导出、后查路径」
+        会指到两个不同的文件夹（曾经出现过：导出写 archives/24，查路径读 archives/24-名字）。
+        """
+        if not target:
+            target = os.path.join(self.root, "archives", f"{_safe_name(key)[:60]}")
         img_dir = os.path.join(target, "imgs")
         os.makedirs(img_dir, exist_ok=True)
 
-        items = self.store.findings(limit=100000, archive_id=archive_id, include_dups=True,
-                                    order="value", archived=None)
+        if len(archive_ids) == 1:
+            items = self.store.findings(limit=100000, archive_id=int(archive_ids[0]),
+                                        include_dups=True, order="value", archived=None,
+                                        trashed=None)
+        else:
+            items = self.merge_items(archive_ids)
         objects = [f for f in items if not f.get("dup_of")]
         linked = copied = reused = skipped = 0
         manifest_items: List[Dict[str, Any]] = []
@@ -2033,6 +2114,7 @@ class Workbench:
             }
             if source and os.path.isfile(source):
                 ext = os.path.splitext(source)[1] or ".jpg"
+                # id 前缀保证唯一（合并多个批次时标题可能重复）
                 name = f"{finding.get('id')}-{_safe_name(str(finding.get('title') or 'result'))[:48]}{ext}"
                 dest = os.path.join(img_dir, name)
                 entry["file"] = f"imgs/{name}"
@@ -2054,37 +2136,57 @@ class Workbench:
                 entry["file"] = ""
             manifest_items.append(entry)
 
+        runs = [self.store.archive_run(i) for i in archive_ids]
+        runs = [r for r in runs if r]
+        first = runs[0] if runs else {}
+        # 清单里的数字按"实际导出的对象"重新算，不抄批次记录 —— 记录是归档那一刻的，
+        # 之后又进回收站/又补来源的话会跟文件夹里真实内容对不上（合并多个批次时尤其如此）。
+        man_sources = sum(len(f.get("sources") or []) for f in objects)
+        man_platforms = {s.get("platform") or "(未识别)"
+                         for f in objects for s in (f.get("sources") or [])}
+        man_dates = [time.strftime("%Y-%m-%d", time.localtime(f["created_at"]))
+                     for f in objects if f.get("created_at")]
         manifest = {
-            "archive_id": int(archive_id),
-            "name": record.get("name") or "",
-            "note": record.get("note") or "",
-            "created_at": record.get("created_at"),
+            "archive_id": int(first.get("id") or 0),
+            "archive_ids": [int(r["id"]) for r in runs],
+            "name": label,
+            "note": first.get("note") or "",
+            "created_at": first.get("created_at"),
             "findings": len(objects),
+            "trashed": len([f for f in objects if f.get("trashed")]),
             "carriers": len(items) - len(objects),
-            "sources": record.get("sources"),
-            "platforms": record.get("platforms"),
-            "date_from": record.get("date_from"),
-            "date_to": record.get("date_to"),
+            "sources": man_sources,
+            "platforms": len(man_platforms),
+            "date_from": min(man_dates) if man_dates else "",
+            "date_to": max(man_dates) if man_dates else "",
             "exported_at": time.time(),
             "items": manifest_items,
         }
         with open(os.path.join(target, "manifest.json"), "w", encoding="utf-8") as fh:
             json.dump(manifest, fh, ensure_ascii=False, indent=2)
-        return {"dir": target, "images": {"linked": linked, "copied": copied,
-                                          "reused": reused, "skipped": skipped},
+        return {"dir": target, "key": key, "name": label,
+                "images": {"linked": linked, "copied": copied,
+                           "reused": reused, "skipped": skipped},
                 "findings": len(objects), "files": len(os.listdir(img_dir))}
 
     def archive_zip(self, archive_id: int) -> Dict[str, Any]:
-        """把一个批次打包成 zip，给手机端「保存到手机」用。
-
-        手机本地打不开电脑上的目录，所以"看到归档文件夹"这件事必须靠一份能落到手机存储里的
-        东西来完成 —— 一个 zip（图片 + manifest）就够了，相册/文件管理器都能直接打开。
-        打包结果缓存在 `data/archives/<id>-<名字>.zip`，文件比缓存新就重建。
-        """
+        """把一个批次打包成 zip，给手机端「保存到手机」用。"""
         record = self.store.archive_run(archive_id)
         if record is None:
             raise ServiceError("归档记录不存在")
-        info = self.export_archive(archive_id)
+        return self.zip_collection(self.export_archive(archive_id))
+
+    def merge_zip(self, archive_ids: Sequence[int]) -> Dict[str, Any]:
+        """把多个批次合并打包成 zip（合并归档相册——一次拿到所有图）。"""
+        return self.zip_collection(self.export_merge(archive_ids))
+
+    def zip_collection(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        """把已落盘的文件夹打成 zip。
+
+        手机本地打不开电脑上的目录，所以"看到归档文件夹"必须靠一份能落到手机存储里的东西 ——
+        一个 zip（图片 + manifest）就够了，相册/文件管理器都能直接打开。
+        结果缓存在 `<文件夹>.zip`，内容比缓存新就重建。
+        """
         src_dir = info["dir"]
         zip_path = src_dir.rstrip("\\/") + ".zip"
         newest = 0.0

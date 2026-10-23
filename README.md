@@ -40,6 +40,29 @@
 成功指标（指标页实时算）：每 100 次操作带来的**新增不重复图片 / 独立来源 / 新平台**，
 以及**每个新来源需要多少次操作**。
 
+## 归档与合并相册
+
+归档 = 把一批结果从"还在挑"变成"这批东西决定了"，落成一条带名字、带日期的批次记录。
+批次不会把对象从结果板里挪走，只是打上归属；**归档对象进回收站以后也还能在批次里看到**
+（灰显 + 「回收站」标记），因为"归档过什么"是历史，不该因为后来的清理而消失。
+
+**合并相册**解决的是"一次看几批"：在归档表里勾选任意几个批次 →
+
+| 动作 | 结果 |
+| --- | --- |
+| 合并查看 | 一个跨批次的相册：按对象 id 去重、按发散度降序，标出每条来自哪个批次 |
+| 合并导出文件夹 | `vsw/data/archives/merge-<批次>/`，图片硬链接 + 可读 `manifest.json` |
+| 合并保存 zip | 同一份内容打成 zip，手机端点一下存到「下载」 |
+
+这是**视图合并**，不改数据库里的批次归属 —— 批次是"当时为什么留下它"的记录，
+合并只是"这次我想一起看"。三处入口都用同一套接口：
+
+```bash
+GET  /api/archive/merge?ids=24,23,22           # 合并视图（去重 + 排序 + 计数）
+GET  /api/archive/merge/zip?ids=24,23,22       # 合并打包
+POST /api/archive/merge/export {"ids":[24,23]} # 合并导出文件夹
+```
+
 ## 快速开始
 
 ```bat
@@ -67,8 +90,8 @@ start_vsw_lan.bat        :: 绑 0.0.0.0，启动日志会打印局域网地址�
 ## 自测
 
 ```bash
-python scripts/selftest_vsw.py            # 256 项，不联网、不跑浏览器
-python scripts/selftest_vsw.py --vision   # 265 项，额外覆盖语义层
+python scripts/selftest_vsw.py            # 276 项，不联网、不跑浏览器
+python scripts/selftest_vsw.py --vision   # 285 项，额外覆盖语义层
 python scripts/selftest_vsw.py crop       # 只跑某一段
 ```
 
@@ -81,7 +104,12 @@ python scripts/vsw-verify-browser.py  http://127.0.0.1:8799 "D:\images\<素材>"
 python scripts/vsw-verify-crop.py     http://127.0.0.1:8799 "D:\images\<素材>"
 python scripts/vsw-verify-apk.py                                              # APK 交付验证
 node   scripts/vsw-probe-apk-page.js  --apk vsw-workbench.apk --origin http://127.0.0.1:8799
+python scripts/vsw-check-syntax.py                                            # 语法闸门（内联脚本一处语法错，整页失效）
 ```
+
+手机端每个真实修过的坑都有一个行为探针（从 APK 里解出内置页面，用同内核浏览器跑）：
+`vsw-probe-import-queue.js`、`-queue-filter.js`、`-queue-thumbs.js`、`-trash-thumbs.js`、
+`-archive-view.js`、`-archive-merge.js`。
 
 ## 仓库结构
 
