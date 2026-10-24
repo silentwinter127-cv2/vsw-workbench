@@ -70,6 +70,9 @@ def main(argv=None) -> int:
     if args.notes_file:
         with io.open(args.notes_file, encoding="utf-8") as fh:
             notes = fh.read().strip()
+    if not notes:
+        # 什么都不传时给一句能看的说明 —— 以前会发布出一条空的 release 说明
+        notes = "release " + tag
     dist = os.path.join(os.path.abspath(args.root), "dist")
     os.makedirs(dist, exist_ok=True)
     target = os.path.join(dist, APK_NAME)
