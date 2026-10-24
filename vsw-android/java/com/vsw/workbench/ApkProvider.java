@@ -10,6 +10,7 @@ import android.provider.OpenableColumns;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.util.List;
 
 /**
  * 只读地把「下载好的安装包」交给系统安装器。
@@ -24,14 +25,35 @@ public class ApkProvider extends ContentProvider {
     public static final String AUTHORITY = "com.vsw.workbench.files";
     /** 安装包放在这里（应用私有缓存目录，退出后可能被系统清理 —— 需要重下就是）。 */
     public static final String SUBDIR = "update";
+    /**
+     * 递给网页的那张待搜图片也走同一个 Provider。
+     *
+     * 网页的 `<input type=file>` 只认 `content://`：我们给它的必须是别的应用/渲染进程能通过
+     * ContentResolver 读到的东西，不能是 `file://`。同一套「只读 + 只允许一层文件名」的规矩
+     * 复用一次，不用再写第二个 Provider（多一个就要多注册一个 authority）。
+     */
+    public static final String SHARE = "websearch";
 
     /** 把 cache/update 下的文件名变成对外可见的 content URI。 */
     public static Uri uriFor(String fileName) {
-        return Uri.parse("content://" + AUTHORITY + "/apk/" + fileName);
+        return uriFor(SUBDIR, fileName);
+    }
+
+    /** 把 cache/<sub>/<文件名> 变成 content URI。 */
+    public static Uri uriFor(String sub, String fileName) {
+        return Uri.parse("content://" + AUTHORITY + "/" + sub + "/" + fileName);
     }
 
     private File resolve(Uri uri) throws FileNotFoundException {
-        String name = uri == null ? null : uri.getLastPathSegment();
+        List<String> parts = uri == null ? null : uri.getPathSegments();
+        String sub = SUBDIR;
+        String name;
+        if (parts != null && parts.size() >= 2) {
+            sub = parts.get(0);
+            name = parts.get(1);
+        } else {
+            name = uri == null ? null : uri.getLastPathSegment();
+        }
         if (name == null || name.isEmpty()) {
             throw new FileNotFoundException("没有给文件名");
         }
@@ -39,7 +61,10 @@ public class ApkProvider extends ContentProvider {
         if (name.contains("/") || name.contains("\\") || name.contains("..")) {
             throw new FileNotFoundException("文件名不合法：" + name);
         }
-        File dir = new File(getContext().getCacheDir(), SUBDIR);
+        if (sub.contains("/") || sub.contains("\\") || sub.contains("..")) {
+            throw new FileNotFoundException("目录不合法：" + sub);
+        }
+        File dir = new File(getContext().getCacheDir(), sub);
         File file = new File(dir, name);
         if (!file.isFile()) {
             throw new FileNotFoundException("文件不存在：" + file.getAbsolutePath());
@@ -83,6 +108,13 @@ public class ApkProvider extends ContentProvider {
 
     @Override
     public String getType(Uri uri) {
+        List<String> parts = uri == null ? null : uri.getPathSegments();
+        if (parts != null && parts.size() >= 2 && SHARE.equals(parts.get(0))) {
+            String name = parts.get(1).toLowerCase(java.util.Locale.US);
+            if (name.endsWith(".png")) return "image/png";
+            if (name.endsWith(".webp")) return "image/webp";
+            return "image/jpeg";
+        }
         return "application/vnd.android.package-archive";
     }
 

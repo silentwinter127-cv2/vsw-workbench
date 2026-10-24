@@ -196,10 +196,10 @@ python -m vsw.server --root vsw/data --host 0.0.0.0 --port 8799 --protect
 start_vsw_lan.bat        :: 绑 0.0.0.0，启动日志会打印局域网地址和二维码
 ```
 
-## 手机端自动搜图（手机自己没有能上传的内核）
+## 手机端自动搜图（批量，编队交给电脑）
 
-手机里没有能替引擎"上传图片"的浏览器内核 —— 无头浏览器跑不了，所以手机端的自动搜图是**派活**，
-干活的是家里那台电脑：
+无人值守那条路必须靠电脑：手机里没有可编程驱动的无头浏览器（`input.click()` 在没有用户手势时
+打不开文件选择器，见下一节）。所以批量自动搜图是**派活**，干活的是家里那台电脑：
 
 ```
 手机队列页「自动搜图（N）」 → POST /api/auto/run → 服务端排班线程逐个 browser_search()
@@ -214,6 +214,36 @@ start_vsw_lan.bat        :: 绑 0.0.0.0，启动日志会打印局域网地址�
 * 一次一批，服务端串行跑，任务之间停 1 秒；单个任务失败只记原因，不中断整批。
 * 手机可以关屏走人 —— 状态在服务端，回来接着看进度。
 * 真跑一次百度的实测：28.7 秒、新进 25 张、重复 5 张、失败 0。
+
+## 手机自己搜图（半自动，一句话说清能做到哪）
+
+我一开始说「手机跑不了无头浏览器，所以自动识图只能在电脑上」，这句**说错了一半**，
+得分开讲：
+
+* **能**：Android WebView 有 `WebChromeClient.onShowFileChooser()`，网页的
+  `<input type=file>` 一被触发，原生就能把**已经选好的图**（`content://`）直接塞回去，
+  用户连文件选择器都不用看。
+* **不能**：浏览器规定文件选择器必须由**用户手势**触发，后台注入的 `input.click()`
+  打不开它。所以「无人值守、一张接一张」这件事手机上做不到 —— 那条路还是电脑的活。
+
+于是手机上做成了**半自动**：APK 里给每个队列项一个「手机搜」按钮 ——
+
+```
+点「手机搜」 → 原生把图（base64 → cache 目录 → content://）交给 WebSearchActivity
+            → WebView 打开引擎页面 → 用户点一下「上传图片」（真手势）
+            → onShowFileChooser 立刻把预选好的图还回去 → 引擎自己上传、自己跳结果页
+            → 每 1.5 秒注入一次提取脚本（和电脑端 cdp_driver 用的是同一份）
+            → 抓够了就把结果回传页面：识别结论 / 相似图 / 来源网页 / 商品价
+```
+
+要点：
+
+* 提取脚本就是 `vsw/engines.py` 里那两份（`EXTRACT_BAIDU` / `EXTRACT_360`），原样搬进
+  APK 里的页面，所以手机端不用连电脑也能解析结果；输入框的 URL 缺失时用
+  `shouldInterceptRequest` 记 `/ajax/pcsimi`（替代电脑端的 `capture_network`）。
+* 会先试着用**真实触摸事件**（`MotionEvent` + `dispatchTouchEvent`）点一下页面上的上传按钮；
+  拿不到 user activation 就退化成「请你点一下」，并把这句话写在提示里 —— 不假装全自动。
+* 手机这条只为「电脑不在手边」准备：批量、串行、关屏走人仍然是 `POST /api/auto/run`。
 
 ## 应用自我更新（电脑上放包，手机点一下）
 
@@ -268,7 +298,8 @@ python scripts/vsw-check-syntax.py                                            # 
 `vsw-probe-import-queue.js`（11 项）、`-queue-filter.js`（14）、`-queue-thumbs.js`（7）、
 `-trash-thumbs.js`（5）、`-archive-view.js`（20）、`-archive-merge.js`（40）、
 `-archive-merge-pick.js`（15，勾选与空批次）、`-auto-search.js`（17，自动搜图按钮与进度）、
-`-update-ui.js`（31，更新卡片、进度、失败、权限）。
+`-update-ui.js`（31，更新卡片、进度、失败、权限）、`-phone-search.js`（20，手机搜：桥接前不显示、
+把图与提取脚本交给原生、结果面板、没图要提示）。
 服务端一旦开了账号，这些探针都要带 `--sid <会话令牌>` 跑（否则它们的接口调用全是 401）：
 
 ```bash
@@ -318,7 +349,8 @@ vsw/                  桌面工作台 + 手机端页面（同一份手机页面�
   cdp_driver.js       无头 Chromium + CDP 驱动：上传变体 → 等结果 → 提取结构化 JSON
   NOTES-engines.md    实测笔记：各引擎还能不能自动识图、Bing 为何失效、百度给的边界
 vsw-android/          安卓 APK 工程（WebView 外壳 + 原生扫码 + 自更新，不需要 Gradle）
-  java/.../ApkProvider.java   只读 ContentProvider：把下载好的 APK 交给系统安装器
+  java/.../ApkProvider.java   只读 ContentProvider：把 APK / 待搜图片以 content:// 交出去
+  java/.../WebSearchActivity.java  手机自己搜：WebView + onShowFileChooser + 结果提取
 scripts/              自测、真实链路验证、引擎探针、APK 验证、发布脚本（vsw-publish-apk.py）
 ```
 

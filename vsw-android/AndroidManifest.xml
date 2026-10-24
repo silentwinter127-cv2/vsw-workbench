@@ -59,5 +59,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 手机自己跑识图：WebView 里打开引擎网页，用 onShowFileChooser 把预先选好的图
+             交给网页的 <input type=file>。浏览器要求文件选择器必须由用户手势触发，
+             所以这一页是「半自动」：选图由原生代劳，用户只需要点一下页面的上传按钮。 -->
+        <activity
+            android:name=".WebSearchActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
+            android:windowSoftInputMode="adjustResize" />
     </application>
 </manifest>

@@ -374,7 +374,8 @@ label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5
 
     <div class="card">
       <div class="row"><b>连接电脑上的工作台</b></div>
-      <p class="small">手机本身跑不了无头浏览器，所以「自动识图」只能在电脑上执行。
+      <p class="small">批量「自动识图」要电脑上的无头浏览器；但手机自己也能逐张搜
+        （APK 里点队列项的「手机搜」，图由原生替你选好，你只需要在引擎页面上点一下上传）。
         这里填电脑的局域网地址，就能同步一份快照到手机上离线看、也能把手机拍的照片推回电脑。</p>
       <label class="field"><span>电脑地址</span>
         <input type="text" id="serverInput" placeholder="http://192.168.1.5:8787"></label>
@@ -1265,6 +1266,117 @@ function queueRows() {
 }
 
 /** 筛选控件：种子下拉 + 引擎/变体芯片（都带基数，方便看出"哪个筛出来有东西"）。 */
+
+/* ------------------------------------------------------ 手机自己搜（WebView）
+   事实：WebView 能替网页的 <input type=file> 交图（onShowFileChooser），但浏览器规定
+   文件选择器必须由**用户手势**触发，所以后台 input.click() 打不开它。于是手机这条是
+   「半自动」：选图由原生代劳，用户只需要在引擎页面里点一下上传。批量、无人值守那条路
+   仍然交给电脑（POST /api/auto/run）。 */
+const PHONE_SEARCH = {
+  baidu: {
+    label: '百度识图（手机内）',
+    url: 'https://graph.baidu.com/pcpage/index?tpl_from=pc',
+    extract: "(() => {\n  const abs = (u) => { try { return new URL(u, location.href).toString(); } catch (e) { return ''; } };\n  const out = { similar: [], sources: [], goods: [], guess: '', sizes: [], diag: { hosts: {} } };\n  const text = document.body ? document.body.innerText : '';\n  const g = /图中可能是\\s*([^\\n]{1,40})/.exec(text);\n  if (g) out.guess = g[1].trim();\n\n  const captured = Array.isArray(window.__vswCaptured) ? window.__vswCaptured : [];\n  const pcsimi = captured.find((u) => /\\/ajax\\/pcsimi/.test(u)) || '';\n\n  const push = (item) => {\n    if (!item || !item.u || out.similar.length >= 60) return;\n    out.similar.push(item);\n  };\n\n  const fromDom = () => {\n    const seen = new Set();\n    for (const img of document.querySelectorAll('img')) {\n      const u = abs(img.getAttribute('data-src') || img.getAttribute('data-imgurl') || img.currentSrc || img.src || '');\n      if (!u || u.startsWith('data:')) continue;\n      let host = ''; try { host = new URL(u).host; } catch (e) { }\n      out.diag.hosts[host] = (out.diag.hosts[host] || 0) + 1;\n      const isResult = /\\/\\/(t\\d+|mms\\d*|mms-graph|shitu-query[a-z-]*)\\.(baidu|bcebos)\\.(com|net)\\//.test(u);\n      const w = img.naturalWidth || 0, h = img.naturalHeight || 0;\n      if (!isResult || /textocr|pc-icon/.test(u) || w < 80 || h < 80) continue;\n      if (seen.has(u)) continue;\n      seen.add(u);\n      push({ u: u, w: w, h: h, page: '', alt: (img.getAttribute('alt') || '').slice(0, 80) });\n    }\n  };\n\n  const goods = () => {\n    const priceRe = /¥\\s*([\\d.]+)/;\n    const seenGoods = new Set();\n    for (const el of document.querySelectorAll('div,li,a')) {\n      const t = (el.innerText || '').trim();\n      if (!t || t.length > 220) continue;\n      const m = priceRe.exec(t);\n      if (!m) continue;\n      const platform = (t.match(/淘宝|京东|天猫|拼多多|闲鱼/) || [''])[0];\n      const lines = t.split('\\n').map((x) => x.trim()).filter(Boolean);\n      const title = lines.find((l) => !priceRe.test(l) && !/^(淘宝|京东|天猫|拼多多|闲鱼)$/.test(l)) || '';\n      const key = m[1] + '|' + title.slice(0, 40);\n      if (seenGoods.has(key)) continue;\n      seenGoods.add(key);\n      out.goods.push({ price: m[1], title: title.slice(0, 80), platform: platform });\n      if (out.goods.length >= 8) break;\n    }\n  };\n\n  const externalSources = () => {\n    const seenUrl = new Set();\n    for (const a of document.querySelectorAll('a[href]')) {\n      const h = abs(a.getAttribute('href'));\n      if (!/^https?:\\/\\//.test(h) || /baidu\\.com|baidu\\.cn/.test(h)) continue;\n      const t = (a.innerText || '').trim();\n      if (!t || t.length > 90 || seenUrl.has(h)) continue;\n      seenUrl.add(h);\n      out.sources.push({ url: h, title: t });\n      if (out.sources.length >= 12) break;\n    }\n  };\n\n  const finish = () => {\n    goods();\n    if (!out.similar.length) fromDom();\n    externalSources();\n    out.diag.viaPcsimi = out.diag.viaPcsimi || 0;\n    return JSON.stringify(out);\n  };\n\n  // 「相似站点」（同一张图出现在哪些网页）只在部分结果上开放；有就顺带捞一把，\n  // 没有也不影响主路径（pcsimi 的 fromUrl 已经给了每个相似图的来源页）。\n  const fetchSites = () => {\n    if (!pcsimi) return Promise.resolve();\n    const u = pcsimi.replace('/ajax/pcsimi', '/ajax/pcsites');\n    return fetch(u, { credentials: 'include' })\n      .then((r) => (r.ok ? r.json() : null))\n      .then((json) => {\n        const list = (json && json.data && (json.data.list || json.data.sites)) || [];\n        out.diag.sites = list.length;\n        for (const s of list) {\n          const url = s.fromUrl || s.url || s.siteUrl || '';\n          if (url) out.sources.push({ url: url, title: (s.title || s.name || '').slice(0, 80) });\n        }\n      })\n      .catch(() => { /* 没有这个入口就算了 */ });\n  };\n\n  const fetchPcsimi = () => {\n    if (!pcsimi) { fromDom(); return Promise.resolve(); }\n    return fetch(pcsimi, { credentials: 'include' })\n      .then((r) => r.json())\n      .then((json) => {\n        const list = (json && json.data && json.data.list) || [];\n        out.diag.pcsimi = list.length;\n        for (const item of list) {\n          const url = item.thumbUrl || item.hoverUrl || '';\n          if (!url) continue;\n          out.similar.push({\n            u: url,\n            w: item.width || 0,\n            h: item.height || 0,\n            page: item.fromUrl || '',\n            alt: item.title || '',\n          });\n          out.diag.viaPcsimi += 1;\n        }\n      })\n      .catch(() => { fromDom(); });\n  };\n\n  return Promise.all([fetchPcsimi(), fetchSites()]).then(finish);\n})()",
+  },
+  so360: {
+    label: '360 识图（手机内）',
+    url: 'https://st.so.com/',
+    extract: "(() => {\n  const abs = (u) => { try { return new URL(u, location.href).toString(); } catch (e) { return ''; } };\n  const out = { similar: [], sources: [], goods: [], guess: '', sizes: [], diag: { hosts: {} } };\n  const text = document.body ? document.body.innerText : '';\n  const sz = /图片尺寸：(\\d+)x(\\d+)/.exec(text);\n  if (sz) out.sizes.push({ w: +sz[1], h: +sz[2] });\n  const seen = new Set();\n  for (const img of document.querySelectorAll('img')) {\n    const u = abs(img.getAttribute('data-src') || img.getAttribute('data-original') || img.currentSrc || img.src || '');\n    if (!u || u.startsWith('data:')) continue;\n    let host = ''; try { host = new URL(u).host; } catch (e) { }\n    out.diag.hosts[host] = (out.diag.hosts[host] || 0) + 1;\n    const isResult = /qhimg|360tres/.test(host);\n    const w = img.naturalWidth || 0, h = img.naturalHeight || 0;\n    if (!isResult && (w < 180 || h < 180)) continue;\n    if (seen.has(u)) continue;\n    seen.add(u);\n    const a = img.closest('a');\n    out.similar.push({ u: u, w: w, h: h, page: a ? abs(a.getAttribute('href')) : '', alt: (img.getAttribute('alt') || '').slice(0, 80) });\n    if (out.similar.length >= 60) break;\n  }\n  const seenUrl = new Set();\n  for (const a of document.querySelectorAll('a[href]')) {\n    const h = abs(a.getAttribute('href'));\n    if (!/^https?:\\/\\//.test(h)) continue;\n    if (/so\\.com|360\\.cn|360kan|360safe|qhimg|360tres|beian/.test(h)) continue;\n    const t = (a.innerText || '').trim();\n    if (!t || t.length > 90 || seenUrl.has(h)) continue;\n    seenUrl.add(h);\n    out.sources.push({ url: h, title: t });\n    if (out.sources.length >= 12) break;\n  }\n  return JSON.stringify(out);\n})()",
+  },
+};
+
+function phoneSearchReady() {
+  try {
+    return !!(window.AndroidBridge && AndroidBridge.webSearchAvailable
+      && AndroidBridge.webSearchAvailable() === '1');
+  } catch (e) { return false; }
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || '');
+      const comma = text.indexOf(',');
+      resolve(comma >= 0 ? text.slice(comma + 1) : '');
+    };
+    reader.onerror = () => reject(reader.error || new Error('读不出这张图'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** 队列项要搜的那张图：优先变体图，其次种子原图（都在本地库里）。 */
+async function jobImageBase64(job) {
+  const keys = [];
+  if (job.variant_id) keys.push(KEY.variantThumb(job.variant_id));
+  if (job.seed_id) keys.push(KEY.seedThumb(job.seed_id));
+  for (const key of keys) {
+    if (!key) continue;
+    const rec = await local.get('assets', key);
+    if (rec && rec.blob && rec.blob.size) return blobToBase64(rec.blob);
+  }
+  return '';
+}
+
+async function startPhoneSearch(jobId) {
+  const job = S.jobs.find((j) => Number(j.id) === Number(jobId));
+  if (!job) return toast('找不到这个队列项', true);
+  const cfg = PHONE_SEARCH[job.engine];
+  if (!cfg) return toast('这个引擎在手机里还没配置提取脚本', true);
+  const b64 = await jobImageBase64(job);
+  if (!b64) return toast('本地没有这张图：先同步一次快照再搜', true);
+  S.phoneSearch = { jobId: job.id, engine: job.engine, label: cfg.label };
+  toast('图已经替你选好，在打开的页面里点一下「上传图片」');
+  try {
+    AndroidBridge.webSearch(job.engine, cfg.label, cfg.url, cfg.extract, b64);
+  } catch (e) {
+    toast('起不来：' + e.message, true);
+  }
+}
+
+/* 原生把结果（JSON 字符串）回传到这里。 */
+window.vswWebSearchResult = function (payload) {
+  let data = payload;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch (e) { data = { error: String(data) }; }
+  }
+  openPhoneSearchResult(data || {}, S.phoneSearch || {});
+};
+
+function openPhoneSearchResult(data, ctx) {
+  const similar = data.similar || [];
+  const sources = data.sources || [];
+  const goods = data.goods || [];
+  const title = `手机搜 · ${ctx.label || '识图'}`;
+  $('#sheetTitle').textContent = ctx.jobId ? `${title} · 队列 #${ctx.jobId}` : title;
+  $('#cropConfirm').classList.add('hide');
+  $('#cropStage').innerHTML = '';
+  const links = similar.map((x) => x.u).filter(Boolean).join('\n');
+  const pages = sources.map((x) => x.url).filter(Boolean).join('\n');
+  $('#sheetBody').innerHTML = `
+    ${data.error ? `<div class="warn">${esc(data.error)}</div>` : ''}
+    ${data.note ? `<div class="small">${esc(data.note)}</div>` : ''}
+    ${data.guess ? `<div class="t1">识别结论：<b>${esc(data.guess)}</b></div>` : ''}
+    <div class="small">相似图 ${similar.length} · 来源网页 ${sources.length}${goods.length ? ` · 商品 ${goods.length}` : ''}</div>
+    ${similar.length ? `<div class="flist" style="margin-top:10px">${similar.slice(0, 40).map((x) => `
+      <div class="fcard">
+        <img src="${esc(x.u)}" alt="" loading="lazy">
+        <div class="meta2"><div class="ln"><span class="mono">${x.w || '?'}×${x.h || '?'}</span>
+          ${x.page ? `<a href="${esc(x.page)}" target="_blank" rel="noopener">来源</a>` : ''}</div></div>
+      </div>`).join('')}</div>` : '<div class="empty">没抓到相似图（引擎页面结构可能变了，或者还没出结果）</div>'}
+    ${goods.length ? `<div class="small" style="margin-top:10px">商品：${goods.slice(0, 6).map((g) => `${esc(g.platform || '')} ¥${esc(g.price)} ${esc(g.title)}`).join(' · ')}</div>` : ''}
+    ${sources.length ? `<div class="small" style="margin-top:10px">来源网页：<br>${sources.slice(0, 12).map((x) => `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title || x.url)}</a>`).join('<br>')}</div>` : ''}
+    <div class="row" style="margin-top:12px">
+      ${links ? `<button class="btn sm" id="copyImgLinks">复制图片链接</button>` : ''}
+      ${pages ? `<button class="btn sm" id="copyPageLinks">复制来源链接</button>` : ''}
+      <button class="btn sm ghost" data-close-sheet>关闭</button>
+    </div>`;
+  openSheet();
+  const a = $('#copyImgLinks'); if (a) a.onclick = () => copyText(links, '图片链接已复制');
+  const b = $('#copyPageLinks'); if (b) b.onclick = () => copyText(pages, '来源链接已复制');
+  $$('[data-close-sheet]').forEach((btn) => { btn.onclick = () => closeSheet(); });
+}
+
 function renderQueueFilters(rows) {
   // 种子下拉：只列队列里出现过的种子，按条数降序
   const seedCount = {};
@@ -1551,7 +1663,7 @@ function renderQueue() {
   const gate = $('#queueGate');
   if (!S.online) {
     gate.innerHTML = `<div class="gate">离线中：队列操作需要电脑上的工作台。
-      <br>「自动识图」要靠电脑上的无头浏览器（手机跑不了），「打开识图」也走电脑派发的入口。
+      <br>批量「自动识图」要靠电脑上的无头浏览器；离线时队列项的「手机搜」仍然可用，「打开识图」走电脑派发的入口。
       筛选和浏览不受影响；删除队列项需要连上电脑。
       下面显示的是最近一次同步时的队列快照。</div>`;
   } else if (!S.caps.available) {
@@ -1596,6 +1708,8 @@ function renderQueue() {
                    ${S.online ? '' : 'disabled'}>自动识图</button>`
               : `<button class="btn sm" data-act="open" data-id="${j.id}"
                    ${S.online ? '' : 'disabled'}>打开识图</button>`}
+               ${phoneSearchReady() && PHONE_SEARCH[j.engine]
+                 ? `<button class="btn sm" data-act="phone" data-id="${j.id}">手机搜</button>` : ''}
                <button class="btn sm ghost" data-act="del" data-id="${j.id}"
                  ${S.online ? '' : 'disabled'}>删除</button>`}
         </div>
@@ -1627,6 +1741,7 @@ function renderQueue() {
       if (btn.dataset.act === 'del') {
         return deleteQueueJobs([jobId], '这个');
       }
+      if (btn.dataset.act === 'phone') return startPhoneSearch(jobId);
       if (!S.online) return toast('离线中：这个操作要在电脑上执行', true);
       try {
         if (btn.dataset.act === 'auto') {

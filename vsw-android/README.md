@@ -102,6 +102,7 @@ python ../scripts/vsw-probe-access.py
 # 12) 自动搜图：候选挑选、串行跑批、失败不中断、谁能开跑（24 项）
 # 13) 应用自更新：版本比较、下载与 SHA256、匿名可取、GitHub 兜底（43 项）
 # 14) 更新卡片：进度/失败/权限/已最新/问不到版本（31 项）
+# 15) 手机自己搜：桥接前不显示按钮、把图与提取脚本交给原生、结果面板、没图要提示（20 项）
 python ../scripts/vsw-probe-accounts.py
 
 # 0) 语法闸门：内联脚本一处语法错，整页就不能点（比行为探针便宜得多，先跑它）
@@ -672,3 +673,40 @@ Invoke-WebRequest 'https://repo1.maven.org/maven2/com/google/zxing/core/3.5.3/co
 2. 手机端三个原生回调原来叫 `updateProgress/updateFailed/updateNeedPerm`，而 Java 里推的是
    `window.vswUpdateProgress/vswUpdateFailed/vswUpdateNeedPerm` —— **进度和报错全都静默无效**。
    改名对齐后，探针里专门验了「进度条走到 42%」「校验失败显示原因」「缺权限时指路去设置」。
+
+### 手机自己搜（r19）：先纠正我自己说错的一句话
+
+上一版我写过「手机跑不了无头浏览器，所以自动识图只能在电脑上」。这句把两件事混了：
+
+* **WebView 能上传**。`WebChromeClient.onShowFileChooser()` 就是替网页的
+  `<input type=file>` 交图的钩子；不实现它，网页的上传按钮才点不动。
+* **但不能无人值守**。浏览器规定文件选择器必须由用户手势触发，后台注入的
+  `input.click()` 打不开它（没有 user activation），因此「一张接一张自动跑」手机上做不到。
+
+所以 r19 做的是**半自动**，只在「电脑不在手边」时用：
+
+```
+队列项「手机搜」
+  → MainActivity.Bridge.webSearch(engine, label, url, extractJs, imageBase64)
+  → 图落到 getCacheDir()/websearch/，经 ApkProvider 换成 content:// URI
+  → WebSearchActivity 打开引擎页面；onShowFileChooser 立刻把这张图还回去
+  → shouldInterceptRequest 记下 /ajax/pcsimi（替代电脑端的 capture_network）
+  → 每 1.5 秒注入一次提取脚本（就是 vsw/engines.py 里那两份，原样搬进页面）
+  → 相似图 ≥ 4 张就回传，最多等 90 秒；结果交回页面渲染成面板
+```
+
+几处刻意的取舍：
+
+* **先试真实触摸**：`MotionEvent` + `dispatchTouchEvent` 去点页面上的上传按钮（合成事件
+  拿不到 user activation，所以走的是真输入通道）。点不动就明说「请你点一下上传」。
+* **没有预选图时返回 `false`**，让系统文件选择器正常弹出来 —— 宁可多一步，也不要卡死。
+* 顶栏一直显示当前阶段（找上传按钮 / 图已交出 / 等结果 / 抓到了），失败也写清原因，
+  用户截一张图就能定位，不需要 logcat。
+* 结果只放进手机侧面板（识别结论 / 相似图 / 来源网页 / 复制链接）。要进库、要去重、
+  要算发散度，仍然回到电脑那条流水线 —— 手机上不重写一套去重。
+
+**验证到哪**：页面这一半 20/20（`scripts/vsw-probe-phone-search.js`：桥接前不显示按钮、
+点击把图与提取脚本交给原生、没图要提示、结果面板与错误面板）；APK 里确认
+`WebSearchActivity` 进了清单与 dex、`onShowFileChooser` 在类里、页面含 14 万字符与两份提取脚本。
+**没验到**：真机上 `onShowFileChooser` 何时被调用、触摸能不能拿到 user activation、
+百度的上传控件在手机上长什么样 —— 这三件只能你装上去点一次才知道。

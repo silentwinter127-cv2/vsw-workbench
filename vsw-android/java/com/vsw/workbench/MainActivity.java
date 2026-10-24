@@ -58,7 +58,7 @@ public class MainActivity extends Activity {
      * 用在应用名和启动屏里的构建标识。每次改 APK 都要改它 —— 这样"我装了新版吗"
      * 这个问题不需要靠猜（真机上真的发生过"装的是旧包"）。
      */
-    static final String BUILD_TAG = "r18";
+    static final String BUILD_TAG = "r19";
 
     private int assetBytes = 0;
     private long pageFileLength = 0;
@@ -68,6 +68,7 @@ public class MainActivity extends Activity {
     private static final int REQ_WEB_CAMERA = 1002;
     private static final int REQ_SCAN = 1003;
     private static final int REQ_SCAN_PERM = 1004;
+    private static final int REQ_WEBSEARCH = 1005;
 
     private WebView web;
     private android.widget.TextView splash;
@@ -493,6 +494,40 @@ public class MainActivity extends Activity {
         }
 
         /**
+         * 手机能不能自己跑一次识图。
+         *
+         * 页面据此决定要不要显示「手机搜」按钮 —— 在浏览器里打开时没有这个桥，
+         * 按钮就不出现（那里没有 WebView 的文件选择钩子，点了也没用）。
+         */
+        @JavascriptInterface
+        public String webSearchAvailable() {
+            return "1";
+        }
+
+        /**
+         * 用手机自己的 WebView 跑一次识图。
+         *
+         * engine/label/url/extractJs 都由页面给（提取脚本和电脑端 cdp_driver 用的是同一份），
+         * image 是待搜图片的 base64。选图这一步由原生接管，用户只需要在页面里点一下「上传」。
+         */
+        @JavascriptInterface
+        public void webSearch(final String engine, final String label, final String url,
+                              final String extractJs, final String image) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Intent intent = new Intent(MainActivity.this, WebSearchActivity.class);
+                    intent.putExtra(WebSearchActivity.EXTRA_ENGINE, engine);
+                    intent.putExtra(WebSearchActivity.EXTRA_LABEL, label);
+                    intent.putExtra(WebSearchActivity.EXTRA_URL, url);
+                    intent.putExtra(WebSearchActivity.EXTRA_EXTRACT, extractJs);
+                    intent.putExtra(WebSearchActivity.EXTRA_IMAGE, image);
+                    startActivityForResult(intent, REQ_WEBSEARCH);
+                }
+            });
+        }
+
+        /**
          * 下载安装包、校验 SHA256、交给系统安装器。
          *
          * 安卓不允许应用自己静默安装：这里只能把系统安装框调起来，最后一下得用户点。
@@ -746,6 +781,15 @@ public class MainActivity extends Activity {
                 fileCallback.onReceiveValue(result);
                 fileCallback = null;
             }
+            return;
+        }
+        if (requestCode == REQ_WEBSEARCH) {
+            String payload = (resultCode == RESULT_OK && data != null)
+                    ? data.getStringExtra(WebSearchActivity.EXTRA_RESULT) : null;
+            if (payload == null || payload.trim().isEmpty()) {
+                payload = "{\"error\":\"搜索页没有返回结果\"}";
+            }
+            deliverJs("window.vswWebSearchResult && window.vswWebSearchResult(" + payload + ")");
             return;
         }
         if (requestCode == REQ_SCAN) {
