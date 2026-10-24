@@ -439,6 +439,20 @@ APK 版把上面这套页面打进 `assets/mobile/index.html`，用 `file://` �
 
 ---
 
+### 手机上怎么更新到新版
+
+电脑上换了新包以后，手机上不用再传文件：
+
+```
+python scripts/vsw-publish-apk.py --notes "这一版改了什么"
+# 或者直接跑 vsw-android\build_release.bat —— 它打完包会自动发布
+```
+
+包和 `version.json` 落在 `<root>/dist/`。手机端「我的 → 检查更新」问
+`GET /api/app/version?build=<当前版本>`，有新版本就显示「下载并安装」：下载、校验 SHA256、
+再交给系统安装器（安装框得你自己点一下 —— Android 不允许应用静默安装）。
+本地没有包时会兜底去问 GitHub Releases（`--gh OWNER/REPO`）。
+
 ### 手机端的「自动搜图」（电脑干活，手机下单）
 
 手机的 WebView 里没有能替引擎上传一张图的内核 —— 那条链路要真实的文件选择框和真实 XHR。

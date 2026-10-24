@@ -352,6 +352,26 @@ label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5
       </div>
     </div>
 
+    <div class="card hide" id="updateCard">
+      <div class="row"><b>版本与更新</b><div class="spacer"></div>
+        <span class="small" id="appBuild">—</span></div>
+      <div class="small" id="updateHint" style="margin:6px 0">
+        这个应用是新版还是旧版，由它连着的电脑说了算：电脑上的 data/dist 里放了新包，这里就能直接装。</div>
+      <div id="updateInfo" class="small" style="margin:6px 0"></div>
+      <div id="updateBar" class="hide" style="margin:8px 0">
+        <div style="height:6px;border-radius:3px;background:var(--bg2);overflow:hidden">
+          <div id="updateBarFill" style="height:100%;width:0%;background:var(--accent);transition:width .2s"></div>
+        </div>
+        <div class="small" id="updateBarText" style="margin-top:4px">准备中…</div>
+      </div>
+      <div class="row">
+        <button class="btn" id="checkUpdateBtn">检查更新</button>
+        <button class="btn primary hide" id="doUpdateBtn">下载并安装</button>
+      </div>
+      <p class="small" id="updateNote" style="margin-top:6px">
+        装的时候系统会弹一次安装框 —— 安卓不允许应用自己偷偷装，那一下得你点。</p>
+    </div>
+
     <div class="card">
       <div class="row"><b>连接电脑上的工作台</b></div>
       <p class="small">手机本身跑不了无头浏览器，所以「自动识图」只能在电脑上执行。
@@ -457,7 +477,7 @@ label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5
       <button class="btn" id="introScan">扫二维码</button>
     </div>
     <p class="small" style="margin:10px 0 0">电脑和手机要在同一个 WiFi 下。
-      工作台目前没有口令，别在公共 WiFi 上开放。</p>
+      电脑还没建账号的话，谁连上都能读写；要分人用，先在电脑上建第一个账号（点右上角「建第一个账号」），别在公共 WiFi 上裸开。</p>
   </div>
 
   <div class="opt">
@@ -2807,6 +2827,138 @@ async function accDropKey() {
   toast('密钥已清掉');
 }
 
+/** 把文本里的尖括号挡掉再塞进 innerHTML（版本说明来自服务器，不能当标签用）。 */
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ---------------------------------------------------------------- 应用自我更新
+// 三件事：问电脑有没有新版本（/api/app/version）、下载安装包（/api/app/apk）、
+// 交给系统安装器。下载和安装是原生做的（window.AndroidBridge），网页只负责显示。
+const UPDATE = { busy: false, info: null };
+
+function updateEls() {
+  return {
+    card: $('#updateCard'),
+    build: $('#appBuild'),
+    hint: $('#updateHint'),
+    info: $('#updateInfo'),
+    bar: $('#updateBar'),
+    fill: $('#updateBarFill'),
+    barText: $('#updateBarText'),
+    check: $('#checkUpdateBtn'),
+    install: $('#doUpdateBtn'),
+    note: $('#updateNote')
+  };
+}
+
+function vswUpdateProgress(pct, text) {
+  const el = updateEls();
+  el.bar.classList.remove('hide');
+  el.fill.style.width = Math.max(0, Math.min(100, Number(pct) || 0)) + '%';
+  el.barText.textContent = text || (pct + '%');
+  el.check.disabled = true;
+  el.install.disabled = true;
+}
+
+function vswUpdateFailed(message) {
+  const el = updateEls();
+  UPDATE.busy = false;
+  el.bar.classList.add('hide');
+  el.check.disabled = false;
+  el.install.disabled = false;
+  el.info.innerHTML = '<b style="color:var(--danger)">更新没成功</b><br>' + escapeHtml(String(message || ''));
+  toast('更新失败：' + (message || ''), true);
+}
+
+function vswUpdateNeedPerm() {
+  const el = updateEls();
+  UPDATE.busy = false;
+  el.check.disabled = false;
+  el.install.disabled = false;
+  el.info.innerHTML = '系统不让装：去设置里允许这个应用「安装未知应用」，回来再点一次「下载并安装」。';
+}
+
+/** 原生把 /api/app/version 的 JSON 原样丢进来。 */
+function vswUpdateInfo(info) {
+  const el = updateEls();
+  UPDATE.busy = false;
+  el.check.disabled = false;
+  el.install.disabled = false;
+  el.bar.classList.add('hide');
+  if (!info || info.error) {
+    el.info.innerHTML = '<b style="color:var(--danger)">问不到版本</b><br>'
+      + escapeHtml(String((info && info.error) || '电脑没回话'));
+    return;
+  }
+  UPDATE.info = info;
+  const size = info.size ? (info.size / 1048576).toFixed(1) + ' MB' : '';
+  if (info.update_available) {
+    el.info.innerHTML = '<b style="color:var(--accent)">有新版本：' + escapeHtml(String(info.build || ''))
+      + '</b>（你现在是 ' + escapeHtml(String(info.current || '未知')) + '）'
+      + (size ? ' · ' + size : '')
+      + (info.notes ? '<br>' + escapeHtml(String(info.notes)) : '')
+      + (info.source === 'github' ? '<br><span class="small">来自 GitHub Release</span>' : '');
+    el.install.classList.remove('hide');
+  } else if (!info.comparable) {
+    // 电脑上的包没写版本号（dist/version.json 缺失或坏了）：别假装"已是最新"
+    el.info.innerHTML = '电脑上的安装包没有版本信息，说不清是不是最新 —— 重新发布一次就会好。';
+    el.install.classList.add('hide');
+  } else {
+    el.info.innerHTML = '已经是最新的：' + escapeHtml(String(info.build || info.current || ''))
+      + '（你这台是 ' + escapeHtml(String(info.current || '')) + '）';
+    el.install.classList.add('hide');
+  }
+  renderUpdateCard();
+}
+
+function renderUpdateCard() {
+  const el = updateEls();
+  const inApp = !!(window.AndroidBridge && AndroidBridge.buildTag);
+  el.card.classList.toggle('hide', !inApp);
+  if (!inApp) return;
+  el.build.textContent = '当前 ' + AndroidBridge.buildTag();
+}
+
+function checkUpdate() {
+  const el = updateEls();
+  if (!window.AndroidBridge || !AndroidBridge.checkUpdate) {
+    toast('只有装在手机上的应用能自己更新；浏览器里请直接换新版页面', true);
+    return;
+  }
+  if (!S.server) {
+    toast('先在下面填电脑地址', true);
+    return;
+  }
+  UPDATE.busy = true;
+  el.check.disabled = true;
+  el.info.textContent = '正在问电脑有没有新版本…';
+  AndroidBridge.checkUpdate(S.server);
+}
+
+function doUpdate() {
+  const el = updateEls();
+  if (!window.AndroidBridge || !AndroidBridge.installUpdate) {
+    toast('浏览器里装不了，请用手机版应用', true);
+    return;
+  }
+  const info = UPDATE.info || {};
+  UPDATE.busy = true;
+  el.check.disabled = true;
+  el.install.disabled = true;
+  vswUpdateProgress(0, '准备下载…');
+  AndroidBridge.installUpdate(S.server, info.sha256 || '');
+}
+
+function bindUpdate() {
+  renderUpdateCard();
+  const el = updateEls();
+  if (el.check) el.check.onclick = checkUpdate;
+  if (el.install) el.install.onclick = doUpdate;
+}
+
 function bindAccount() {
   $('#accKeyGo').onclick = () => accUseKey($('#accKey').value);
   $('#accKeyClear').onclick = accDropKey;
@@ -3019,6 +3171,7 @@ async function boot() {
   }
   if (S.server) localStorage.setItem('vsw.server', S.server);
   loadCreds();
+  bindUpdate();
   $('#serverInput').value = S.server || '';
   bindAccount();
   $$('nav button[data-v]').forEach((b) => { b.onclick = () => switchTab(b.dataset.v); });

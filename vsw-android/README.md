@@ -99,6 +99,9 @@ python ../scripts/vsw-probe-access.py
 
 # 10) 账号 / 私人工作区 / 协作：建号、邀请码、隔离、会话头、共用语义引擎、本机/远程判定（65 项）
 # 11) 公网通道：Funnel 状态解析、XFF 优先、只有主人能开、没门槛时拒绝开（35 项）
+# 12) 自动搜图：候选挑选、串行跑批、失败不中断、谁能开跑（24 项）
+# 13) 应用自更新：版本比较、下载与 SHA256、匿名可取、GitHub 兜底（43 项）
+# 14) 更新卡片：进度/失败/权限/已最新/问不到版本（31 项）
 python ../scripts/vsw-probe-accounts.py
 
 # 0) 语法闸门：内联脚本一处语法错，整页就不能点（比行为探针便宜得多，先跑它）
@@ -639,3 +642,33 @@ Invoke-WebRequest 'https://repo1.maven.org/maven2/com/google/zxing/core/3.5.3/co
 5. **`file://` 下 `location.origin` 是字符串 `"null"`。** 早期版本把它当成"已设地址"，
    结果首次引导被跳过、对方打开只看到空白页。这个 bug 是探针抓出来的，不是看代码看出来的。
 6. **`apkanalyzer.bat` 不自己找 JDK**，必须把 `JAVA_HOME` 传进它的环境。
+
+### 应用自我更新（r18）
+
+**要解决的问题**：APK 发出去以后，每次改一行都要重新找数据线、发文件、让人再装一遍。
+
+**做法**：打包即发布 + 手机自己问版本。
+
+* `build_release.bat` 打好包后调用 `scripts/vsw-publish-apk.py`，把 APK 和 `version.json`
+  （版本、大小、SHA256、说明）放进 `<root>/dist/`。**打一次包 = 发布一次**，没有第二步。
+* 版本号只有一个真相：`MainActivity.java` 里的 `BUILD_TAG`。打包、发布、手机上报当前版本都读它。
+* 手机端「我的 → 检查更新」→ `GET /api/app/version?build=r17`，回来 `update_available` 就显示
+  「下载并安装」。本地 `dist/` 没有包时才去问 GitHub Releases（`--gh OWNER/REPO`）。
+* 这两个接口**不需要登录**：版本号和安装包不是谁的私人数据，手机登录前就得能问。
+
+**为什么要自己写 `ApkProvider`**：Android 7+ 不给别的应用 `file://`，安装器要 `content://`。
+没有 AndroidX 就用不了 `FileProvider`，所以写了一个最小只读 ContentProvider
+（`com.vsw.workbench.files`，只允许单层文件名、`MODE_READ_ONLY`），装的时候再
+`FLAG_GRANT_READ_URI_PERMISSION` 把读权限授给系统安装器。
+
+**必须承认的边界**：Android 不允许应用自己静默安装。所以"自动更新"实际是
+**自动检查 + 一键下载 + 弹系统安装框**，最后那一下永远得用户点。下载完的包先校 SHA256，
+对不上就删掉重来，不会把半个包递给安装器。
+
+**这一版踩到的两个真 bug**：
+
+1. `release.py` 在 `version.json` 缺失时用 `f"size{stat.st_size}"` 当版本号 —— 界面上会出现
+   「有新版本 size1204」，还会拿去比大小。改成留空，界面如实说「说不清是不是最新」。
+2. 手机端三个原生回调原来叫 `updateProgress/updateFailed/updateNeedPerm`，而 Java 里推的是
+   `window.vswUpdateProgress/vswUpdateFailed/vswUpdateNeedPerm` —— **进度和报错全都静默无效**。
+   改名对齐后，探针里专门验了「进度条走到 42%」「校验失败显示原因」「缺权限时指路去设置」。

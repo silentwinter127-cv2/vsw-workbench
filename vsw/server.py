@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import engines as engines_mod
 from . import imaging
+from . import release as release_mod
 from . import tunnel as tunnel_mod
 from .access import (AccessStore, ROLE_EDIT, ROLE_LABEL, ROLE_OWNER, ROLE_RANK,
                      ROLE_VIEW, ensure_owner_key, looks_like_code)
@@ -57,6 +58,9 @@ def required_role(method: str, path: str) -> Optional[str]:
     读一律 ``view``；写一律 ``edit``；上面那张表里的是 ``owner``。
     """
     if path in ("/api/ping", "/api/health"):
+        return None
+    # 应用自身的版本信息与安装包：不含任何用户数据，而且手机在登录之前就要知道要不要更新。
+    if path in ("/api/app/version", "/api/app/apk"):
         return None
     # 页面壳子（index.html / app.js / app.css / 图标 / 手机端单文件）必须能加载：
     # 解锁框就长在这些文件里。它们不含任何数据，真正的数据全在 /api 与 /media 后面。
@@ -130,9 +134,10 @@ class ServiceProxy:
 class Router:
     """Tiny declarative router: ``/api/seed/*`` style patterns, JSON in/out."""
 
-    def __init__(self, service: Any):
+    def __init__(self, service: Any, gh_repo: str = ""):
         self.service = service
         self.routes: List[Tuple[str, re.Pattern, Callable[..., Any]]] = []
+        self.gh_repo = gh_repo.strip()
         self._register()
 
     def get(self, pattern: str):
@@ -430,6 +435,31 @@ class Router:
             return svc.start_auto_batch(job_ids or None, statuses=statuses, engines=engines,
                                         limit=int(body.get("limit") or 12),
                                         timeout_ms=int(body.get("timeout_ms") or 90000))
+
+        # ---------------------------------------------------------- 应用自我更新
+        # 手机端问「有没有新版本」，再决定要不要下载安装包。两个接口都不需要登录：
+        # 版本号与二进制不是用户数据，而且手机在登录之前就该知道要不要更新。
+        @self.get("/api/app/version")
+        def app_version(query: Dict[str, List[str]], **_kw: Any) -> Dict[str, Any]:
+            current = self._first(query, "build", "") or self._first(query, "current", "")
+            root = getattr(self.service, "root", "") or ""
+            info = release_mod.latest(root, gh_repo=self.gh_repo, current=current)
+            return info
+
+        @self.get("/api/app/apk")
+        def app_apk(**_kw: Any) -> Any:
+            root = getattr(self.service, "root", "") or ""
+            path = release_mod.apk_path(root)
+            if not path:
+                raise ServiceError("这台机器上没有放安装包（data/dist/vsw-workbench.apk）")
+            with open(path, "rb") as fh:
+                data = fh.read()
+            name = f"vsw-workbench-{release_mod.local_release(root).get('build') or 'latest'}.apk"
+            return _Raw(data, release_mod.APK_MIME, {
+                "Content-Disposition": f'attachment; filename="{name}"',
+                "Cache-Control": "no-store",
+                "X-VSW-Build": str(release_mod.local_release(root).get("build") or ""),
+            })
 
         @self.post("/api/job/*/finish")
         def finish(wild: str, body: Dict[str, Any], **_kw: Any) -> Dict[str, Any]:
@@ -1803,14 +1833,15 @@ def open_in_file_manager(path: str) -> bool:
 def build_server(service: Workbench, host: str = "127.0.0.1", port: int = 8787,
                  access: Optional[AccessStore] = None,
                  auth: Optional[AccountStore] = None,
-                 hub: Optional[WorkspaceHub] = None) -> ThreadingHTTPServer:
+                 hub: Optional[WorkspaceHub] = None,
+                 gh_repo: str = "") -> ThreadingHTTPServer:
     """起一个 HTTP 服务。
 
     ``service`` 可以是单个 Workbench（自测、单工作区老调用），也可以装在 ServiceProxy 里
     （多工作区：每个请求按身份绑到自己的工作区）。
     """
     content = service if isinstance(service, ServiceProxy) else service
-    router = Router(content)
+    router = Router(content, gh_repo=gh_repo)
 
     class BoundHandler(Handler):
         pass
@@ -2071,6 +2102,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "不在同一局域网的人也能打开。需要先有账号或密钥")
     parser.add_argument("--no-tunnel", action="store_true",
                         help="启动时把已经开着的公网通道关掉")
+    parser.add_argument("--gh", default=os.environ.get("VSW_GH_REPO", ""),
+                        metavar="OWNER/REPO",
+                        help="可选的 GitHub 仓库：本机 dist/ 里没有安装包时退到这里查最新 Release")
     args = parser.parse_args(argv)
 
     root = os.path.abspath(args.root)
@@ -2111,7 +2145,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("[vsw] 没有访客密钥：对外只有账号登录这一条路（想发访客链接就在「共享」里建一把）")
 
     port = pick_port(args.host, args.port)
-    server = build_server(proxy, args.host, port, access=access, auth=auth, hub=hub)
+    server = build_server(proxy, args.host, port, access=access, auth=auth, hub=hub,
+                         gh_repo=args.gh)
     url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{port}/"
     print(f"[vsw] 工作台已启动：{url}")
     ok, reason = service.vision.available()

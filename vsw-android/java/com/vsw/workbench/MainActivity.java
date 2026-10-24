@@ -8,6 +8,7 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.ViewGroup;
 import android.webkit.ConsoleMessage;
 import android.webkit.JavascriptInterface;
@@ -21,8 +22,15 @@ import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.Toast;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * 安卓外壳：一个 WebView 装载打包在 assets 里的手机端单文件 WebUI。
@@ -50,7 +58,7 @@ public class MainActivity extends Activity {
      * 用在应用名和启动屏里的构建标识。每次改 APK 都要改它 —— 这样"我装了新版吗"
      * 这个问题不需要靠猜（真机上真的发生过"装的是旧包"）。
      */
-    static final String BUILD_TAG = "r17";
+    static final String BUILD_TAG = "r18";
 
     private int assetBytes = 0;
     private long pageFileLength = 0;
@@ -466,6 +474,39 @@ public class MainActivity extends Activity {
         public String buildTag() {
             return BUILD_TAG;
         }
+
+        /** 问一次「云端最新版本」，结果经 window.vswUpdateInfo({...}) 回给页面。 */
+        @JavascriptInterface
+        public void checkUpdate(final String server) {
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    String json;
+                    try {
+                        json = fetchVersion(server);
+                    } catch (Exception exc) {
+                        json = "{\"error\":\"" + jsEscape(String.valueOf(exc.getMessage())) + "\"}";
+                    }
+                    deliverJs("window.vswUpdateInfo && window.vswUpdateInfo(" + json + ")");
+                }
+            }).start();
+        }
+
+        /**
+         * 下载安装包、校验 SHA256、交给系统安装器。
+         *
+         * 安卓不允许应用自己静默安装：这里只能把系统安装框调起来，最后一下得用户点。
+         * 校验是必须的 —— 半截的、被中间设备改过的包，绝不能交给安装器。
+         */
+        @JavascriptInterface
+        public void installUpdate(final String server, final String expectedSha) {
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    downloadAndInstall(server, expectedSha == null ? "" : expectedSha.trim());
+                }
+            }).start();
+        }
     }
 
     /** 扫二维码取工作台地址。相机权限在真要扫的时候才申请。 */
@@ -482,6 +523,186 @@ public class MainActivity extends Activity {
         String payload = text == null ? "" : text.replace("\\", "\\\\").replace("'", "\\'")
                 .replace("\n", "").replace("\r", "");
         web.evaluateJavascript("window.vswQrResult && window.vswQrResult('" + payload + "')", null);
+    }
+
+    // ------------------------------------------------------- 应用自我更新（服务端发布 + 系统安装器）
+    static final String UPDATE_SUBDIR = ApkProvider.SUBDIR;
+    static final String UPDATE_FILE = "vsw-workbench.apk";
+
+    /** 把一段 JS 丢回页面（必须在 WebView 的线程上做）。 */
+    private void deliverJs(final String script) {
+        if (web == null) return;
+        web.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    web.evaluateJavascript(script, null);
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+
+    /** 字符串塞进单引号 JS 字面量之前的转义。 */
+    private static String jsEscape(String value) {
+        if (value == null) return "";
+        return value.replace("\\", "\\\\").replace("'", "\\'")
+                .replace("\n", " ").replace("\r", " ")
+                .replace("\"", "\\\"");
+    }
+
+    /** 用户填的地址可能没有 scheme，也可能尾巴多一根斜杠。 */
+    private static String trimBase(String server) {
+        String base = server == null ? "" : server.trim();
+        while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+        if (!base.isEmpty() && !base.startsWith("http://") && !base.startsWith("https://")) {
+            base = "http://" + base;
+        }
+        return base;
+    }
+
+    private static String readAll(InputStream in) throws Exception {
+        if (in == null) return "";
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[16384];
+        int n;
+        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        in.close();
+        return new String(out.toByteArray(), "UTF-8");
+    }
+
+    /** 读 GET /api/app/version?build=r17，原样把 JSON 交给页面。 */
+    private String fetchVersion(String server) throws Exception {
+        String base = trimBase(server);
+        if (base.isEmpty()) throw new Exception("还没填电脑地址");
+        String url = base + "/api/app/version?build=" + Uri.encode(BUILD_TAG);
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(6000);
+        conn.setReadTimeout(20000);
+        conn.setRequestProperty("Accept", "application/json");
+        try {
+            int code = conn.getResponseCode();
+            String body = readAll(code >= 400 ? conn.getErrorStream() : conn.getInputStream());
+            if (code >= 400) throw new Exception("电脑回了 HTTP " + code);
+            String text = body == null ? "" : body.trim();
+            if (!text.startsWith("{")) throw new Exception("电脑回的不是 JSON");
+            return text;
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    /**
+     * 下载 → 校验 SHA256 → 弹系统安装器。
+     *
+     * 全程把进度推给页面（window.vswUpdateProgress(百分比, 说明)），失败推 vswUpdateFailed(原因)。
+     */
+    private void downloadAndInstall(String server, String expectedSha) {
+        File target = new File(new File(getCacheDir(), UPDATE_SUBDIR), UPDATE_FILE);
+        File part = new File(target.getAbsolutePath() + ".part");
+        try {
+            String base = trimBase(server);
+            if (base.isEmpty()) throw new Exception("还没填电脑地址");
+            String sha = expectedSha;
+            long total = 0;
+            if (sha.isEmpty()) {
+                // 页面没给校验值就自己问一次，别跳过校验
+                String json = fetchVersion(base);
+                org.json.JSONObject obj = new org.json.JSONObject(json);
+                sha = obj.optString("sha256", "");
+                total = obj.optLong("size", 0);
+            }
+            deliverJs("window.vswUpdateProgress && window.vswUpdateProgress(0,'开始下载')");
+
+            HttpURLConnection conn = (HttpURLConnection) new URL(base + "/api/app/apk").openConnection();
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(60000);
+            conn.setRequestProperty("Accept", "*/*");
+            int code = conn.getResponseCode();
+            if (code >= 400) throw new Exception("下载失败：HTTP " + code);
+            long declared = conn.getContentLength();
+            if (declared > 0) total = declared;
+
+            File dir = part.getParentFile();
+            if (dir != null && !dir.isDirectory()) dir.mkdirs();
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            InputStream in = conn.getInputStream();
+            FileOutputStream out = new FileOutputStream(part);
+            byte[] buf = new byte[32768];
+            long done = 0;
+            int shown = -1;
+            int n;
+            try {
+                while ((n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                    digest.update(buf, 0, n);
+                    done += n;
+                    int pct = total > 0 ? (int) Math.min(100, done * 100 / total)
+                            : (int) Math.min(95, done / 65536);
+                    if (pct != shown) {
+                        shown = pct;
+                        String text = total > 0
+                                ? String.format(Locale.US, "%d%% · %d/%d KB", pct, done / 1024, total / 1024)
+                                : String.format(Locale.US, "%d KB", done / 1024);
+                        deliverJs("window.vswUpdateProgress && window.vswUpdateProgress(" + pct
+                                + ",'" + jsEscape(text) + "')");
+                    }
+                }
+            } finally {
+                try { out.flush(); out.close(); } catch (Exception ignored) { }
+                try { in.close(); } catch (Exception ignored) { }
+            }
+            conn.disconnect();
+
+            byte[] raw = digest.digest();
+            StringBuilder hex = new StringBuilder(raw.length * 2);
+            for (byte b : raw) hex.append(String.format(Locale.US, "%02X", b));
+            String got = hex.toString();
+            if (!sha.isEmpty() && !got.equalsIgnoreCase(sha)) {
+                // 包不完整或被改过：删掉，别让用户装一个坏包
+                //noinspection ResultOfMethodCallIgnored
+                part.delete();
+                throw new Exception("校验不一致：期望 " + sha.substring(0, Math.min(12, sha.length()))
+                        + "… 实际 " + got.substring(0, Math.min(12, got.length())) + "…");
+            }
+            if (target.exists() && !target.delete()) {
+                throw new Exception("旧的安装包删不掉：" + target.getAbsolutePath());
+            }
+            if (!part.renameTo(target)) {
+                throw new Exception("下载好了但改名失败：" + target.getAbsolutePath());
+            }
+            deliverJs("window.vswUpdateProgress && window.vswUpdateProgress(100,'下载完成，正在调起安装器')");
+            startInstall(target);
+        } catch (Exception exc) {
+            try { if (part.isFile()) part.delete(); } catch (Exception ignored) { }
+            String message = String.valueOf(exc.getMessage());
+            deliverJs("window.vswUpdateFailed && window.vswUpdateFailed('" + jsEscape(message) + "')");
+        }
+    }
+
+    /** 安卓不允许静默安装：只能把系统安装框调起来，最后一下由用户点。 */
+    private void startInstall(File apk) {
+        if (Build.VERSION.SDK_INT >= 26
+                && !getPackageManager().canRequestPackageInstalls()) {
+            deliverJs("window.vswUpdateNeedPerm && window.vswUpdateNeedPerm()");
+            toast("请在设置里允许「安装未知应用」，然后回来再点一次「下载并安装」");
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getPackageName())));
+            } catch (Exception ignored) {
+            }
+            return;
+        }
+        Uri uri = ApkProvider.uriFor(apk.getName());
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setDataAndType(uri, "application/vnd.android.package-archive");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(intent);
+        } catch (Exception exc) {
+            toast("没能打开安装器：" + exc);
+            deliverJs("window.vswUpdateFailed && window.vswUpdateFailed('没能打开安装器')");
+        }
     }
 
     /** 外部链接（来源页、引擎识图页）交给系统浏览器，别在应用内打开。 */

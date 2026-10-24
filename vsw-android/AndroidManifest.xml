@@ -18,6 +18,9 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <!-- 自我更新：下载新的安装包之后，调起系统安装器需要这条权限（安卓 8.0+）。
+         仍然不会静默安装 —— 最后还是用户在系统弹框上点「安装」。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
@@ -30,6 +33,15 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="true">
+
+        <!-- 自我更新用：把下载好的 APK 以 content:// 交给系统安装器。
+             安卓 7 以后 file:// 会被拒（FileUriExposedException），而 androidx 的
+             FileProvider 会拖进一整套依赖，所以这里是自己写的最小只读 Provider。 -->
+        <provider
+            android:name=".ApkProvider"
+            android:authorities="com.vsw.workbench.files"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <!-- 说明：这里**故意不需要 FileProvider**。
              WebView 的 onShowFileChooser 会把相机/相册返回的 content URI 交给页面读取，
