@@ -164,6 +164,20 @@ def main(argv: List[str]) -> int:
     else:
         checker.check("aapt 可用", False, aapt)
 
+    # 清单里的 activity 声明：**光有类不够**。
+    # 踩过的真 bug（小米 9 / MIUI 12.5 / 安卓 11）：QrScanActivity.java 编译进了 dex，
+    # 但 AndroidManifest.xml 里没声明 → startActivity 抛 ActivityNotFoundException
+    # → 用户点「扫码」直接闪退。dex 里有类 ≠ 系统能启动它。
+    with zipfile.ZipFile(apk) as zf:
+        man = zf.read("AndroidManifest.xml")
+        man_text = man.decode("utf-16-le", errors="ignore")
+    for act in ("QrScanActivity", "WebSearchActivity", "ApkProvider"):
+        checker.check(f"清单里声明了 {act}", act in man_text,
+                      "" if act in man_text else "只在 dex 里、没在清单里 —— 一启动就崩")
+    if "QrScanActivity" in man_text:
+        checker.check("扫码页锁竖屏（相机预览旋转只按竖屏算）",
+                      "screenOrientation" in man_text)
+
     # ---------------------------------------------------------------- 3. 签名
     print("\n--- 3) 签名 ---")
     home = java_home()

@@ -460,6 +460,32 @@ python scripts/vsw-publish-apk.py --notes "这一版改了什么"
 再交给系统安装器（安装框得你自己点一下 —— Android 不允许应用静默安装）。
 本地没有包时会兜底去问 GitHub Releases（`--gh OWNER/REPO`）。
 
+### 断联电脑：手机上也能导入、也能搜（r21）
+
+以前断开电脑导入一张图，队列里既没有它也没有缩略图，必须先同步电脑 —— 因为离线那一支只
+把图塞进 `pending` 收件箱，本地不建种子、不建队列项。现在离线导入就地建：
+
+- 一条本地种子 + 一条本地队列项 + 两张本地图（320px 缩略图、原图）；
+- id 用**负数**（存在 `meta.localSeq`），不会和电脑上的 id 撞；
+- 队列页看得见缩略图、条目上标着「手机上」，「手机搜」直接用本地原图，全程不需要电脑；
+- 离线也能删，删的时候连带把「等回连后推给电脑」那条一起清掉；
+- 回连后 `flushPending()` 推给电脑进正式库，推成功就删掉本地影子记录，不会变成两条。
+
+同时修了两个「同步一次就没了」的地方：`refreshQueueFromServer()` 与 `syncSnapshot()` 在清空本地
+仓之前，都要把 `local: 1` 的种子/队列项留出来，写完服务端数据再补回去。
+
+### 扫码闪退的两个原因（r22）
+
+APK 里点「扫码」会闪退。第一个原因是清单里**没声明** `QrScanActivity`：类编译进了 dex，但
+`startActivityForResult` 找不到可启动的组件，抛 `ActivityNotFoundException`，没人接就崩。
+第二个原因在扫码页自己身上：它用 `takePicture` 的 JPEG 解码，而那是**照片**分辨率（小米 9 默认
+4000×3000），一张 48 MB 位图 + 48 MB 像素数组，MIUI 上很容易 `OutOfMemoryError`；而 OOM 是
+Error，`catch (Exception)` 接不住。
+
+现在：清单补上并锁竖屏、`pickPictureSize()` 把拍照尺寸压到 ≤200 万像素、解码按 `inSampleSize`
+缩到 800px 内、解码线程 `catch (Throwable)`、`openScanner()` 再兜一层 try/catch
+（打不开就提示手填地址）。
+
 ### 手机端的「自动搜图」（电脑干活，手机下单）
 
 手机的 WebView 里没有能替引擎上传一张图的内核 —— 那条链路要真实的文件选择框和真实 XHR。

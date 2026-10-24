@@ -2077,7 +2077,24 @@ def _print_qr(url: str) -> None:
         pass
 
 
+def _relax_console() -> None:
+    """让启动日志在任何控制台编码下都不会把服务搞崩。
+
+    真事：Windows 控制台默认 GBK，启动日志里那句「🔒 已上锁：N 条有效密钥」
+    带英文码点之外的字符，`print` 直接抛
+    `UnicodeEncodeError: 'gbk' codec can't encode character '\\U0001f512'`，
+    服务**还没开始监听就退出**了 —— 而且只在「库里有密钥」时出现，非常容易漏测。
+    这里把 stdout/stderr 改成 UTF-8 且 errors=replace：编码不认识的字变成 ?，
+    但服务照常起来。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _relax_console()
     parser = argparse.ArgumentParser(description="横向视觉搜索工作台 WebUI")
     parser.add_argument("--root", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"),
                         help="数据目录（SQLite + 媒体）")

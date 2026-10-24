@@ -674,6 +674,48 @@ Invoke-WebRequest 'https://repo1.maven.org/maven2/com/google/zxing/core/3.5.3/co
    `window.vswUpdateProgress/vswUpdateFailed/vswUpdateNeedPerm` —— **进度和报错全都静默无效**。
    改名对齐后，探针里专门验了「进度条走到 42%」「校验失败显示原因」「缺权限时指路去设置」。
 
+### 点「扫码」就闪退（r22）
+
+小米 9 / MIUI 12.5 / 安卓 11 上用户实测：点扫码直接闪退。
+
+根因：`QrScanActivity.java` 写好了、也编译进 dex 了，**但 AndroidManifest.xml 里没声明这个
+Activity** → `startActivityForResult(new Intent(this, QrScanActivity.class), REQ_SCAN)` 抛
+`ActivityNotFoundException`，没人接，进程就没了。
+
+第二个坑紧跟着：扫码页用 `takePicture` 的 JPEG 解码，而 `takePicture` 返回的是**照片**分辨率。
+小米 9 默认 4000×3000，解一张要 48 MB 位图 + 48 MB 像素数组；`OutOfMemoryError` 是 Error，
+`catch (Exception)` 接不住 —— 就算清单补好了，某些机型照样会死在解码那步。
+
+这一版：
+
+- 清单补 `.QrScanActivity`（`exported=false`，锁竖屏）；
+- 新增 `pickPictureSize()`：从 ≤200 万像素里挑最大的，相机不再回原尺寸图；
+- `decode()` 先 `inJustDecodeBounds` 再按 `inSampleSize` 缩到 800px 内，进内存的永远在 1M 像素内；
+- 解码线程 `catch (Throwable)`，OOM 只记日志、继续扫下一帧；
+- `openScanner()` 外面再包一层 try/catch，打不开就提示手填地址。
+
+`scripts/vsw-verify-apk.py` 也因此从 38 项加到 **42 项**：多了「清单里声明了
+QrScanActivity / WebSearchActivity / ApkProvider」「扫码页锁竖屏」四条 —— 之前的 38 项只查
+dex 里有没有类，**dex 里有类 ≠ 系统能启动它**，这次的 bug 就是从这条缝里过去的。
+
+### 断联电脑也能用（r21）
+
+用户实测：拔掉电脑从相册导入一张图，队列里既没有这张图也没有缩略图，「图不见了」，
+必须先连电脑才能搜。根因不在图，在离线那一支：`importOne()` 只把图塞进 IndexedDB 的
+`pending` 收件箱，本地既不建种子也不建队列项 —— 界面上当然什么都没有。
+
+现在（`vsw/static/mobile/index.html`）：离线导入就地建本地种子 + 本地队列项 + 320px 缩略图 +
+原图，id 一律用负数（`meta.localSeq` 分配），队列页立刻看得见图、标着「手机上」，
+「手机搜」用本地原图直接喂 WebView。离线删除也通（连带清掉 pending 那条），回连后
+`flushPending()` 推给电脑进正式库并删掉本地影子记录。
+
+一起修的两个「同步一次就没了」：`refreshQueueFromServer()` 与 `syncSnapshot()` 清空本地仓之前，
+先把 `local: 1` 的行留出来，写完服务端数据再补回去。
+
+另外修了一个只在「库里有访问密钥」时才出现的启动崩溃：Windows 控制台是 GBK，
+`print("[vsw] \U0001f512 已上锁…")` 抛 `UnicodeEncodeError`，服务还没监听就退出。
+`main()` 现在先把 stdout/stderr 改成 UTF-8 + `errors="replace"`。
+
 ### 手机自己搜（r19）：先纠正我自己说错的一句话
 
 上一版我写过「手机跑不了无头浏览器，所以自动识图只能在电脑上」。这句把两件事混了：

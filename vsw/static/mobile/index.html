@@ -590,6 +590,8 @@ const KEY = {
   seedThumb: (id) => `sthumb:${id}`,
   variantThumb: (id) => `vthumb:${id}`,
   archivedThumb: (id) => `athumb:${id}`,
+  // 手机上导入的原图（还没进电脑的那张）。id 是负数，见 importOffline。
+  localFull: (id) => `lfull:${id}`,
 };
 
 function db() {
@@ -801,6 +803,9 @@ async function syncSnapshot() {
       + `&trash=${withTrash ? 1 : 0}&archives=1`);
     $('#syncNote').textContent = '正在写入本地库…';
     fill.style.width = '35%';
+    // 手机上导入、还没推给电脑的那些（id 为负）要留下来，别被快照清掉
+    const keepJobs = (S.jobs || []).filter((j) => j && j.local);
+    const keepSeeds = (S.seeds || []).filter((x) => x && x.local);
     await Promise.all(['findings', 'trash', 'archived', 'archives', 'jobs', 'seeds', 'variants']
       .map((s) => local.clear(s)));
     for (const row of snap.findings || []) await local.put('findings', row);
@@ -810,6 +815,8 @@ async function syncSnapshot() {
     for (const row of snap.jobs || []) await local.put('jobs', row);
     for (const row of snap.seeds || []) await local.put('seeds', row);
     for (const row of snap.variants || []) await local.put('variants', row);
+    for (const row of keepJobs) await local.put('jobs', row);
+    for (const row of keepSeeds) await local.put('seeds', row);
     fill.style.width = '60%';
     const total = (snap.findings || []).length + (snap.trash || []).length;
     let done = 0;
@@ -891,7 +898,16 @@ async function flushPending() {
   $('#pendingInfo').textContent = '正在推回电脑…';
   try {
     const res = await post('/api/mobile/sync', { imports, trash: trashIds });
-    for (const row of rows) await local.del('pending', row.key);
+    for (const row of rows) {
+      // 这条已经进了电脑的正式库，本地的影子记录（负数 id）就没用了
+      const shadow = row.kind === 'import' && row.payload && row.payload.local_job;
+      if (shadow) {
+        const job = (S.jobs || []).find((j) => j.id === shadow) || {};
+        await dropLocalJob(shadow, job.seed_id === undefined ? null : job.seed_id);
+      }
+      await local.del('pending', row.key);
+    }
+    await reloadJobsAndSeeds();
     const okImports = (res.imported || []).length;
     const okTrash = (res.trashed || []).length;
     toast(`推回完成：导入 ${okImports} 张、回收站 ${okTrash} 个`
@@ -1308,6 +1324,8 @@ function blobToBase64(blob) {
 /** 队列项要搜的那张图：优先变体图，其次种子原图（都在本地库里）。 */
 async function jobImageBase64(job) {
   const keys = [];
+  // 手机上导入、还没同步给电脑的那几条：图只有本地一份原图，先用它
+  if (job.local && job.seed_id) keys.push(KEY.localFull(job.seed_id));
   if (job.variant_id) keys.push(KEY.variantThumb(job.variant_id));
   if (job.seed_id) keys.push(KEY.seedThumb(job.seed_id));
   for (const key of keys) {
@@ -1516,15 +1534,38 @@ function renderQueueActions(rows) {
 /** 删除队列项（只删队列记录，已产出的结果不动）。 */
 async function deleteQueueJobs(ids, label) {
   if (!ids.length) return toast('没有可删除的队列项');
-  if (!S.online) return toast('删除队列项需要连上电脑上的工作台', true);
+  // 本地（手机上导入、还没同步）的和电脑上的分开处理：前者不需要联网
+  const localIds = ids.filter((id) => S.jobs.some((j) => j.id === id && j.local));
+  const serverIds = ids.filter((id) => !localIds.includes(id));
+  if (serverIds.length && !S.online) return toast('删除电脑上的队列项需要连上电脑', true);
   const ok = confirm(`删除${label} ${ids.length} 个队列项？\n只删队列记录，已经产出的结果和种子都不受影响。`);
   if (!ok) return;
   try {
-    const out = await post('/api/queue/delete', { job_ids: ids });
+    let removed = 0;
+    if (serverIds.length) {
+      const out = await post('/api/queue/delete', { job_ids: serverIds });
+      removed += Number(out.removed) || 0;
+    }
+    if (localIds.length) {
+      const rows = await local.all('pending');
+      for (const id of localIds) {
+        const job = S.jobs.find((j) => j.id === id) || {};
+        await dropLocalJob(id, job.seed_id);
+        // 连带把「等回连后推给电脑」的那条也去掉，否则删了又会被推回来
+        for (const row of rows) {
+          if (row.kind === 'import' && row.payload && row.payload.local_job === id) {
+            await local.del('pending', row.key);
+          }
+        }
+        removed += 1;
+      }
+      await refreshPending();
+    }
     S.queueSelectMode = false;
     S.queueSelected.clear();
-    toast(`已删除 ${out.removed} 个队列项`);
-    await refreshQueueFromServer();
+    toast(`已删除 ${removed} 个队列项`);
+    if (serverIds.length) await refreshQueueFromServer();
+    await reloadJobsAndSeeds();
   } catch (e) {
     toast(`删除失败：${e.message}`, true);
   }
@@ -1541,9 +1582,12 @@ async function refreshQueueFromServer(opts) {
     const priority = { running: 0, pending: 1, review: 2, done: 3 };
     rows.sort((a, b) => (priority[a.status] ?? 4) - (priority[b.status] ?? 4)
       || (b.id - a.id));
+    // 本地（手机上导入、还没同步）的那几条不能被电脑的队列冲掉
+    const keep = (S.jobs || []).filter((j) => j && j.local);
     await local.clear('jobs');
     for (const row of rows) await local.put('jobs', row);
-    S.jobs = rows;
+    for (const row of keep) await local.put('jobs', row);
+    S.jobs = rows.concat(keep);
     S.queueDirty = false;
     if (S.tab === 'queue') renderQueue();
   } catch (e) {
@@ -1697,6 +1741,7 @@ function renderQueue() {
         : `<img alt="" style="opacity:.25" data-want-job-thumb="${j.id}">`}
       <div>
         <div class="t1">${esc(j.engine_name || j.engine)} · ${esc(j.variant_label || QUEUE_KIND_LABEL[j.variant_kind] || j.variant_kind || '')}
+          ${j.local ? '<span class="st">手机上</span>' : ''}
           <span class="st ${j.status}">${STATUS[j.status] || j.status}</span>
           ${j.findings ? `<span class="st done">产出 ${j.findings}</span>` : ''}</div>
         <div class="t2">#${j.id} 种子「${esc((j.seed_title || '').slice(0, 18))}」</div>
@@ -1711,7 +1756,7 @@ function renderQueue() {
                ${phoneSearchReady() && PHONE_SEARCH[j.engine]
                  ? `<button class="btn sm" data-act="phone" data-id="${j.id}">手机搜</button>` : ''}
                <button class="btn sm ghost" data-act="del" data-id="${j.id}"
-                 ${S.online ? '' : 'disabled'}>删除</button>`}
+                 ${(S.online || j.local) ? '' : 'disabled'}>删除</button>`}
         </div>
       </div>
     </div>`;
@@ -2680,6 +2725,87 @@ function openImportSheet() {
   renderImportList();
 }
 
+/* ---------------------------------------------------------------- 离线导入（不连电脑也能搜）
+ *
+ * 用户实测反馈的真问题：拔掉电脑从相册导入一张图，队列里既看不到这张图、也没有缩略图，
+ * 「图不见了」，而且必须先同步电脑才能搜。原因不是图丢了 —— 是离线那一支只把图塞进
+ * 「离线收件箱」（pending），本地既不建种子也不建队列项，界面上自然什么都没有。
+ *
+ * 现在离线导入就地建：一条本地种子 + 一条本地队列项 + 两张本地图（缩略图 / 原图）。
+ * id 一律用**负数**，永远不会和电脑上的 id 撞（队列页到处 Number(id)，负数照样能用）。
+ * 连上电脑后 flushPending 把它推回电脑，推成功后删掉这条影子记录，避免队列里出现两条。
+ */
+
+const LOCAL_SEQ_KEY = 'localSeq';
+
+/** 分配一个本地 id（-1, -2, -3 …），持久化在 meta 里，重启后不会重用。 */
+async function nextLocalId() {
+  const rec = await local.get('meta', LOCAL_SEQ_KEY);
+  const next = Number((rec && rec.value) || 0) + 1;
+  await local.put('meta', { key: LOCAL_SEQ_KEY, value: next });
+  return -next;
+}
+
+/** 造一张最长边 320px 的缩略图（队列列表用）。造不出来就退回原图。 */
+async function makeThumb(file, max = 320) {
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * scale));
+  const h = Math.max(1, Math.round(bmp.height * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.78));
+  const size = { w: bmp.width, h: bmp.height };
+  try { bmp.close(); } catch (e) { /* 老 WebView 没有 close */ }
+  return { blob: blob || file, size };
+}
+
+/** 离线导入：本地建种子 + 队列项 + 图。返回 { seedId, jobId }。 */
+async function importOffline(file, name) {
+  const stamp = Math.round(Date.now() / 1000);
+  const made = await makeThumb(file).catch(() => null);
+  const size = (made && made.size) || { w: 0, h: 0 };
+  const seedId = await nextLocalId();
+  const jobId = await nextLocalId();
+  await storeBlob(KEY.seedThumb(seedId), (made && made.blob) || file, { local: 1, kind: 'seed' });
+  await storeBlob(KEY.localFull(seedId), file, { local: 1, kind: 'full' });
+  const seed = {
+    id: seedId, local: 1, title: name, w: size.w, h: size.h,
+    thumb_path: '', rel_path: '', source_count: 0, created_at: stamp,
+  };
+  const job = {
+    id: jobId, local: 1, seed_id: seedId, seed_title: name, variant_id: null,
+    variant_kind: 'full', variant_label: '全图（手机上导入）',
+    engine: 'baidu', engine_name: '百度识图', status: 'pending', findings: 0,
+    created_at: stamp,
+  };
+  await local.put('seeds', seed);
+  await local.put('jobs', job);
+  S.jobs = await local.all('jobs');
+  S.seeds = await local.all('seeds');
+  return { seedId, jobId };
+}
+
+/** 推回电脑成功后，把本地那条影子记录连同图一起删掉。 */
+async function dropLocalJob(jobId, seedId) {
+  await local.del('jobs', jobId);
+  const sid = seedId === undefined || seedId === null ? null : seedId;
+  if (sid !== null) {
+    await local.del('seeds', sid);
+    await local.del('assets', KEY.seedThumb(sid));
+    await local.del('assets', KEY.localFull(sid));
+  }
+}
+
+/** 只重载队列与种子（导入/删除本地项之后用，不惊动整页）。 */
+async function reloadJobsAndSeeds() {
+  S.jobs = await local.all('jobs');
+  S.seeds = await local.all('seeds');
+  if (S.tab === 'queue') renderQueue();
+}
+
 /** 导入单张。**不关面板** —— 关面板这个动作留给用户（返回按钮）。 */
 async function importOne(entry) {
   const kindsMode = localStorage.getItem('vsw.importKinds') || 'full';
@@ -2718,11 +2844,18 @@ async function importOne(entry) {
       entry.detail = e.message;
     }
   } else {
-    // 离线：进收件箱，等回连再推。这也算"处理完了"，所以标成 queued 而不是 idle。
+    // 离线：本地就地建种子 + 队列项 + 图 —— 队列里马上能看见、也能「手机搜」。
+    // 同时往离线收件箱塞一条，回连后推给电脑进正式库（推成功后本地影子记录会被删掉）。
     try {
-      await queuePending('import', payload);
+      let made = entry.made;
+      if (!made) {
+        made = await importOffline(entry.file, entry.name || '手机导入');
+        entry.made = made;
+      }
+      await queuePending('import', Object.assign({}, payload, { local_job: made.jobId }));
       entry.status = 'queued';
-      entry.detail = '已存进离线收件箱';
+      entry.detail = '已存进手机：队列里能看见，可以「手机搜」';
+      await reloadJobsAndSeeds();
     } catch (e) {
       entry.status = 'failed';
       entry.detail = e.message;

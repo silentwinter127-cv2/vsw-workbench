@@ -2,5 +2,5 @@
 <resources>
     <!-- 名字里带构建号：装了之后在启动器/应用信息里一眼就能确认装的是哪个包，
          省得"我明明装了新版"却其实还是旧包（真发生过）。 -->
-    <string name="app_name">视觉工作台 r20</string>
+    <string name="app_name">视觉工作台 r22</string>
 </resources>

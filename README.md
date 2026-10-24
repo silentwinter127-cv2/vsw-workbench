@@ -280,6 +280,78 @@ Looper.prepare()` —— 安装器根本没被调起来，界面还把这句英�
 | 队列条目右侧「自动识图 / 打开识图」整排不见了 | 条目网格中间格是 `1fr`，里面放的 base64 文件名没有空格，min-content 被撑到上千像素 | 改成 `minmax(0,1fr)` + `min-width: 0`，700px 以下按钮换行（条目高 2203 → 155px） |
 | 手机上勾了归档批次，「合并查看」点了没反应 | CSS 写的是 `.btn[disabled]`（属性选择器），而 `el.disabled = true` 只设 DOM 属性、不写 HTML 特性 → 选择器匹配不到，按钮看着能点；勾到的又是空批次 | `.btn:disabled` 一起处理；按钮只按勾选数禁用；空批次明确提示「对象已经不在（被恢复归档或删除）」；「已归档」指标改读 `S.archived` |
 
+## 手机上断联电脑也能导入和搜（r21）
+
+用户报的原话：「断联电脑进行测试，手机图片上传之后，队列里的缩略图看不见，而且图片也不见了，
+必须同步电脑才可以进行搜索」。这不是图丢了 —— 是**离线那一支压根没建条目**。
+
+改之前：断开电脑时导入一张图，`importOne()` 只把 `data_url` 塞进 IndexedDB 的 `pending`
+收件箱（状态写成「已存进离线收件箱」），本地既不建种子也不建队列项。所以队列页当然没有它，
+缩略图当然没有，「手机搜」也拿不到图 —— 界面上看起来就是「图不见了」。
+
+改之后（`vsw/static/mobile/index.html`）：
+
+| 动作 | 现在的行为 |
+| --- | --- |
+| 离线导入一张图 | 就地建一条本地种子 + 一条本地队列项 + 两张本地图（320px 缩略图、原图） |
+| id 怎么分 | 一律用**负数**（-1、-2…），存在 `meta.localSeq` 里，永远不会和电脑上的 id 撞 |
+| 队列页 | 看得见缩略图，条目上标着「手机上」，`待搜索` 状态照常参与筛选 |
+| 「手机搜」 | 直接用本地那张**原图**（不是缩略图）喂给 WebView，完全不需要电脑 |
+| 删除 | 本地项离线也能删，连带把「等回连后推给电脑」那条 pending 一起清掉 |
+| 回连电脑 | `flushPending()` 把它推给电脑进正式库，推成功后删掉本地影子记录，不会出现两条 |
+
+顺带两个必须一起改的地方，否则「同步一次就没了」：
+
+- `refreshQueueFromServer()` 原来 `local.clear('jobs')` 之后只塞服务端的行 —— 现在先把 `local: 1`
+  的行留出来，写完服务端再补回去。
+- `syncSnapshot()` 要清七个仓再灌快照 —— 同样把本地种子与队列项留出来重灌。
+
+## 一个只在「库里有密钥」时才炸的启动 bug（r21）
+
+`vsw/server.py` 启动日志里有一句 `print(f"[vsw] 🔒 已上锁：{n} 条有效密钥")`。Windows 控制台默认
+GBK，`print` 直接抛：
+
+```
+UnicodeEncodeError: 'gbk' codec can't encode character '\U0001f512' in position 6: illegal multibyte sequence
+```
+
+服务**还没开始监听就退出**了。它只在「数据目录里已经有访问密钥」时出现 —— 新建的空库不会触发，
+所以很容易漏测（我是在做离线探针、复制真实数据起临时服务时才撞上，一撞就起不来）。
+
+修法：`main()` 第一行调 `_relax_console()`，把 `sys.stdout/stderr` 改成 `encoding="utf-8",
+errors="replace"`。编码不认识的字变成 `?`，但服务照常起来 —— 启动日志的重要性远低于服务本身。
+
+## 点「扫码」就闪退（r22）
+
+用户报：「扫二维码功能会闪退」，机型小米 9 / MIUI 12.5 / 安卓 11。
+
+根因很直接，也很丢人：`QrScanActivity.java` 写了两百多行、编译进了 dex，**但
+`AndroidManifest.xml` 里从来没声明过这个 Activity**。于是
+
+```java
+startActivityForResult(new Intent(this, QrScanActivity.class), REQ_SCAN);
+```
+
+抛 `ActivityNotFoundException`，没人接，进程直接死 —— 界面上看就是「点扫码，闪退」。
+
+这类 bug 之所以能活到现在，是因为验证脚本只查了「类在不在 dex 里」，没查「清单里有没有声明」。
+**dex 里有类 ≠ 系统能启动它。** 现在两件都查（`scripts/vsw-verify-apk.py` 从 38 项加到 42 项）。
+
+顺手修的第二层问题在扫码页本身：它用 `takePicture` 的 JPEG 解码，而 `takePicture` 给的是
+**照片**分辨率（不是预览分辨率）。小米 9 默认 4000×3000，解一张就是 48 MB 位图 + 48 MB 像素数组，
+加上灰度缓冲，一百多 MB 瞬间要下来 —— MIUI 上 `OutOfMemoryError` 是随时的事，而
+`catch (Exception)` **接不住 Error**。
+
+所以这一版：
+
+| 改法 | 作用 |
+| --- | --- |
+| `pickPictureSize()`：从 ≤200 万像素里挑最大的 | 相机不再回 12MP 的图 |
+| `decode()` 先 `inJustDecodeBounds` 再按 `inSampleSize` 缩到 800px 内 | 不管相机给多大，进内存的都在 1M 像素内 |
+| 解码线程 `catch (Throwable)` | OOM 不再拉崩应用，记一条日志继续扫下一帧 |
+| 清单补 `<activity android:name=".QrScanActivity">`，锁竖屏 | 能启动了；预览旋转只按竖屏算，锁上更稳 |
+| `openScanner()` 外面再包一层 try/catch | 万一还打不开，提示手填地址，不闪退 |
+
 ## 自测
 
 ```bash
@@ -305,7 +377,9 @@ python scripts/vsw-check-syntax.py                                            # 
 `-trash-thumbs.js`（5）、`-archive-view.js`（20）、`-archive-merge.js`（40）、
 `-archive-merge-pick.js`（15，勾选与空批次）、`-auto-search.js`（17，自动搜图按钮与进度）、
 `-update-ui.js`（31，更新卡片、进度、失败、权限）、`-phone-search.js`（20，手机搜：桥接前不显示、
-把图与提取脚本交给原生、结果面板、没图要提示）。
+把图与提取脚本交给原生、结果面板、没图要提示）、`-offline.js`（25，**完全不给服务器地址**时的离线导入：建条目、缩略图看得见、
+手机搜拿得到原图、刷新队列冲不掉、离线删除连带清 pending）。
+`vsw-verify-apk.py` 现在 42 项（多了 4 项清单声明检查：扫码页 / 手机搜页 / Provider / 竖屏）。
 服务端一旦开了账号，这些探针都要带 `--sid <会话令牌>` 跑（否则它们的接口调用全是 401）：
 
 ```bash

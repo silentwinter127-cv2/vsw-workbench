@@ -58,7 +58,7 @@ public class MainActivity extends Activity {
      * 用在应用名和启动屏里的构建标识。每次改 APK 都要改它 —— 这样"我装了新版吗"
      * 这个问题不需要靠猜（真机上真的发生过"装的是旧包"）。
      */
-    static final String BUILD_TAG = "r20";
+    static final String BUILD_TAG = "r22";
 
     private int assetBytes = 0;
     private long pageFileLength = 0;
@@ -552,7 +552,23 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_SCAN_PERM);
             return;
         }
-        startActivityForResult(new Intent(this, QrScanActivity.class), REQ_SCAN);
+        openScanner();
+    }
+
+    /**
+     * 打开扫码页。
+     *
+     * 踩过的坑：清单里忘了声明 QrScanActivity，`startActivityForResult` 直接抛
+     * ActivityNotFoundException，没人接 → 用户点「扫码」就闪退（小米 9 / MIUI 12.5 / 安卓 11）。
+     * 清单补上了，这里再兜一层：真打不开就提示改手填，别拉着整个应用一起死。
+     */
+    private void openScanner() {
+        try {
+            startActivityForResult(new Intent(this, QrScanActivity.class), REQ_SCAN);
+        } catch (Throwable exc) {
+            toast("这台手机上打不开扫码页，请直接手填电脑地址");
+            deliverScanResult("");
+        }
     }
 
     private void deliverScanResult(String text) {
@@ -851,7 +867,7 @@ public class MainActivity extends Activity {
         }
         if (requestCode == REQ_SCAN_PERM) {
             if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
-                startActivityForResult(new Intent(this, QrScanActivity.class), REQ_SCAN);
+                openScanner();
             } else {
                 toast("没有相机权限，可以手填电脑地址");
                 deliverScanResult("");

@@ -63,6 +63,15 @@
         <!-- 手机自己跑识图：WebView 里打开引擎网页，用 onShowFileChooser 把预先选好的图
              交给网页的 <input type=file>。浏览器要求文件选择器必须由用户手势触发，
              所以这一页是「半自动」：选图由原生代劳，用户只需要点一下页面的上传按钮。 -->
+        <!-- 扫码页。**必须在这里声明**，否则 startActivity 直接抛 ActivityNotFoundException
+             —— 那就是用户报的「扫二维码会闪退」（小米 9 / MIUI 12.5 / 安卓 11 上实测）。
+             竖屏锁定：相机预览的旋转换算只按竖屏算，允许旋转会在部分机型上预览倒过来。 -->
+        <activity
+            android:name=".QrScanActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode"
+            android:screenOrientation="portrait" />
+
         <activity
             android:name=".WebSearchActivity"
             android:exported="false"

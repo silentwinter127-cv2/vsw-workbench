@@ -48,6 +48,10 @@ public class QrScanActivity extends Activity implements SurfaceHolder.Callback, 
 
     private static final String TAG = "vsw-qr";
     private static final long FRAME_INTERVAL_MS = 260;   // 约 4 帧/秒，静态目标够用且不烫手
+    /** 解码前把画面缩到这个边长以内：二维码 600px 就够认，原图直接解会 OOM。 */
+    private static final int DECODE_MAX_SIDE = 800;
+    /** 拍照尺寸也不超过这个：1200×1600 足够解二维码。 */
+    private static final int PICTURE_MAX_PIXELS = 1600 * 1200;
 
     private SurfaceView surface;
     private TextView hint;
@@ -165,6 +169,14 @@ public class QrScanActivity extends Activity implements SurfaceHolder.Callback, 
             if (previewSize != null) {
                 params.setPreviewSize(previewSize.width, previewSize.height);
             }
+            // 拍照尺寸也要挑小的：takePicture 给的是「照片」分辨率，不是预览分辨率。
+            // 小米 9 这类机型默认 4000×3000，解码时那一张位图 + 像素数组就要吃掉一百多 MB，
+            // 在 MIUI 上很容易 OutOfMemoryError —— 而 OOM 是 Error 不是 Exception，
+            // 原来的 catch 接不住，表现就是"点扫码，闪退"。
+            Camera.Size pictureSize = pickPictureSize(params.getSupportedPictureSizes());
+            if (pictureSize != null) {
+                params.setPictureSize(pictureSize.width, pictureSize.height);
+            }
             // 连续对焦对近距离拍屏幕最有用；不支持就退回自动对焦
             List<String> focusModes = params.getSupportedFocusModes();
             if (focusModes != null) {
@@ -200,6 +212,29 @@ public class QrScanActivity extends Activity implements SurfaceHolder.Callback, 
             }
         }
         return best != null ? best : sizes.get(0);
+    }
+
+    /**
+     * 拍照尺寸：从「不超过 200 万像素」的里面挑最大的；一个都比它大就挑最小的那个。
+     *
+     * 为什么要单独挑：`setPreviewSize` 管的是预览流，`takePicture` 返回的是**照片**尺寸，
+     * 两者互不相干。很多机型照片默认 4000×3000，解一张就是 48 MB 位图 + 48 MB int 数组。
+     */
+    private Camera.Size pickPictureSize(List<Camera.Size> sizes) {
+        if (sizes == null || sizes.isEmpty()) return null;
+        Camera.Size best = null;
+        Camera.Size smallest = null;
+        for (Camera.Size size : sizes) {
+            long pixels = (long) size.width * size.height;
+            if (smallest == null || pixels < (long) smallest.width * smallest.height) {
+                smallest = size;
+            }
+            if (pixels > PICTURE_MAX_PIXELS) continue;
+            if (best == null || pixels > (long) best.width * best.height) {
+                best = size;
+            }
+        }
+        return best != null ? best : smallest;
     }
 
     private int displayRotation() {
@@ -258,8 +293,10 @@ public class QrScanActivity extends Activity implements SurfaceHolder.Callback, 
                 String text = null;
                 try {
                     text = decode(frame);
-                } catch (Exception exc) {
-                    Log.w(TAG, "decode: " + exc.getMessage());
+                } catch (Throwable exc) {
+                    // 这里必须接 Throwable 而不是 Exception：解码一张大图最可能抛的是
+                    // OutOfMemoryError，它是 Error，catch (Exception) 接不住 —— 接不住就是闪退。
+                    Log.w(TAG, "decode failed: " + exc);
                 }
                 final String found = text;
                 main.post(new Runnable() {
@@ -284,23 +321,42 @@ public class QrScanActivity extends Activity implements SurfaceHolder.Callback, 
 
     /** 用 ZXing 解一帧 JPEG。正面和反色各试一次（屏幕反光或深色码都能兜住）。 */
     private String decode(byte[] jpeg) {
-        android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
+        // 先只读尺寸，再按 inSampleSize 缩着解 —— 不管相机给了多大的图，进内存的都在 1M 像素上下。
+        // 这一步是修"扫码闪退"的关键：整张 12MP 原图直接解会 OutOfMemoryError。
+        android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, bounds);
+        int sample = 1;
+        int longest = Math.max(bounds.outWidth, bounds.outHeight);
+        while (longest / sample > DECODE_MAX_SIDE) {
+            sample *= 2;
+        }
+
+        android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
+        opts.inSampleSize = sample;
+        opts.inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888;
+        android.graphics.Bitmap bitmap =
+                android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length, opts);
         if (bitmap == null) return null;
         int width = bitmap.getWidth();
         int height = bitmap.getHeight();
-        int[] pixels = new int[width * height];
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
-        bitmap.recycle();
-
-        // 自己转灰度：RGBLuminanceSource 只看红通道，屏幕照片的偏色会拖累识别
         byte[] gray = new byte[width * height];
-        for (int i = 0; i < pixels.length; i++) {
-            int color = pixels[i];
-            int r = (color >> 16) & 0xFF;
-            int g = (color >> 8) & 0xFF;
-            int b = color & 0xFF;
-            gray[i] = (byte) ((r * 77 + g * 151 + b * 28) >> 8);
+        try {
+            int[] pixels = new int[width * height];
+            bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
+
+            // 自己转灰度：RGBLuminanceSource 只看红通道，屏幕照片的偏色会拖累识别
+            for (int i = 0; i < pixels.length; i++) {
+                int color = pixels[i];
+                int r = (color >> 16) & 0xFF;
+                int g = (color >> 8) & 0xFF;
+                int b = color & 0xFF;
+                gray[i] = (byte) ((r * 77 + g * 151 + b * 28) >> 8);
+            }
+        } finally {
+            bitmap.recycle();
         }
+
         String text = tryDecode(new GraySource(gray, width, height));
         if (text != null) return text;
         // 反色再试一次：屏幕上深底浅码、或者拍照时反光严重的情况都能兜住
