@@ -1185,6 +1185,24 @@ class Handler(BaseHTTPRequestHandler):
         host = self._client_ip()
         return host in ("::1", "localhost", "0:0:0:0:0:0:0:1") or host.startswith("127.")
 
+    def _is_local(self) -> bool:
+        """请求是不是**跑服务的这台机器**自己发出来的。
+
+        为什么不只认回环：在这台机器上用局域网地址打开（``http://192.168.1.46:8799/``）
+        非常常见 —— 用户可能就是从分享面板里点进去的。那时对端 IP 正是本机的一块网卡
+        地址，安全性上和 127.0.0.1 没有任何区别（都是同一台机器、同一个用户）。
+
+        所以「第一台电脑能建账号」这句话要按**机器**判断，而不是按**回环**判断：
+        否则用户照着面板提示点开局域网地址，反而被挡住。
+        """
+        if self._is_loopback():
+            return True
+        host = self._client_ip()
+        try:
+            return host in set(lan_addresses())
+        except Exception:  # 网卡枚举失败时保守起来，当作外部请求
+            return False
+
     def _set_session(self, token: str) -> None:
         self._cookies = getattr(self, "_cookies", []) or []
         self._cookies.append(f"{SESSION_COOKIE}={urllib.parse.quote(token)}; Path=/; HttpOnly; "
@@ -1208,7 +1226,7 @@ class Handler(BaseHTTPRequestHandler):
         if not user:
             return {"logged_in": False, "accounts": bool(self.auth and self.auth.has_users()),
                     "can_setup": bool(self.auth and not self.auth.has_users()
-                                      and self._is_loopback())}
+                                      and self._is_local())}
         mine: List[Dict[str, Any]] = []
         for row in self.auth.memberships_of(int(user["id"])) if self.auth else []:
             mine.append({"id": int(row["id"]), "name": row.get("name"), "kind": row.get("kind"),
@@ -1266,8 +1284,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.auth.has_users():
                 self._deny(400, "已经有账号了：让主人给你开一个，或者用邀请码注册")
                 return
-            if not self._is_loopback():
-                self._deny(403, "第一次建账号只能在跑服务的那台电脑上做（浏览器打开 127.0.0.1 那个地址）")
+            if not self._is_local():
+                self._deny(403, "第一次建账号只能在跑服务的那台电脑上做"
+                                "（在那台机器上用 127.0.0.1 或它自己的局域网地址打开）")
                 return
             body, _ = self._read_body()
             name = str(body.get("name") or "").strip()
@@ -1357,7 +1376,7 @@ class Handler(BaseHTTPRequestHandler):
             accounts = self.auth.has_users()
             self._send(401, {"error": "需要登录" if accounts else "还没建账号",
                              "need_login": accounts, "need_setup": not accounts,
-                             "can_setup": bool(not accounts and self._is_loopback()),
+                             "can_setup": bool(not accounts and self._is_local()),
                              "hint": "用邀请码注册，或者用主人给的密码登录"})
             return
 

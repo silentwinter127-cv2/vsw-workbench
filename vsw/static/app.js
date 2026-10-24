@@ -2148,9 +2148,10 @@ function renderShare(info) {
     </div>
     ${noAccounts ? `<p class="hint small">建了账号以后：每人一个私人工作区（一个工作区 = 一个数据目录），
       你还能邀请别人协作。现在这份数据会归到第一个账号名下。</p>` : ''}
-    ${needLocal ? `<p class="hint small">建账号只能在跑服务的那台电脑上做 —— 在那台机器上用
-      <code>http://127.0.0.1:8799/</code> 打开这个页面，右上角就有「建第一个账号」。
-      这是刻意的：谁能第一次建号，谁就是这个工作台的主人。</p>` : ''}`;
+    ${needLocal ? `<p class="hint small">你现在是从<b>别的设备</b>打开的，所以这里不能建账号。
+      建号只能在跑服务的那台电脑上做：在那台机器上用
+      <code>http://127.0.0.1:8799/</code>（或它自己的局域网地址）打开这个页面，
+      右上角就有「建第一个账号」。这是刻意的 —— 谁能第一次建号，谁就是这个工作台的主人。</p>` : ''}`;
   const makeAcc = $('#shareMakeAccount');
   if (makeAcc) makeAcc.onclick = () => {
     closeShare();

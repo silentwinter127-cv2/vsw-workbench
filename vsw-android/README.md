@@ -8,7 +8,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `vsw-workbench.apk` | 可直接安装的 release 包（约 602 KB，用你自己的密钥库自签） |
+| `vsw-workbench.apk` | 可直接安装的 release 包（约 602 KB，用你自己的密钥库自签；当前 r15 为 616,493 字节） |
 | `vsw-workbench-debug.apk` | 带调试签名的版本（`build_apk.bat` 不带参数时的产物） |
 
 包名 `com.vsw.workbench` · 应用名「视觉搜索工作台」· minSdk 24（Android 7.0+）· targetSdk 34。
@@ -97,7 +97,7 @@ node ../scripts/vsw-probe-archive-merge.js --apk ../vsw-workbench.apk --origin h
 # 9) 访客密钥：上锁、角色分级、失败限速、页面壳子免检（45 项）
 python ../scripts/vsw-probe-access.py
 
-# 10) 账号 / 私人工作区 / 协作：建号、邀请码、隔离、会话头、共用语义引擎（61 项）
+# 10) 账号 / 私人工作区 / 协作：建号、邀请码、隔离、会话头、共用语义引擎、本机/远程判定（65 项）
 python ../scripts/vsw-probe-accounts.py
 
 # 0) 语法闸门：内联脚本一处语法错，整页就不能点（比行为探针便宜得多，先跑它）
@@ -392,6 +392,21 @@ APK 里的页面是 `file://`，浏览器不会替它带 cookie —— 所以身
 
 顺带修顶栏：按钮挤在一起时「建第一个账号」被折成两行 —— `.topbar > *{flex:0 0 auto}` +
 `white-space:nowrap`。
+
+### 建号判断从「回环」改成「本机」（r15）
+
+r14 的修法还留着一个坑：**在这台机器上用局域网地址打开，仍然建不了号**。
+用户是从共享面板里点开 `http://192.168.1.46:8799/` 的，`can_setup` 却是 `false`，
+点按钮只跳回"去 127.0.0.1 打开"的说明 —— 那句话本身没错，但对同一台机器是多余的。
+
+`vsw/server.py` 新增 `Handler._is_local()`：回环 **或** 对端 IP 属于本机网卡
+（`lan_addresses()`）都算「跑服务的那台电脑」，`/api/auth/setup` 与 `can_setup` 改用它。
+安全性没有变化 —— 同一台机器上换个地址打开，不是新的信任边界；真·远程设备仍是 `false`。
+
+实测：`/api/auth` 从 `192.168.1.46/137.2/63.1` 打开都是 `can_setup: true`；
+在临时实例上用局域网地址 `POST /api/auth/setup` 直接返回 200 并种下会话（修前是 403）。
+`vsw-probe-accounts.py` 加了 J 段 4 项：回环算本机、本机网卡算本机、`8.8.8.8` 不算、
+同网段别人的机器不算（61 → 65 项）。
 
 ### ⚠ 还没验证到的（真机才能确认）
 

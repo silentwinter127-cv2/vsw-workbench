@@ -319,6 +319,34 @@ def probe(base, root, svc, auth, access, hub_ref=None) -> int:
               f"{type(sa.vision).__name__} / same={sa.vision is sb.vision}")
         check("I 共用的是 VisionEngine 单例", sa.vision is type(sa.vision).instance())
 
+    # ------------------------------------- J 建号按「机器」判断，不是按「回环」判断
+    # 用户就是从分享面板里点开 http://192.168.x.x:8799/ 的 —— 那也是跑服务的这台机器，
+    # 不许因此把「建第一个账号」藏起来（曾经就是这样，用户照着提示点进去反而没按钮）。
+    from vsw.server import Handler as _H, lan_addresses as _lan
+
+    class _Stub:
+        def __init__(self, ip):
+            self._ip = ip
+
+        def _client_ip(self):
+            return self._ip
+
+        def _is_loopback(self):
+            h = self._ip
+            return h in ("::1", "localhost", "0:0:0:0:0:0:0:1") or h.startswith("127.")
+
+    check("J 回环算本机", _H._is_local(_Stub("127.0.0.1")) is True)
+    own = _lan()
+    if own:
+        check("J 本机自己的局域网地址也算本机", _H._is_local(_Stub(own[0])) is True,
+              f"{own[0]} -> {_H._is_local(_Stub(own[0]))}")
+    else:
+        check("J 本机自己的局域网地址也算本机", True, "没有局域网地址，跳过")
+    remote = "8.8.8.8"
+    check("J 外网地址不算本机", _H._is_local(_Stub(remote)) is False)
+    other = "192.168.1.250" if not own or own[0] != "192.168.1.250" else "192.168.1.251"
+    check("J 同网段别人的机器不算本机", _H._is_local(_Stub(other)) is False, other)
+
     print()
     total = PASS + FAIL
     print(f"{'通过' if not FAIL else '有失败'}：{PASS}/{total}")
