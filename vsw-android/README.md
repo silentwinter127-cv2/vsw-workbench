@@ -875,3 +875,17 @@ r39 起按钮固定在面板底栏；预览只画前 12 张。另外 `openSheet(
 打包：`vsw-workbench.apk` 739,370 字节，SHA256 `7B1919B491E39169DAA1A8E7E2AC1FE0BCCBF0551187F449951571F6E4B76CCB`；
 `vsw-verify-apk.py` 42 项、`vsw-probe-local-album.js` 17 项、`vsw-probe-offline.js` 25 项、
 `vsw-probe-mobile-results.py` 13 项全绿。
+
+### 「已经在结果板里的图推不进电脑」（r42）
+
+r41 的自动推送发的是 `image_url`（远程地址），让电脑自己去下载；电脑拿不到就 `new_findings = 0`、
+`duplicates = 0`，手机端判定失败但没有任何提示。
+
+r42 三件事：
+
+1. `localFindingDataUrl(f)` 在推送前把 IndexedDB 里的图转成 data URL（原图优先，退回缩略图），图跟着数据走；
+2. 结果板顶部加「推到电脑（N）」按钮，自动推失败时还能手动点；
+3. 失败不再沉默：把服务端返回的 `failures[0]` 说出来。
+
+探针 `scripts/vsw-probe-album-push.js` 13 项，故意用**打不开的域名**当 `image_url`，
+只有 data URL 这条路能成。r42 = 747,562 字节，SHA256 `CB10BBC27CB4BE2D628B67911F4A1C17A2E4DC1CBA333816833588F2BB808518`。

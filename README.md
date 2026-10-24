@@ -737,3 +737,45 @@ r40 起，手机上搜到/导入的图会以 `local:1` 的条目直接进「结�
 
 > 踩坑记录：探针里用**纯色图**做相册用例，结果两张「不同颜色」的图被算成重复 ——
 > 纯色图的 pHash 完全一样。相册用例必须画图案（`shape(rgb, kind)`），否则测的是自己写错的假设。
+
+## 「已经在结果板里的图推不进电脑」（r42）
+
+r41 加了「连上电脑就自动把手机相册推过去」，用户第二天回来说：**已经在结果板里的图，推不进电脑。**
+
+翻代码才发现问题不在推送逻辑，而在**发什么**：
+
+```js
+image_url: f.image_url || ''   // 手机相册里存的是引擎那张图的远程地址
+```
+
+也就是说，手机把自己记下的 `https://mms2.baidu.com/...` 发给电脑，让**电脑**再去下载一遍。
+电脑那边不一定拿得到：图可能已经过期、被防盗链拦、或者 URL 里有会话参数。
+于是服务端 `new_findings = 0`、`duplicates = 0`，手机端判定「没送成」但什么也没说 —— 用户看到的就是「点了没反应」。
+
+修法是**图跟着数据走**：手机上本来就把图存进了 IndexedDB，推之前先转成 data URL 一起发：
+
+```js
+async function localFindingDataUrl(f) {      // 先找原图，再退回缩略图
+  for (const key of [KEY.findingFull(f.id), KEY.findingThumb(f.id)]) {
+    const rec = await local.get('assets', key);
+    if (rec && rec.blob) { const url = await blobToDataUrl(rec.blob); if (url) return url; }
+  }
+  return '';
+}
+```
+
+服务端 `_album_job()` 早就支持 `data:` 前缀（本地 `base64.b64decode`，不走 `requests`），所以这条路是通的。
+
+另外两件必须补的：
+
+1. **给一个按钮**。结果板顶部现在有「推到电脑（N）」，`N` 是本地还没推过去的张数。
+   自动推失败时用户至少能自己点一次，而不是等一个看不见的定时器。
+2. **失败要说原因**。以前 `if (!moved) toast('这次没送成')`，现在把服务端返回的
+   `failures[0]` 原样说出来（「电脑收不下：…」），异常也照样抛给用户看。
+
+验证：`scripts/vsw-probe-album-push.js`（13 项）故意把 `image_url` 写成**打不开的域名**
+`https://example.invalid/album-1.jpg`，只有 data URL 那条路能成 —— 这样测的才是真链路，
+而不是「碰巧百度图还能下载」。
+
+> 顺带一个教训：探针里抽 APK 里的页面别再自己解析 ZIP（中央目录、压缩方法、ZIP64 都要处理），
+> 交给 `python -c "import zipfile; ..."` 一行就够，`vsw-probe-local-album.js` 本来就是这么干的。

@@ -1127,8 +1127,26 @@ function renderBoard() {
 function renderBoardActions() {
   const n = S.selection.size;
   const root = $('#boardActions');
+  const localN = (S.findings || []).filter((f) => f && f.local && !f.dup_of).length;
   if (!n) {
-    root.innerHTML = `<span class="small">长按或点「全选」进入多选；选中后可批量归档 / 回收站</span>`;
+    // 手机相册里攒着没送进电脑的图：在板子顶上给一个明确的按钮，
+    // 不再只靠"连上电脑自动推"（自动那条路失败时用户什么也看不到）。
+    root.innerHTML = localN
+      ? `<button class="btn sm primary" id="pushLocalBtn">推到电脑（${localN}）</button>
+         <span class="small">这些图只在手机上；推过去才有发散度、来源和分类</span>`
+      : `<span class="small">长按或点「全选」进入多选；选中后可批量归档 / 回收站</span>`;
+    if (localN) {
+      $('#pushLocalBtn').onclick = async () => {
+        const btn = $('#pushLocalBtn');
+        btn.disabled = true;
+        btn.textContent = '正在推…';
+        const moved = await flushLocalFindings({});
+        if (!moved) {
+          btn.disabled = false;
+          btn.textContent = `重试（本地还有 ${(S.findings || []).filter((f) => f && f.local && !f.dup_of).length}）`;
+        }
+      };
+    }
     return;
   }
   root.innerHTML = `
@@ -1499,16 +1517,45 @@ window.vswWebSearchResult = function (payload) {
  * 把「手机相册」里的图送进电脑（/api/mobile/results）。
  * 成功的那几条从本地删掉，换回电脑算好的正式对象（有 E、有来源、有分类）。
  */
+function blobToDataUrl(blob) {
+  return new Promise((resolve) => {
+    if (!blob || !blob.size) { resolve(''); return; }
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ''));
+    fr.onerror = () => resolve('');
+    fr.readAsDataURL(blob);
+  });
+}
+
+/** 本地条目的图能不能直接从手机上带走？
+ *  能 —— 图就存在 IndexedDB 里，转成 data URL 一起发给电脑，比让电脑去百度下载稳得多
+ *  （电脑那边不一定拿得到同一张图：缓存、防盗链、图被删）。 */
+async function localFindingDataUrl(f) {
+  const keys = [KEY.findingFull(f.id), KEY.findingThumb(f.id)];
+  for (const key of keys) {
+    const rec = await local.get('assets', key);
+    if (rec && rec.blob) {
+      const url = await blobToDataUrl(rec.blob);
+      if (url) return url;
+    }
+  }
+  return '';
+}
+
 async function flushLocalFindings(opts = {}) {
   const rows = (S.findings || []).filter((f) => f && f.local && !f.dup_of);
   if (!rows.length) return 0;
   if (!S.server) return 0;
   const batch = rows.slice(0, 60);
-  const items = batch.map((f) => ({
-    image_url: f.image_url || '',
-    source_url: f.source_url || '',
-    title: f.title || '',
-  })).filter((x) => x.image_url);
+  const items = [];
+  for (const f of batch) {
+    // 先把手机上的图变成 data URL 再发：电脑那边去百度下载同一张图不保证成功
+    let url = '';
+    try { url = await localFindingDataUrl(f); } catch (e) { url = ''; }
+    if (!url) url = f.image_url || '';
+    if (!url) continue;
+    items.push({ image_url: url, source_url: f.source_url || '', title: f.title || '' });
+  }
   if (!items.length) return 0;
   let moved = 0;
   try {
@@ -1532,11 +1579,16 @@ async function flushLocalFindings(opts = {}) {
       moved = batch.length;
       renderBoard();
     }
-    if (!opts.silent) {
-      toast(moved ? `手机上那 ${moved} 张已经送进电脑，指标算好了` : '这次没送成，图还留在手机上');
+    if (!moved) {
+      // 电脑那边一张都没收下：把理由说出来，别让用户看着按钮发呆
+      const why = (res.failures && res.failures.length) ? String(res.failures[0]) : '';
+      const msg = why ? `电脑收不下：${why}` : '电脑那边没有新增也没有重复 —— 这次没送成';
+      toast(msg, true);
+    } else if (!opts.silent) {
+      toast(`手机上那 ${moved} 张已经送进电脑，指标算好了`);
     }
   } catch (e) {
-    if (!opts.silent) toast('送进电脑失败：' + e.message, true);
+    toast('送进电脑失败：' + (e && e.message ? e.message : e), true);
   }
   return moved;
 }
