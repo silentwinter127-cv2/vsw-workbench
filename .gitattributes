@@ -14,3 +14,6 @@
 *.jar binary
 *.apk binary
 *.keystore binary
+# cmd.exe 的批处理要 CRLF；LF 的 .bat 在 for /f 与 goto 上会出怪问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
