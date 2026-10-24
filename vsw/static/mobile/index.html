@@ -750,6 +750,12 @@ async function checkOnline() {
     const health = await api('/api/health');
     S.online = true;
     S.caps = health.vision || {};
+    // 一连上电脑就把「手机相册」里攒的图送过去分析（每 3 分钟最多试一次，
+    // 免得信号不稳时反复重试）。
+    if (Date.now() - (S.albumPushAt || 0) > 180000) {
+      S.albumPushAt = Date.now();
+      setTimeout(() => { flushLocalFindings({ silent: true }).catch(() => {}); }, 1200);
+    }
     return true;
   } catch (e) {
     S.online = false;
@@ -1506,8 +1512,11 @@ async function flushLocalFindings(opts = {}) {
   if (!items.length) return 0;
   let moved = 0;
   try {
+    // 队列项可能不存在（这批图是手机上凭空搜到的）：传 0，让电脑自己建一条
+    // 「手机相册」任务，这样发散度/去重照样算。
+    const jid = Number(batch[0].job_id || 0);
     const res = await post('/api/mobile/results', {
-      job_id: batch[0].job_id || 0,
+      job_id: jid > 0 ? jid : 0,
       items,
     });
     const ok = Number(res.new_findings || 0) + Number(res.duplicates || 0);

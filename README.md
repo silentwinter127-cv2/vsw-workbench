@@ -700,3 +700,40 @@ r40 起，手机上搜到/导入的图会以 `local:1` 的条目直接进「结�
 点「存进结果板」→ 断言进了本地库（id 为负）、自动切到结果板、卡片上是 `blob:` 缩略图且能解码、
 写着「手机上 · 本地相册」、**没有 E / 来源这些指标**、详情说明「要 SigLIP 和电脑」、
 删得掉、重载之后还在。
+
+## 深挖会挖到空页 / 手机关机也能攒图（r41）
+
+用户在真机上提了两件事，都是「在手机上干活」这条线上的洞。
+
+### 1. 深挖一层挖到「百度没有结果」之后退不回去
+
+「深挖一层」会把前 N 张相似图逐个拿去做**按图搜**（`graph.baidu.com/details?...&image=<url>`）。
+百度对一部分图就是没有结果，那一下就停在一片空白上，而原来的搜索结果页已经没了 —— 只能整个关掉重来。
+
+修法：深挖时**压栈**。`vsw-android/java/com/vsw/workbench/WebSearchActivity.java` 新增
+`private final ArrayDeque<String> backStack` 与顶栏按钮「上一层」（栈空时灰着）：
+
+- `nextDepthImage()` 在 `web.loadUrl(...)` **之前**把当前地址压栈；
+- `goBackOneLevel()` 弹出上一层、同时 `depthPhase = false`（先停自动换页，否则刚回去又被换走）、
+  `goingBack = true` 挡住这 4 秒内的自动换页判断；
+- 栈空时提示「已经在最上面这一层（搜索结果页）了」，不假装能退。
+
+### 2. 手机离线的图，接上电脑后要能自己走过去
+
+上一版（r40）把手机拍的/搜到的图放进「手机相册」，但那些图要在手机上重跑一次「手机搜」才会进电脑。
+现在的做法是**谁有图谁说话**：手机相册里攒的图，一旦连上电脑就自动推过去，由电脑补算指标。
+
+- 手机端 `flushLocalFindings()`：本地 `local:1` 的条目按 60 张一批 `POST /api/mobile/results`，
+  推成功就把本地那份删掉（图和缩略图一起清）；`checkOnline()` 连上时触发，且 3 分钟内最多试一次。
+- 服务端 `service.add_mobile_results()`：`job_id` 缺失（手机相册的条目本来就没有队列项）或那个队列项已经不存在时，
+  调 `_album_job()` **现造一条**「手机相册（手机推回）」种子 + 队列项，再把图挂上去。
+  第一张图既当种子本身、又作为候选回填一次，所以它会算成 1 条重复 —— 这是对的，
+  剩下的图才是「新对象」。
+- `data:` 开头的内嵌图（断网时只能拿到内嵌副本）走本地 `base64.b64decode`，不再经过 `requests`
+  （它没有 `data:` 的适配器，直接抛 `InvalidSchema`）。
+
+验证：`scripts/vsw-probe-mobile-results.py` 13 项、`scripts/vsw-probe-local-album.js` 17 项、
+`scripts/vsw-probe-offline.js` 25 项、`scripts/vsw-verify-apk.py` 42 项全绿。
+
+> 踩坑记录：探针里用**纯色图**做相册用例，结果两张「不同颜色」的图被算成重复 ——
+> 纯色图的 pHash 完全一样。相册用例必须画图案（`shape(rgb, kind)`），否则测的是自己写错的假设。

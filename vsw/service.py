@@ -11,6 +11,7 @@ whole loop is testable without a browser (see ``selftest_vsw.py``).
 """
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
@@ -1974,9 +1975,15 @@ class Workbench:
         时才退回 data URL。两者都走 ``_ingest_candidates``，去重、来源、发散度全部照常算。
         """
         job_id = int(body.get("job_id") or 0)
+        items = body.get("items") or []
+        # 手机相册推回来的图没有队列项（那批图是手机上搜到的，电脑上还没有对应任务）。
+        # 这时给它现造一条「手机相册」种子 + 队列项，好让发散度/去重照常算出来。
+        if (not job_id or self.store.job(job_id) is None) and items:
+            first = str((items[0] or {}).get("image_url") or "").strip()
+            if first:
+                job_id = self._album_job(first)
         if not job_id:
             raise ServiceError("缺少队列项 id：手机搜的结果要挂在某一次搜索上")
-        items = body.get("items") or []
         cands: List[Dict[str, Any]] = []
         for item in items:
             url = str(item.get("image_url") or "").strip()
@@ -2027,6 +2034,33 @@ class Workbench:
             "duplicates": int(outcome.get("duplicates") or 0) + deduped,
             "failures": outcome.get("failures", []),
         }
+
+    def _album_job(self, first_url: str) -> int:
+        """为「手机相册」推回来的那批图现造一条队列项。
+
+        手机上的图没有对应的搜索任务，但 findings 必须挂在一次搜索上（发散度、去重、
+        搜索链都靠 job）。所以拿这批里的第一张当一个种子，建个「手机相册」任务，
+        其余的直接并进这个任务的结果里。
+        """
+        if first_url.startswith("data:"):
+            # 断网时抓到的图只有内嵌副本：直接解 base64，不用走网络
+            try:
+                raw = base64.b64decode(first_url.split(",", 1)[1])
+            except Exception as exc:  # noqa: BLE001
+                raise ServiceError(f"这张内嵌图解不开：{exc}")
+        else:
+            raw = self.fetch_bytes(first_url)
+        if not raw:
+            raise ServiceError("手机相册这批图的第一张下载不下来，先留着，等下再推")
+        imported = self.import_bytes(raw, title="手机相册（手机推回）", kind="mobile-album",
+                                     origin_url=first_url, note="手机相册", auto_enqueue=False)
+        seed_id = int(imported.get("seed_id") or 0)
+        if not seed_id:
+            raise ServiceError("手机相册这批图建不出种子")
+        job_ids = self.enqueue_seed(seed_id, engines=["baidu"], kinds=["full"])
+        if not job_ids:
+            raise ServiceError("手机相册这批图建不出队列项")
+        return int(job_ids[0])
 
     @staticmethod
     def _image_key(url: str) -> str:

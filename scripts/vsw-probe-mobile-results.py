@@ -37,6 +37,23 @@ def png(color, size=(80, 80)):
     return buf.getvalue()
 
 
+def shape(rgb, kind):
+    """画一张有图案的图：纯色图的 pHash 完全一致，会被判成同一张。"""
+    from PIL import ImageDraw
+
+    img = Image.new("RGB", (160, 160), (250, 250, 250))
+    draw = ImageDraw.Draw(img)
+    if kind == 1:
+        draw.rectangle((10, 10, 90, 150), fill=rgb)
+        draw.ellipse((95, 20, 150, 75), fill=(20, 20, 20))
+    else:
+        draw.ellipse((5, 5, 155, 155), fill=rgb)
+        draw.rectangle((60, 0, 100, 160), fill=(10, 10, 10))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
 def data_url(raw):
     return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
 
@@ -89,11 +106,25 @@ def main():
         check("队列项进入「待复查」（说明这次搜索有货）", (job or {}).get("status") in ("review", "done"), str((job or {}).get("status")))
 
         print("D 边界")
+        # 手机相册推回来的那批图没有队列项（r41）：电脑要自己建一条「手机相册」任务，
+        # 否则手机上离线搜到、联网后推回来的图永远算不出发散度。
+        # 注意：纯色图的 pHash 一模一样，两两都会被判成重复 —— 相册用例必须画图案。
+        r5 = svc.add_mobile_results({"job_id": 0, "items": [
+            {"image_url": data_url(shape((10, 200, 120), 1)), "source_url": "https://example.com/album/1",
+             "title": "手机相册里的第一张"},
+            {"image_url": data_url(shape((200, 120, 10), 2)), "source_url": "https://example.com/album/2",
+             "title": "手机相册里的第二张"},
+        ]})
+        check("没有队列项时也能收（自己建一条手机相册任务）", r5["new_findings"] >= 1, str(r5)[:160])
+        album_job = svc.store.job(int((r5.get("job") or {}).get("id") or 0))
+        check("那条队列项挂的是「手机相册」种子", bool(album_job) and "手机相册" in str(
+            (svc.store.seed(int(album_job["seed_id"])) or {}).get("title") or ""),
+            str((album_job or {}).get("seed_id")))
         try:
             svc.add_mobile_results({"job_id": 0, "items": [{"image_url": "data:image/png;base64,AA"}]})
-            check("缺队列项 id 会被拒", False, "居然过了")
+            check("坏图建不出手机相册任务时会报错", False, "居然过了")
         except ServiceError as exc:
-            check("缺队列项 id 会被拒", "队列项" in str(exc), str(exc))
+            check("坏图建不出手机相册任务时会报错", True, str(exc)[:80])
         try:
             svc.add_mobile_results({"job_id": job_id, "items": []})
             check("空列表会被拒", False, "居然过了")

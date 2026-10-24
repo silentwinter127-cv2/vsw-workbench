@@ -860,3 +860,18 @@ r39 起按钮固定在面板底栏；预览只画前 12 张。另外 `openSheet(
 - 同步快照时自动把这批送进电脑（`/api/mobile/results`）换成正式对象。
 
 顺带修掉 `makeThumb()` 返回 `{blob,size}` 被当成 Blob 存进库的真 bug（重载后结果板空白）。
+
+### 深挖加「上一层」、手机相册自动推回（r41）
+
+**深挖一层挖到空页**：百度对一部分图就是没有结果。现在 `WebSearchActivity` 深挖前把当前地址压进
+`ArrayDeque<String> backStack`，顶栏多一个「上一层」按钮；退回时先 `depthPhase = false` 停掉自动换页，
+再用 `goingBack` 挡住 4 秒内的判断，否则刚退回去又被换走。栈空时按钮灰着、提示「已经在最上面这一层」。
+
+**离线攒的图自动推回电脑**：`flushLocalFindings()` 把本地 `local:1` 的条目按 60 张一批
+`POST /api/mobile/results`；服务端 `add_mobile_results()` 发现没有队列项时用 `_album_job()` 现建
+「手机相册（手机推回）」任务。断网时抓到的 `data:` 内嵌图在服务端走 `base64.b64decode`，
+不走 `requests`（它没有 `data:` 适配器，会抛 `InvalidSchema`）。
+
+打包：`vsw-workbench.apk` 739,370 字节，SHA256 `7B1919B491E39169DAA1A8E7E2AC1FE0BCCBF0551187F449951571F6E4B76CCB`；
+`vsw-verify-apk.py` 42 项、`vsw-probe-local-album.js` 17 项、`vsw-probe-offline.js` 25 项、
+`vsw-probe-mobile-results.py` 13 项全绿。

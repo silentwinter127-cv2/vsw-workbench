@@ -135,6 +135,11 @@ public class WebSearchActivity extends Activity {
     /** 深挖阶段：待挖的图地址、挖到第几张、每张的开始时间。 */
     private final java.util.ArrayList<String> depthUrls = new java.util.ArrayList<String>();
     private int depthIndex = -1;
+    private Button backBtn;
+    /** 深挖时走过的页面，用于「回到上一层」。 */
+    private final java.util.ArrayDeque<String> backStack = new java.util.ArrayDeque<String>();
+    /** 用户手动回到上一层后，正在重新看的那一页（避免深挖计时把它立刻又换掉）。 */
+    private boolean goingBack = false;
     private long depthStartedAt = 0;
     private boolean depthPhase = false;
     private int depthBase = 0;
@@ -214,6 +219,18 @@ public class WebSearchActivity extends Activity {
             }
         });
 
+        Button back = new Button(this);
+        back.setText("上一层");
+        back.setAllCaps(false);
+        back.setTextSize(12f);
+        back.setEnabled(false);
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                goBackOneLevel();
+            }
+        });
+
         Button close = new Button(this);
         close.setText("关闭");
         close.setAllCaps(false);
@@ -247,6 +264,8 @@ public class WebSearchActivity extends Activity {
         titles.addView(hint);
         bar.addView(titles, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        bar.addView(back);
+        backBtn = back;
         startCapBtn = startCap;
         stopCapBtn = stopCap;
         stopCap.setEnabled(false);
@@ -653,11 +672,42 @@ public class WebSearchActivity extends Activity {
         nextDepthImage();
     }
 
+
+    /** 深挖容易挖进百度「这张图没结果」的页面 —— 给一条明确的退路。 */
+    private void goBackOneLevel() {
+        if (backStack.isEmpty()) {
+            setHint("已经在最上面这一层（搜索结果页）了");
+            return;
+        }
+        String prev = backStack.pop();
+        depthPhase = false;          // 先停掉深挖的自动换页，否则刚退回去就被换走
+        goingBack = true;
+        setHint("回到上一层…（还剩 " + backStack.size() + " 层可退）");
+        web.loadUrl(prev);
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                goingBack = false;
+            }
+        }, 4000);
+    }
+
+    private void refreshBackButton() {
+        final boolean can = !backStack.isEmpty();
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (backBtn != null) backBtn.setEnabled(can);
+            }
+        });
+    }
+
     private void nextDepthImage() {
         if (!depthPhase || finished) return;
         depthIndex += 1;
         if (depthIndex >= depthUrls.size()) {
             depthPhase = false;
+            refreshBackButton();
             int added = accSimilar.length() - depthBase;
             setHint("深挖完成：多抓到 " + added + " 张（累计 " + accSimilar.length() + " 张），点「结束抓图」交回");
             stopCapture();
@@ -667,6 +717,9 @@ public class WebSearchActivity extends Activity {
         String url = "https://graph.baidu.com/details?isfromtusoupc=1&tn=pc&carousel=0&image="
                 + java.net.URLEncoder.encode(target);
         depthStartedAt = System.currentTimeMillis();
+        String here = web.getUrl();
+        if (here != null && here.startsWith("http")) backStack.push(here);
+        refreshBackButton();
         setHint("深挖 " + (depthIndex + 1) + "/" + depthUrls.size()
                 + "：正在看这张相似图自己的结果…（已多抓 " + Math.max(0, accSimilar.length() - depthBase) + " 张）");
         web.loadUrl(url);
