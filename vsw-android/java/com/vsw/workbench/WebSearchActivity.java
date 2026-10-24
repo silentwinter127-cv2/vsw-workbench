@@ -228,6 +228,7 @@ public class WebSearchActivity extends Activity {
                     }, 1200);
                 }
                 handler.postDelayed(pollTask, 1500);
+                installTapHelper(view);
             }
         });
 
@@ -242,6 +243,7 @@ public class WebSearchActivity extends Activity {
                 }
                 callback.onReceiveValue(new Uri[]{imageUri});
                 setHint("图已交给网页，等它的结果…");
+                web.evaluateJavascript(TAP_HELPER_OFFERED, null);
                 return true;
             }
 
@@ -268,6 +270,60 @@ public class WebSearchActivity extends Activity {
             }
         }, LIMIT_MS + 5000);
     }
+
+    /**
+     * 页底浮一个「点这里：把图交给识图」的按钮。
+     *
+     * 为什么非要有这个：Chromium 只认真实用户手势触发的文件选择器。我们从原生
+     * dispatchTouchEvent 打进去的合成触摸在 Xiaomi 15 / HyperOS 上拿不到 user activation
+     * （真机证据：诊断行一直 `pcsimi 请求 0 条`），所以自动点那一下不可靠。
+     * 但**用户真的点一下按钮**时，那次点击就是激活状态 —— 在同一个事件里调
+     * input.click() 就能正常拉起选择器，我们的 onShowFileChooser 再把预选好的图交回去，
+     * 用户根本看不到系统选图框。这一步把「必须人手一下」压缩成「点一个按钮」。
+     */
+    private void installTapHelper(WebView view) {
+        view.evaluateJavascript(TAP_HELPER_JS + TAP_HELPER_JS2, null);
+    }
+
+    private static final String TAP_HELPER_OFFERED =
+            "(function(){var b=document.getElementById('vsw-cta');if(b){b.innerHTML="
+            + "'✓ 图已交给网页，等结果…（可以关掉这个页面等它返回）';b.style.background='#1f7a4d';}return 1;})()";
+
+    private static final String TAP_HELPER_JS =
+            "(function(){"
+            + "if(document.getElementById('vsw-cta'))return 'exists';"
+            + "var b=document.createElement('button');"
+            + "b.id='vsw-cta';"
+            + "b.type='button';"
+            + "b.textContent='点这里：把这张图交给识图';"
+            + "b.style.cssText='position:fixed;left:12px;right:12px;bottom:16px;z-index:2147483647;'"
+            + "+'padding:16px 12px;border:0;border-radius:14px;font-size:16px;font-weight:600;'"
+            + "+'color:#fff;background:#2f6fed;box-shadow:0 6px 20px rgba(0,0,0,.45);'"
+            + "+'font-family:system-ui,sans-serif;'"
+            + "if(window.__vswOffered){b.textContent='✓ 图已交给网页，等结果…（没出结果就再点我一次）';"
+            + "b.style.background='#1f7a4d';}";
+    // 注意：上面字符串故意断在这里，下面补事件绑定（分开拼，便于阅读）
+    private static final String TAP_HELPER_JS2 =
+            "b.onclick=function(ev){"
+            + "ev.stopPropagation();"
+            + "var i=document.querySelector('input[type=file]');"
+            + "if(!i){"
+            + "var re=/上传|选择图片|点击上传|上传图片|拖拽|选图/;"
+            + "var els=document.querySelectorAll('button,a,label,div,span');"
+            + "for(var k=0;k<els.length;k++){var t=(els[k].innerText||'').trim();"
+            + "if(t&&t.length<=24&&re.test(t)){try{els[k].click();}catch(e){}"
+            + "i=document.querySelector('input[type=file]');if(i)break;}}"
+            + "}"
+            + "if(i){"
+            + "try{i.style.display='block';i.style.visibility='visible';i.style.opacity='1';}catch(e){}"
+            + "try{i.click();}catch(e){}"
+            + "b.textContent='已经点了上传，等选图框…（如果没反应就再点一次）';"
+            + "}else{"
+            + "b.textContent='还没找到上传控件 —— 稍等一下再点我';"
+            + "}"
+            + "};"
+            + "document.body.appendChild(b);"
+            + "return 'ok';})()";
 
     // ------------------------------------------------------------------ 页面交互
 

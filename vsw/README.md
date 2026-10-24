@@ -709,3 +709,11 @@ python scripts/vsw-probe-cdp.py baidu     # 引擎页面探针（DOM 结构变�
 服务端替用户上传这条路也试过：`POST https://graph.baidu.com/upload?uptime=…` 返回
 `{"status":1,"msg":"Reject","data":null}`，所以那次上传只能由 WebView 里的真实手势触发
 （`input.click()` 拿不到 user activation）。程序会先自己算坐标点一次，点不动就明说让你手点。
+
+### 手机搜要人手点一下（r31）
+
+引擎页的上传按钮必须由真实手势触发。原生派发的合成触摸拿不到 user activation
+（真机诊断里 `pcsimi 请求 0 条` 就是这个），服务端直接 POST 上传接口会被 `Reject`。
+r31 的做法是页面底部浮一个按钮「点这里：把这张图交给识图」：用户真点那一下，
+同一个 click 里调 `input.click()`，紧接着 `onShowFileChooser` 把预选好的图交回去，
+系统选图框不会出现。代价只有一次点击。

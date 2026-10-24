@@ -810,3 +810,9 @@ r18 在真机上的第一次「下载并安装」就炸了：包下完、SHA256 
 服务端替用户上传这条路也试过：`POST https://graph.baidu.com/upload?uptime=…` 返回
 `{"status":1,"msg":"Reject","data":null}`，所以那次上传只能由 WebView 里的真实手势触发
 （`input.click()` 拿不到 user activation）。程序会先自己算坐标点一次，点不动就明说让你手点。
+
+### 手机搜的「点这里」按钮（r31）
+
+`WebSearchActivity.onPageFinished` 注入 `#vsw-cta` 浮层按钮。点它 → 在真实点击事件里
+`input.click()` → `onShowFileChooser` 交回预选图（`window.__vswOffered` 回写、按钮变绿）。
+自动派发合成触摸这条路在 Xiaomi 15 / HyperOS 上拿不到 user activation，已放弃当作主路径。

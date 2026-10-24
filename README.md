@@ -574,3 +574,23 @@ scripts/              自测、真实链路验证、引擎探针、APK 验证、
 `scripts/vsw-probe-mobile-results.py`（9 项，新增）：第一张被收下、findings 里真能查到、
 识别结论当标题、来源页记下来、同一张再收一次不多一条、队列项变「待复查」、缺 job_id/空列表被拒、
 坏图只记失败不塞空对象。
+
+## 手机搜：为什么必须先点一下，以及怎么让这一下变容易（r31）
+
+引擎的上传按钮只认**真实用户手势**。Chromium 的规则是：文件选择器必须由 user activation
+触发。我们从原生 `dispatchTouchEvent` 打进去的合成触摸在 Xiaomi 15 / HyperOS 上拿不到激活，
+真机证据就是诊断行永远写着 `pcsimi 请求 0 条` —— 页面停在首页，抓到的 8 张是首页样图。
+
+所以 r31 不再假装能自动点：
+
+| 做法 | 结果 |
+| --- | --- |
+| 原生派发合成 MotionEvent 点上传 | r28–r30 三次都失败，真机拿不到 user activation |
+| 服务端直接 POST 上传接口 | `{"status":1,"msg":"Reject"}`，签名来自页面 JS，伪造不了 |
+| **页面底部浮一个按钮，用户点它** | 这一次点击是真的手势 → 在同一个 click 里调 `input.click()` → `onShowFileChooser` 立刻把预选好的图交回去（用户看不到系统选图框） |
+
+于是 `WebSearchActivity` 在 `onPageFinished` 里注入 `#vsw-cta`：
+「点这里：把这张图交给识图」。点完变成「✓ 图已交给网页，等结果…」（`window.__vswOffered`
+由 `onShowFileChooser` 回写）。找不到上传控件时就地提示「稍等一下再点我」。
+
+这就是「没有电脑的创作者也能用」的完整代价：**一次点击**。不用选图、不用截图、不用传文件。
