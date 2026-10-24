@@ -263,6 +263,12 @@ GET /api/app/apk                 →  安装包本身（Content-Type: applicatio
 * **Android 侧**：`REQUEST_INSTALL_PACKAGES` 权限 + 自带 `ApkProvider`（`com.vsw.workbench.files`，
   只读、只允许单层文件名）。下载写 `.part` 边下边算 SHA-256，和 `version.json` 对不上就删包报错；
   对得上才改名、再弹系统安装框。Android 不允许应用自己静默安装，**那一下必须用户点**。
+
+一条真机教训（r20）：**下载线程里不能 `Toast`**。`startInstall()` 原来就在后台线程里
+`Toast.makeText(...)`，真机上直接抛 `Can't toast on a thread that has not called
+Looper.prepare()` —— 安装器根本没被调起来，界面还把这句英文当成「更新失败」的原因显示给用户。
+现在 `toast()` 自己回 UI 线程、`startInstall()` 整体 `runOnUiThread`，并且
+「未授权 → 跳设置页 → 回来」会自动接着装，不用再点一次。
 * `/api/app/version` 与 `/api/app/apk` 不需要登录 —— 版本号和二进制不是谁的私人数据，
   手机在登录之前就要能问"有没有新版本"。
 

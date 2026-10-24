@@ -41,8 +41,11 @@ REM  Publish to the workbench's dist/ so the phone can update itself.
 REM  Publishing is part of building: once the new APK is on disk, the app's
 REM  "check for update" already sees it (the server reads data/dist/).
 REM ---------------------------------------------------------------------------
+REM ASCII only in this file (cmd mangles UTF-8). Notes default to a plain marker;
+REM pass a description as the only argument, or re-run vsw-publish-apk.py afterwards
+REM with a Chinese --notes (cmd /c eats non-ASCII arguments).
 set NOTES=%~1
-if not defined NOTES set NOTES=r18
+if not defined NOTES set NOTES=release %BUILD_TAG%
 python "%~dp0..\scripts\vsw-publish-apk.py" --apk "%~dp0..\vsw-workbench.apk" --root "%~dp0..\vsw\data" --notes "%NOTES%"
 if errorlevel 1 echo [WARN] publish step failed - the APK is built but dist/ is stale
 

@@ -58,7 +58,7 @@ public class MainActivity extends Activity {
      * 用在应用名和启动屏里的构建标识。每次改 APK 都要改它 —— 这样"我装了新版吗"
      * 这个问题不需要靠猜（真机上真的发生过"装的是旧包"）。
      */
-    static final String BUILD_TAG = "r19";
+    static final String BUILD_TAG = "r20";
 
     private int assetBytes = 0;
     private long pageFileLength = 0;
@@ -74,6 +74,8 @@ public class MainActivity extends Activity {
     private android.widget.TextView splash;
     private ValueCallback<Uri[]> fileCallback;
     private PermissionRequest pendingWebPermission;
+    /** 包已经下好、只差「安装未知应用」授权时先放这儿；用户授权回来立刻接着装。 */
+    private File pendingInstall;
     private String pageUrl = "";
     private final StringBuilder trail = new StringBuilder();
 
@@ -715,12 +717,28 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 安卓不允许静默安装：只能把系统安装框调起来，最后一下由用户点。 */
-    private void startInstall(File apk) {
+    /**
+     * 安卓不允许静默安装：只能把系统安装框调起来，最后一下由用户点。
+     *
+     * 注意线程：这里要 startActivity、要 Toast，**必须在 UI 线程**。调用来自下载线程，
+     * 所以先 runOnUiThread —— 上一版漏了这一步，真机上直接抛
+     * "Can't toast on a thread that has not called Looper.prepare()"。
+     */
+    private void startInstall(final File apk) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                doStartInstall(apk);
+            }
+        });
+    }
+
+    private void doStartInstall(File apk) {
         if (Build.VERSION.SDK_INT >= 26
                 && !getPackageManager().canRequestPackageInstalls()) {
+            pendingInstall = apk;   // 等用户去设置里授权，onResume 回来接着装
             deliverJs("window.vswUpdateNeedPerm && window.vswUpdateNeedPerm()");
-            toast("请在设置里允许「安装未知应用」，然后回来再点一次「下载并安装」");
+            toast("请在设置里允许「安装未知应用」，回来会自动接着装");
             try {
                 startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                         Uri.parse("package:" + getPackageName())));
@@ -758,6 +776,18 @@ public class MainActivity extends Activity {
     private boolean hasCameraPermission() {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.M
                 || checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 刚从「安装未知应用」设置页回来：授权了就直接接着装，省掉「再点一次」
+        if (pendingInstall != null && Build.VERSION.SDK_INT >= 26
+                && getPackageManager().canRequestPackageInstalls()) {
+            File apk = pendingInstall;
+            pendingInstall = null;
+            doStartInstall(apk);
+        }
     }
 
     // ------------------------------------------------------------- 回调
@@ -904,7 +934,21 @@ public class MainActivity extends Activity {
         return name;
     }
 
-    private void toast(String text) {
-        Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
+    /**
+     * 提示一句。
+     *
+     * 调用点里既有 UI 线程（点按钮），也有后台线程（下载线程里的失败分支），
+     * 所以统一丢回 UI 线程 —— Toast 在没有 Looper 的线程上会直接抛异常。
+     */
+    private void toast(final String text) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Toast.makeText(MainActivity.this, text, Toast.LENGTH_SHORT).show();
+                } catch (Exception ignored) {
+                }
+            }
+        });
     }
 }

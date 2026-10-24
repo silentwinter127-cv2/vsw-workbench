@@ -710,3 +710,28 @@ Invoke-WebRequest 'https://repo1.maven.org/maven2/com/google/zxing/core/3.5.3/co
 `WebSearchActivity` 进了清单与 dex、`onShowFileChooser` 在类里、页面含 14 万字符与两份提取脚本。
 **没验到**：真机上 `onShowFileChooser` 何时被调用、触摸能不能拿到 user activation、
 百度的上传控件在手机上长什么样 —— 这三件只能你装上去点一次才知道。
+
+### 真机报错：Can't toast on a thread that has not called Looper.prepare()（r20）
+
+r18 在真机上的第一次「下载并安装」就炸了：包下完、SHA256 也过了，然后页面显示
+
+```
+更新失败：Can't toast on a thread that has not called Looper.prepare()
+```
+
+原因很直白：`installUpdate()` 为了不卡界面开了后台线程，`downloadAndInstall()` 就跑在那条
+线程上；而它最后调 `startInstall()` —— 里面既要 `startActivity`（调系统安装器）又要
+`Toast`。**Toast 在没有 Looper 的线程上直接抛异常**，而这句 `toast(...)` 恰好排在
+「未知来源未授权」的分支里：本来该跳去设置页，结果是先崩了。
+
+修法（r20）：
+
+* `toast()` 自己改成 `runOnUiThread(...)`，所有调用点都不用再操心线程。
+* `startInstall()` 只做一件事：`runOnUiThread(doStartInstall(apk))`；真正的
+  `startActivity` 挪进 `doStartInstall`，跑在 UI 线程上。
+* 顺手补了「授权后自动继续」：未授权时把待装的包记进 `pendingInstall`，跳设置页；
+  `onResume()` 里发现权限已给就直接 `doStartInstall`，用户不用回来看半天再点一次。
+
+**已经装在 r18 上的机器怎么办**：r18 的这段代码是坏的，所以要么手动装一次 r20，要么
+先在系统设置里把「视觉工作台 → 安装未知应用」打开（授权在手时 r18 走的是不需要 Toast
+的那条分支，`startActivity` 从后台线程调用是合法的），再回去点「下载并安装」。

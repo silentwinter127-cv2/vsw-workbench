@@ -53,6 +53,11 @@ def main(argv=None) -> int:
     parser.add_argument("--apk", default=os.path.join(REPO, APK_NAME))
     parser.add_argument("--root", default=os.path.join(REPO, "vsw", "data"))
     parser.add_argument("--notes", default="", help="这次改了什么，手机上会显示")
+    parser.add_argument(
+        "--notes-file",
+        default="",
+        help="从 UTF-8 文件读说明。中文从命令行传会被 Windows 的代码页弄成乱码，优先用这个",
+    )
     parser.add_argument("--channel", default="stable")
     parser.add_argument("--java", default=JAVA)
     args = parser.parse_args(argv)
@@ -61,6 +66,10 @@ def main(argv=None) -> int:
         print(f"[发布] 找不到 APK：{args.apk}", file=sys.stderr)
         return 2
     tag = read_build_tag(args.java)
+    notes = args.notes
+    if args.notes_file:
+        with io.open(args.notes_file, encoding="utf-8") as fh:
+            notes = fh.read().strip()
     dist = os.path.join(os.path.abspath(args.root), "dist")
     os.makedirs(dist, exist_ok=True)
     target = os.path.join(dist, APK_NAME)
@@ -76,7 +85,7 @@ def main(argv=None) -> int:
     digest = sha256_of(target)
     meta = {
         "build": tag,
-        "notes": args.notes,
+        "notes": notes,
         "channel": args.channel,
         "size": size,
         "sha256": digest,
