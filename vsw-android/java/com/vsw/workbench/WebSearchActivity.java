@@ -138,6 +138,9 @@ public class WebSearchActivity extends Activity {
     private Button backBtn;
     /** 深挖时走过的页面，用于「回到上一层」。 */
     private final java.util.ArrayDeque<String> backStack = new java.util.ArrayDeque<String>();
+    /** 当前页面地址。只在 onPageFinished（UI 线程）里更新 —— 后台线程调 web.getUrl() 不可靠，
+     *  这也正是「上一层」一直灰着的根因：push 的位置在轮询线程里，拿到的是 null。 */
+    private String currentUrl = "";
     /** 用户手动回到上一层后，正在重新看的那一页（避免深挖计时把它立刻又换掉）。 */
     private boolean goingBack = false;
     private long depthStartedAt = 0;
@@ -223,7 +226,7 @@ public class WebSearchActivity extends Activity {
         back.setText("上一层");
         back.setAllCaps(false);
         back.setTextSize(12f);
-        back.setEnabled(false);
+        // 不禁用：栈空时点它会回搜索首页（见 goBackOneLevel），比一个死按钮有用
         back.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -306,6 +309,8 @@ public class WebSearchActivity extends Activity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
+                // 只在这儿（UI 线程）记地址：深挖时要用它当「上一层」
+                if (url != null && url.startsWith("http")) currentUrl = url;
                 if (startAt == 0) {
                     startAt = System.currentTimeMillis();
                     handler.postDelayed(new Runnable() {
@@ -676,7 +681,18 @@ public class WebSearchActivity extends Activity {
     /** 深挖容易挖进百度「这张图没结果」的页面 —— 给一条明确的退路。 */
     private void goBackOneLevel() {
         if (backStack.isEmpty()) {
-            setHint("已经在最上面这一层（搜索结果页）了");
+            // 没得退（比如深挖还没开始，或者已经退到顶）：直接回引擎首页。
+            // 一个永远灰着的按钮等于没有这个按钮 —— 用户第一次看到的就是这种。
+            depthPhase = false;
+            goingBack = true;
+            setHint("回到搜索首页（没有更上一层了）");
+            web.loadUrl(searchUrl);
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    goingBack = false;
+                }
+            }, 4000);
             return;
         }
         String prev = backStack.pop();
@@ -717,8 +733,11 @@ public class WebSearchActivity extends Activity {
         String url = "https://graph.baidu.com/details?isfromtusoupc=1&tn=pc&carousel=0&image="
                 + java.net.URLEncoder.encode(target);
         depthStartedAt = System.currentTimeMillis();
-        String here = web.getUrl();
-        if (here != null && here.startsWith("http")) backStack.push(here);
+        String here = currentUrl;
+        if (here != null && here.startsWith("http") && !here.equals(url)) {
+            // 同一层不重复压栈（页面自己跳转时会连着来几次）
+            if (backStack.isEmpty() || !here.equals(backStack.peek())) backStack.push(here);
+        }
         refreshBackButton();
         setHint("深挖 " + (depthIndex + 1) + "/" + depthUrls.size()
                 + "：正在看这张相似图自己的结果…（已多抓 " + Math.max(0, accSimilar.length() - depthBase) + " 张）");

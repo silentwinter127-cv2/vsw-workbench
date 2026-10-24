@@ -779,3 +779,25 @@ async function localFindingDataUrl(f) {      // 先找原图，再退回缩略�
 
 > 顺带一个教训：探针里抽 APK 里的页面别再自己解析 ZIP（中央目录、压缩方法、ZIP64 都要处理），
 > 交给 `python -c "import zipfile; ..."` 一行就够，`vsw-probe-local-album.js` 本来就是这么干的。
+
+## 「上一层」为什么一直灰着（r43）
+
+r41 加了「上一层」，用户装上一试：**按到结束抓图，上一层还是灰的。**
+
+两个原因叠在一起，而且都是我这边想当然：
+
+1. **压栈时问了 WebView**。`nextDepthImage()` 在轮询线程里跑，里面写了
+   `String here = web.getUrl();`。`WebView` 的方法除了少数几个，都必须在 UI 线程调；
+   在后台线程读 `getUrl()` 返回 `null`（小米 HyperOS 上实测就是这样），于是
+   `if (here != null && here.startsWith("http"))` 一次都没进去 —— 栈永远空着。
+   现在改成在 `onPageFinished`（真正的 UI 线程）里把地址记进 `private String currentUrl`，
+   深挖只读这个字段。
+2. **栈空时按钮是禁用的**。逻辑上「没得退就灰了吧」看着合理，但用户第一眼的感受是
+   「这按钮坏了」。现在按钮**永远可点**，栈空时点它直接回引擎首页（`searchUrl`），
+   提示写「回到搜索首页（没有更上一层了）」—— 掉进百度那张「未找到相关结果」的空页时，
+   这正是想要的动作。
+
+顺带：同一层不重复压栈（`!here.equals(backStack.peek())`），页面自己跳转时不会把栈撑满。
+
+> 这条经验和前面几条是同一类：**按钮的状态要能从界面上被理解**。
+> 「灰着」不是一种说明，只是一次沉默。

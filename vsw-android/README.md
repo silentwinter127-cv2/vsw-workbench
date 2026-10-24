@@ -889,3 +889,12 @@ r42 三件事：
 
 探针 `scripts/vsw-probe-album-push.js` 13 项，故意用**打不开的域名**当 `image_url`，
 只有 data URL 这条路能成。r42 = 747,562 字节，SHA256 `CB10BBC27CB4BE2D628B67911F4A1C17A2E4DC1CBA333816833588F2BB808518`。
+
+### 「上一层」为什么一直灰着（r43）
+
+两个原因：①压栈写在轮询线程里、调 `web.getUrl()` 在后台线程返回 `null`，栈永远空着；
+②栈空时按钮被 `setEnabled(false)`，看着像坏了。修法：地址改在 `onPageFinished` 里记进
+`currentUrl`，深挖只读这个字段；按钮永远可点，栈空时点它回引擎首页。
+
+r43 = 747,562 字节，SHA256 `C42065766DB3C76B94F2C4F404040BAFCF20CC64337E41C198E4CE07DD4CFB9E`，
+`vsw-verify-apk.py` 42/42。
