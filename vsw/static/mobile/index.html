@@ -1017,13 +1017,21 @@ function sourceCount(f) {
 }
 
 function cardHtml(f) {
-  const src = thumbSrcMap()[f.id] || '';
+  // 先看本地缓存；没有就直接拿电脑上的缩略图（带上身份）。
+  // 只靠本地缓存会出现「刚存进结果板，板子里一张图都没有」——缓存要等后台
+  // 一张张下载完，用户看到的却是一排灰框。在线时直接引用；离线时退回缓存。
+  const blobSrc = thumbSrcMap()[f.id] || '';
+  const rel = f.thumb_path || f.rel_path;
+  const remote = (!blobSrc && S.server && rel) ? withKey(relToMediaServer(rel)) : '';
+  const src = blobSrc || remote;
   const selected = S.selection.has(f.id);
   const tags = (f.tags || []).map((t) => t.name).slice(0, 2).join(' / ');
   const platform = (f.sources && f.sources[0] && f.sources[0].platform) || f.platform || '';
   return `<div class="fcard ${selected ? 'sel' : ''}" data-id="${f.id}">
     <div class="check">✓</div>
-    ${src ? `<img loading="lazy" src="${src}" alt="">` : `<img alt="" style="opacity:.25">`}
+    ${src
+      ? `<img loading="lazy" src="${esc(src)}" alt="" data-want-thumb="${f.id}">`
+      : `<img alt="" style="opacity:.25" data-want-thumb="${f.id}">`}
     <div class="meta2">
       <div class="tt">${esc(f.title || f.image_url || `结果 #${f.id}`)}</div>
       <div class="ln"><span class="tbadge ${f.triage}">${TRIAGE[f.triage] || f.triage}</span>
@@ -1443,6 +1451,9 @@ async function savePhoneResults(similar, ctx, guess) {
       closeSheet();
       switchTab('board');
       syncSnapshot({ silent: true });
+      // 顺手把本地缓存补齐：补齐之后断网也能看（失败不影响当前显示，
+      // cardHtml 已经在直接引用电脑上的缩略图了）。
+      ensureThumbs(S.findings, 'finding').then(() => renderBoard()).catch(() => {});
     }
   } catch (err) {
     toast('收进结果板失败：' + err.message, true);
