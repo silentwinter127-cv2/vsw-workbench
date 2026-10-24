@@ -811,6 +811,8 @@ async function syncSnapshot() {
     // 手机上导入、还没推给电脑的那些（id 为负）要留下来，别被快照清掉
     const keepJobs = (S.jobs || []).filter((j) => j && j.local);
     const keepSeeds = (S.seeds || []).filter((x) => x && x.local);
+    // 手机相册里那些还没送进电脑的图（id 为负）也要留下来
+    const keepLocalFindings = (S.findings || []).filter((f) => f && f.local);
     await Promise.all(['findings', 'trash', 'archived', 'archives', 'jobs', 'seeds', 'variants']
       .map((s) => local.clear(s)));
     for (const row of snap.findings || []) await local.put('findings', row);
@@ -822,6 +824,7 @@ async function syncSnapshot() {
     for (const row of snap.variants || []) await local.put('variants', row);
     for (const row of keepJobs) await local.put('jobs', row);
     for (const row of keepSeeds) await local.put('seeds', row);
+    for (const row of keepLocalFindings) await local.put('findings', row);
     fill.style.width = '60%';
     const total = (snap.findings || []).length + (snap.trash || []).length;
     let done = 0;
@@ -861,6 +864,8 @@ async function syncSnapshot() {
     $('#syncNote').textContent = `同步完成：对象 ${snap.counts.findings}、种子 ${snap.counts.seeds}、队列 ${snap.counts.jobs}、回收站 ${snap.counts.trash}`;
     toast('同步完成');
     await loadLocal();
+    // 电脑回来了：把手机相册里的图送进去换成正式对象（失败就留着，下次再送）
+    if (keepLocalFindings.length) flushLocalFindings({ silent: true }).catch(() => {});
   } catch (e) {
     $('#syncNote').textContent = `同步失败：${e.message}`;
     toast(`同步失败：${e.message}`, true);
@@ -1022,6 +1027,24 @@ function sourceCount(f) {
 }
 
 function cardHtml(f) {
+  if (f.local) {
+    // 手机上自己搜到/导入的：没有电脑算出来的任何指标，就当成相册里的一张
+    const blobSrc = thumbSrcMap()[f.id] || '';
+    const src = blobSrc || f.image_url || '';
+    const selected = S.selection.has(f.id);
+    return `<div class="fcard local ${selected ? 'sel' : ''}" data-id="${f.id}" data-local="1">
+      <div class="check">✓</div>
+      ${src
+        ? `<img loading="lazy" src="${esc(src)}" alt="" data-want-thumb="${f.id}">`
+        : `<img alt="" style="opacity:.25" data-want-thumb="${f.id}">`}
+      <div class="meta2">
+        <div class="tt">${esc(f.title || `手机上的图 #${Math.abs(f.id)}`)}</div>
+        <div class="ln"><span class="tbadge on">手机上</span>
+          <span class="small">本地相册 · 还没送进电脑</span></div>
+        <div class="ln small">${f.width && f.height ? `${f.width}×${f.height}` : ''}${f.source_url ? ' · ' + esc(hostOf(f.source_url)) : ''}</div>
+      </div>
+    </div>`;
+  }
   // 先看本地缓存；没有就直接拿电脑上的缩略图（带上身份）。
   // 只靠本地缓存会出现「刚存进结果板，板子里一张图都没有」——缓存要等后台
   // 一张张下载完，用户看到的却是一排灰框。在线时直接引用；离线时退回缓存。
@@ -1051,7 +1074,10 @@ function cardHtml(f) {
 
 function renderBoard() {
   const q = S.search.trim().toLowerCase();
-  let rows = S.findings.filter((f) => !f.dup_of);
+  // 手机上自己搜到的（local:1）不受筛选影响 —— 它们没有 triage/发散度，
+  // 一旦被筛掉，用户就会觉得"手机上的图不见了"。
+  const localRows = S.findings.filter((f) => f.local && !f.dup_of);
+  let rows = S.findings.filter((f) => !f.local && !f.dup_of);
   if (S.triage !== 'all') rows = rows.filter((f) => f.triage === S.triage);
   if (q) {
     rows = rows.filter((f) => [f.title, f.image_url, (f.tags || []).map((t) => t.name).join(' '),
@@ -1059,6 +1085,12 @@ function renderBoard() {
       .join(' ').toLowerCase().includes(q));
   }
   rows.sort((a, b) => (b.explore_value || 0) - (a.explore_value || 0));
+  if (q) {
+    rows = rows.concat(localRows.filter((f) => `${f.title || ''} ${f.image_url || ''}`
+      .toLowerCase().includes(q)));
+  } else {
+    rows = localRows.concat(rows);
+  }
   $('#boardList').innerHTML = rows.map(cardHtml).join('');
   $('#boardEmpty').classList.toggle('hide', rows.length > 0 || S.findings.length > 0);
   $('#boardEmpty').textContent = S.findings.length
@@ -1146,10 +1178,63 @@ async function trashSelection() {
 }
 
 /* ---------------------------------------------------------------- 详情 */
+/**
+ * 手机上那些还没送进电脑的图，详情只有图和一句话 —— 没有 E、没有来源聚合、
+ * 没有搜索链（这些都得电脑算）。刻意不显示空指标，免得看着像"数据丢了"。
+ */
+async function openLocalDetail(f) {
+  const full = (await assetUrl(KEY.findingFull(f.id)))
+    || (await assetUrl(KEY.findingThumb(f.id)))
+    || f.image_url || '';
+  $('#sheetTitle').textContent = f.title || `手机上的图 #${Math.abs(f.id)}`;
+  const body = $('#sheetBody');
+  body.innerHTML = `
+    ${full ? `<img class="hero" src="${esc(full)}" alt="">` : '<div class="empty">这张图没下载到手机上</div>'}
+    <div class="row" style="margin-top:10px">
+      <span class="tbadge on">手机上</span>
+      <span class="tbadge">待送进电脑</span>
+    </div>
+    <p class="small" style="margin-top:10px">
+      这是你在手机上搜到/导入的图。发散度、来源、分类要 SigLIP 语义模型和三层去重，
+      只能在电脑上算 —— 但这张图本身在手机里，不连电脑也能看。
+    </p>
+    <dl class="kv">
+      <dt>尺寸</dt><dd>${f.width || 0}×${f.height || 0}</dd>
+      <dt>找到时间</dt><dd>${f.created_at ? new Date(f.created_at * 1000).toLocaleString('zh-CN') : '-'}</dd>
+      ${f.source_url ? `<dt>来源页</dt><dd class="u">${esc(f.source_url)}</dd>` : ''}
+    </dl>`;
+  const foot = $('#sheetFoot');
+  if (foot) {
+    foot.classList.remove('hide');
+    foot.innerHTML = `
+      <button class="btn sm" id="localOpen">在浏览器里打开来源</button>
+      <button class="btn sm ghost" id="localDel">从手机相册删掉</button>`;
+    const openBtn = $('#localOpen');
+    if (openBtn) {
+      openBtn.disabled = !f.source_url;
+      openBtn.onclick = () => { if (f.source_url) window.open(f.source_url, '_blank'); };
+    }
+    const delBtn = $('#localDel');
+    if (delBtn) {
+      delBtn.onclick = async () => {
+        await local.del('findings', f.id);
+        await local.del('assets', KEY.findingThumb(f.id));
+        await local.del('assets', KEY.findingFull(f.id));
+        S.findings = S.findings.filter((x) => x.id !== f.id);
+        closeSheet();
+        renderBoard();
+        toast('已从手机相册删掉');
+      };
+    }
+  }
+  openSheet();
+}
+
 async function openDetail(id) {
   let f = S.findings.find((x) => x.id === id) || S.trash.find((x) => x.id === id)
     || S.archived.find((x) => x.id === id);
   if (!f) return;
+  if (f.local) return openLocalDetail(f);
   $('#cropConfirm').classList.add('hide');
   $('#cropStage').innerHTML = '';
   // 快照默认不带来源明细（省体积）：联网时按需取这一次，并缓存回本地库供离线再看
@@ -1404,6 +1489,103 @@ window.vswWebSearchResult = function (payload) {
 
 // 把手机搜到的图收进工作台（能联网就直接推，离线就先存手机待同步）。
 // 以前这里只有「复制链接」——结果看完就没了，结果板里自然没有这些图。
+/**
+ * 把「手机相册」里的图送进电脑（/api/mobile/results）。
+ * 成功的那几条从本地删掉，换回电脑算好的正式对象（有 E、有来源、有分类）。
+ */
+async function flushLocalFindings(opts = {}) {
+  const rows = (S.findings || []).filter((f) => f && f.local && !f.dup_of);
+  if (!rows.length) return 0;
+  if (!S.server) return 0;
+  const batch = rows.slice(0, 60);
+  const items = batch.map((f) => ({
+    image_url: f.image_url || '',
+    source_url: f.source_url || '',
+    title: f.title || '',
+  })).filter((x) => x.image_url);
+  if (!items.length) return 0;
+  let moved = 0;
+  try {
+    const res = await post('/api/mobile/results', {
+      job_id: batch[0].job_id || 0,
+      items,
+    });
+    const ok = Number(res.new_findings || 0) + Number(res.duplicates || 0);
+    if (ok > 0) {
+      // 只要服务端收下了（新的或已存在的），本地这条就不用留了
+      for (const f of batch) {
+        await local.del('findings', f.id);
+        await local.del('assets', KEY.findingThumb(f.id));
+        await local.del('assets', KEY.findingFull(f.id));
+        delete thumbSrcMap()[f.id];
+      }
+      S.findings = (S.findings || []).filter((f) => !(f && f.local && batch.includes(f)));
+      moved = batch.length;
+      renderBoard();
+    }
+    if (!opts.silent) {
+      toast(moved ? `手机上那 ${moved} 张已经送进电脑，指标算好了` : '这次没送成，图还留在手机上');
+    }
+  } catch (e) {
+    if (!opts.silent) toast('送进电脑失败：' + e.message, true);
+  }
+  return moved;
+}
+
+/** 只要主机名，列表里显示来源用。 */
+function hostOf(url) {
+  try { return new URL(url).host.replace(/^www\./, ''); } catch (e) { return ''; }
+}
+
+/**
+ * 把手机上搜到的图收进「手机相册」（结果板）。
+ *
+ * 为什么要这个：以前断网时只能 queuePending 成「种子」，结果板是空的 ——
+ * 用户的原话是「为什么一定要连电脑，再同步才能看到结果板，即使我在本地没有
+ * SigLIP 识别，但是也有图片啊，可以就当作一个相册」。
+ * 所以这里建的是 local:1 的 findings：有图、有标题、有尺寸，没有 E/来源/分类
+ * （那些要电脑算）。联网之后再 flushLocalFindings() 送进电脑换成真的对象。
+ */
+async function addLocalFindings(picks, label, guess, ctx) {
+  let made = 0;
+  const jobId = (ctx && ctx.jobId) || 0;
+  for (const x of picks) {
+    const id = await nextLocalId();
+    const seq = Math.abs(id);
+    const row = {
+      id, local: 1,
+      title: guess ? `${guess} · ${label} #${seq}` : `手机搜 · ${label} #${seq}`,
+      image_url: x.u || x.d || '',
+      source_url: x.page || '',
+      source_count: 0, explore_value: 0, triage: 'local', status: 'pending',
+      width: x.w || 0, height: x.h || 0, job_id: jobId,
+      created_at: Math.floor(Date.now() / 1000), sources: [],
+    };
+    const srcUrl = x.d || x.u;
+    if (srcUrl) {
+      try {
+        const resp = await fetch(srcUrl);
+        if (resp.ok) {
+          const blob = await resp.blob();
+          if (blob && blob.size) {
+            // makeThumb 返回的是 { blob, size }，不是 Blob 本身（写错过一次：
+            // 把整个对象塞进 assets，重新加载时取图会炸，结果板直接空掉）
+            const made = await makeThumb(blob, 360);
+            const thumb = (made && made.blob) || blob;
+            await storeBlob(KEY.findingThumb(id), thumb, { kind: 'finding', local: 1 });
+            await storeBlob(KEY.findingFull(id), blob, { kind: 'finding', local: 1 });
+            thumbSrcMap()[id] = URL.createObjectURL(thumb);
+          }
+        }
+      } catch (e) { /* 取不回来也不要紧：卡片会直接引用远程地址 */ }
+    }
+    await local.put('findings', row);
+    S.findings.unshift(row);
+    made += 1;
+  }
+  return made;
+}
+
 async function savePhoneResults(similar, ctx, guess) {
   // 抓图是累计的：一次可能有几十张。以前只送前 12 张，用户看到的就是「少了很多」。
   const seen = new Set();
@@ -1427,15 +1609,13 @@ async function savePhoneResults(similar, ctx, guess) {
     title: guess || '',
   }));
   if (!S.online) {
-    // 断网时只能先存手机：这时的产物是「种子」，联网后再推
-    for (let i = 0; i < picks.length; i += 1) {
-      await queuePending('import', {
-        name: `手机搜 · ${label} · ${i + 1}`,
-        data_url: picks[i].d || picks[i].u,
-        auto_enqueue: false,
-      });
-    }
-    return toast(`已存进手机待同步（${picks.length} 张），联网后会自动推给电脑`, false);
+    // 没连电脑 ≠ 不能用：直接进手机上的「结果板」当相册看。
+    // 这些条目没有 E/来源/分类（那要 SigLIP + 去重，得电脑算），只显示图。
+    const made = await addLocalFindings(picks, label, guess, ctx);
+    closeSheet();
+    switchTab('board');
+    renderBoard();
+    return toast(`已存进手机相册 ${made} 张（不用等电脑）`, made === 0);
   }
   try {
     const res = await post('/api/mobile/results', {

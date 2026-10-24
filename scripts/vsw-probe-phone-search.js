@@ -332,19 +332,21 @@ print(json.dumps({'bytes': len(data)}))
       saved && /结果板/.test(saved.toastText || ''), JSON.stringify(saved && saved.toastText));
 
 
-    // 离线时不能丢图：先存进手机待同步，联网后再推给电脑
+    // 离线时不能丢图，也不能只丢进一个看不见的收件箱：
+    // r40 起直接进「手机相册」（结果板里的 local:1 条目），有图就能看。
     const offline = await evaluate(`(async () => {
       S.online = false;
-      const before = (await local.all('pending')).length;
+      const before = (await local.all('findings')).filter((f) => f.local === 1).length;
       await savePhoneResults([{ u: 'https://t7.baidu.com/off.jpg', d: 'data:image/jpeg;base64,BBBB' }], { label: '百度识图' });
-      await new Promise((r) => setTimeout(r, 250));
-      const rows = await local.all('pending');
-      return { added: rows.length - before,
-        url: rows.length ? String((rows[rows.length - 1].payload || {}).data_url || '') : '' };
+      await new Promise((r) => setTimeout(r, 400));
+      const rows = (await local.all('findings')).filter((f) => f.local === 1);
+      const last = rows[rows.length - 1] || {};
+      return { added: rows.length - before, id: last.id, title: last.title,
+               hasUrl: !!last.image_url, tab: S.tab,
+               cards: document.querySelectorAll('#boardList .fcard[data-local="1"]').length };
     })()`);
-    check('离线时先存进手机待同步，不丢图', offline && offline.added >= 1, JSON.stringify(offline && offline.added));
-    check('待同步里带的也是内嵌的 data URL', offline && String(offline.url).indexOf('data:image/jpeg;base64,') === 0,
-      JSON.stringify(offline && String(offline.url).slice(0, 32)));
+    check('离线时收进手机相册，不丢图', offline && offline.added === 1, JSON.stringify(offline));
+    check('相册条目带着图片地址（能显示出来）', offline && offline.hasUrl === true, JSON.stringify(offline && offline.hasUrl));
 
     check('面板写明图是从引擎接口来的', saved && /图源：引擎接口/.test(saved.src || ''), JSON.stringify(saved && saved.src));
 
