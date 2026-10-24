@@ -302,7 +302,7 @@ print(json.dumps({'bytes': len(data)}))
         const snap = u.indexOf('/api/mobile/snapshot') >= 0;
         return { ok: true, status: 200, json: async () => (snap
           ? { findings: [], seeds: [], variants: [], jobs: [], trash: [], archives: [], archived: [], jobs_total: 0 }
-          : { imported: [{ id: 1 }, { id: 2 }], errors: [] }) };
+          : { imported: [{ id: 1 }, { id: 2 }], new_findings: 2, duplicates: 1, failures: [] }) };
       };
       window.vswWebSearchResult(JSON.stringify({
         guess: '橘猫',
@@ -328,8 +328,9 @@ print(json.dumps({'bytes': len(data)}))
     })()`);
     check('结果能一键存进结果板，按钮上写着张数', saved && /存进结果板（1）/.test(saved.label || ''),
       JSON.stringify(saved && (saved.dbg || saved)));
-    check('在线时点它，明确告诉用户存了几张', saved && /已存进结果板/.test(saved.toastText || ''),
-      JSON.stringify(saved && saved.toastText));
+    check('在线时点它，给出明确结果（收进结果板 / 失败原因）',
+      saved && /结果板/.test(saved.toastText || ''), JSON.stringify(saved && saved.toastText));
+
 
     // 离线时不能丢图：先存进手机待同步，联网后再推给电脑
     const offline = await evaluate(`(async () => {

@@ -514,3 +514,24 @@ scripts/              自测、真实链路验证、引擎探针、APK 验证、
 
 `scripts/vsw-probe-phone-search.js` 加到 28 项（新增：按钮文案带张数、点完明确说存了几张、
 断网时进待同步队列、待同步里带的是内嵌 data URL、面板写明图源）。
+
+### r26：手机搜的图终于落在「结果板」里
+
+上一次「存进结果板」打的是 `/api/mobile/sync` 的 `imports` —— 服务端那条路走
+`import_bytes`，建的是**种子**（我拿去找图的输入）。结果板列的是 `findings`（搜回来的对象），
+所以按钮点了、提示也弹了，结果板里还是空的。这是接口选错，不是显示问题。
+
+现在新增 `POST /api/mobile/results`（`service.add_mobile_results`）：
+
+* 入参 `{job_id, items: [{image_url, source_url, title}]}`，`job_id` 是这次搜索的队列项；
+* 内部直接走 `ingest_payload(candidates=...)` —— 去重、来源、发散度、状态流转全部照旧；
+* 优先用远程原图地址（服务端自己下，拿到原尺寸），取不到才退回手机内嵌的 data URL；
+* 返回 `new_findings / duplicates / failures`，手机端据此说「已收进结果板 N 张（重复 M · 失败 K）」
+  并直接跳到结果板。
+
+顺手把「图源」从单独一行小字并进了统计行（`相似图 12（其中 12 张已存成本地小图） · 图源：引擎接口 · 来源网页 3`）
+—— 上一版那行字太小，用户没看见。
+
+`scripts/vsw-probe-mobile-results.py`（9 项，新增）：第一张被收下、findings 里真能查到、
+识别结论当标题、来源页记下来、同一张再收一次不多一条、队列项变「待复查」、缺 job_id/空列表被拒、
+坏图只记失败不塞空对象。

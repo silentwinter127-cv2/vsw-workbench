@@ -1960,6 +1960,44 @@ class Workbench:
             result["trash_skipped"] = moved.get("skipped") or []
         result["ok"] = not result["errors"]
         return result
+    def add_mobile_results(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """手机「手机搜」抓到的相似图 → 当成这次搜索的结果收进**结果板**。
+
+        为什么不能走 ``imports``：那条路建的是「种子」（我拿去找图的输入），而结果板列的是
+        ``findings``（搜回来的对象）。用户点了「存进结果板」，就该在结果板里看见，而不是变成
+        一堆自己再也不用搜的种子。
+
+        优先用远程原图地址（``image_url``）：服务端自己下载能拿到原尺寸；只有拿不到内嵌副本
+        时才退回 data URL。两者都走 ``_ingest_candidates``，去重、来源、发散度全部照常算。
+        """
+        job_id = int(body.get("job_id") or 0)
+        if not job_id:
+            raise ServiceError("缺少队列项 id：手机搜的结果要挂在某一次搜索上")
+        items = body.get("items") or []
+        cands: List[Dict[str, Any]] = []
+        for item in items:
+            url = str(item.get("image_url") or "").strip()
+            if not url:
+                continue
+            cands.append({
+                "image_url": url,
+                "source_url": str(item.get("source_url") or "").strip() or url,
+                "title": str(item.get("title") or ""),
+            })
+        if not cands:
+            raise ServiceError("没有可以收进来的图片")
+        outcome = self.ingest_payload(job_id, candidates=cands, download=True,
+                                     fetch_limit=max(1, len(cands)), note="手机搜")
+        return {
+            "ok": True,
+            "job": outcome.get("job"),
+            "parsed": outcome.get("parsed", 0),
+            "fetched": outcome.get("fetched", 0),
+            "new_findings": outcome.get("new_findings", 0),
+            "duplicates": outcome.get("duplicates", 0),
+            "failures": outcome.get("failures", []),
+        }
+
     # -------------------------------------------------------------------- 归档
     def repair_source_labels(self) -> Dict[str, Any]:
         """修掉历史数据里被错贴的「引擎结果页」标题。

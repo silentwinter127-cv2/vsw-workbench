@@ -1363,25 +1363,47 @@ window.vswWebSearchResult = function (payload) {
 
 // 把手机搜到的图收进工作台（能联网就直接推，离线就先存手机待同步）。
 // 以前这里只有「复制链接」——结果看完就没了，结果板里自然没有这些图。
-async function savePhoneResults(similar, ctx) {
-  const picks = (similar || []).filter((x) => x.d).slice(0, 12);
+async function savePhoneResults(similar, ctx, guess) {
+  const picks = (similar || []).filter((x) => x.u || x.d).slice(0, 12);
   if (!picks.length) {
-    return toast('这些图没有取到本地副本，存不进结果板（可以让电脑上跑「自动搜图」）', true);
+    return toast('这次没有可收的图（引擎没返回结果）', true);
   }
   const label = (ctx && ctx.label) || '识图';
-  const mk = (x, i) => ({ name: `手机搜 · ${label} · ${i + 1}`, data_url: x.d, auto_enqueue: false });
+  // 收进「结果板」的是 findings（搜回来的对象），不是种子：
+  // 服务端优先用远程原图地址自己去下（能拿到原尺寸），取不到才退回内嵌的 data URL。
+  const items = picks.map((x) => ({
+    image_url: x.u || x.d,
+    source_url: x.page || '',
+    title: guess || '',
+  }));
   if (!S.online) {
-    for (let i = 0; i < picks.length; i += 1) await queuePending('import', mk(picks[i], i));
+    // 断网时只能先存手机：这时的产物是「种子」，联网后再推
+    for (let i = 0; i < picks.length; i += 1) {
+      await queuePending('import', {
+        name: `手机搜 · ${label} · ${i + 1}`,
+        data_url: picks[i].d || picks[i].u,
+        auto_enqueue: false,
+      });
+    }
     return toast(`已存进手机待同步（${picks.length} 张），联网后会自动推给电脑`, false);
   }
   try {
-    const res = await post('/api/mobile/sync', { imports: picks.map(mk) });
-    const n = (res.imported || []).length;
-    const bad = (res.errors || []).length;
-    toast(`已存进结果板 ${n} 张${bad ? `（${bad} 张失败）` : ''}`, n === 0);
-    if (n) syncSnapshot({ silent: true });
+    const res = await post('/api/mobile/results', {
+      job_id: (ctx && ctx.jobId) || 0,
+      items: items,
+    });
+    const n = Number(res.new_findings || 0);
+    const dup = Number(res.duplicates || 0);
+    const bad = (res.failures || []).length;
+    const extra = [dup ? `重复 ${dup}` : '', bad ? `失败 ${bad}` : ''].filter(Boolean).join(' · ');
+    toast(`已收进结果板 ${n} 张${extra ? `（${extra}）` : ''}`, n === 0);
+    if (n) {
+      closeSheet();
+      switchTab('board');
+      syncSnapshot({ silent: true });
+    }
   } catch (err) {
-    toast('存进结果板失败：' + err.message, true);
+    toast('收进结果板失败：' + err.message, true);
   }
 }
 
@@ -1409,9 +1431,8 @@ function openPhoneSearchResult(data, ctx) {
     ${data.error ? `<div class="warn">${esc(data.error)}</div>` : ''}
     ${data.note ? `<div class="small">${esc(data.note)}</div>` : ''}
     ${!similar.length && diagText ? `<div class="small">${esc(diagText)}</div>` : ''}
-    ${similar.length ? `<div class="small">图源：${esc(diag && diag.source === 'pcsimi' ? '引擎接口（pcsimi）' : '页面里捡的（接口没捕到）')}</div>` : ''}
     ${data.guess ? `<div class="t1">识别结论：<b>${esc(data.guess)}</b></div>` : ''}
-    <div class="small">相似图 ${similar.length}${embedded ? `（其中 ${embedded} 张已存成本地小图）` : ''} · 来源网页 ${sources.length}${goods.length ? ` · 商品 ${goods.length}` : ''}</div>
+    <div class="small">相似图 ${similar.length}${embedded ? `（其中 ${embedded} 张已存成本地小图）` : ''} · 图源：${diag && diag.source === 'pcsimi' ? '引擎接口' : '页面里捡的'} · 来源网页 ${sources.length}${goods.length ? ` · 商品 ${goods.length}` : ''}</div>
     ${similar.length ? `<div class="flist" style="margin-top:10px">${similar.slice(0, 40).map((x) => `
       <div class="fcard">
         <img src="${esc(x.d || x.u)}" alt="" loading="lazy"${x.d ? '' : ' referrerpolicy="no-referrer"'} onerror="this.dataset.broken='1';this.style.visibility='hidden'">
@@ -1441,7 +1462,7 @@ function openPhoneSearchResult(data, ctx) {
     $('#sheetBody').appendChild(line);
   }, 2000);
   const saveBtn = $('#saveResults');
-  if (saveBtn) saveBtn.onclick = () => savePhoneResults(similar, ctx);
+  if (saveBtn) saveBtn.onclick = () => savePhoneResults(similar, ctx, data.guess || '');
   const a = $('#copyImgLinks'); if (a) a.onclick = () => copyText(links, '图片链接已复制');
   const b = $('#copyPageLinks'); if (b) b.onclick = () => copyText(pages, '来源链接已复制');
   $$('[data-close-sheet]').forEach((btn) => { btn.onclick = () => closeSheet(); });

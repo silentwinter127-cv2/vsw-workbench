@@ -580,6 +580,11 @@ class Router:
             """
             return svc.apply_mobile_sync(body or {})
 
+        @self.post("/api/mobile/results")
+        def mobile_results(body: Dict[str, Any], **_kw: Any) -> Dict[str, Any]:
+            """手机「手机搜」抓到的相似图 → 收进结果板（findings），不再是种子。"""
+            return svc.add_mobile_results(body or {})
+
         @self.get("/api/archive/*/zip")
         def archive_zip(wild: str, **_kw: Any) -> Any:
             """把归档批次打包成 zip —— 手机端「保存到手机」下载的就是它。"""
