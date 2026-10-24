@@ -259,39 +259,87 @@ public class WebSearchActivity extends Activity {
      * 从输入系统打进去的 MotionEvent 才有机会。找不到就提示用户自己点。
      */
     private void tryAutoTap() {
+        tryAutoTap(1);
+    }
+
+    /**
+     * 自动点上传，最多 3 轮。
+     *
+     * 现场证据（r27 真机截图）：诊断那行 `pcsimi 请求 0 条 · 页面图片主机
+     * mms-graph.cdn.bcebos.com×9` —— 说明文件选择器一次都没打开过，图没交上去，
+     * 页面还停在首页。只点一轮、点偏一次就放弃，等于没点。所以这里改成：
+     * 每一轮先滚到可视区，先点文字按钮再点 input[type=file] 本身，1.4 秒后还没
+     * offered 就再来一轮。三轮都没成，才请用户自己点。
+     */
+    private void tryAutoTap(final int round) {
         if (finished || offered) return;
         String js = "(function(){"
                 + "var out={input:null,btn:null};"
                 + "function rect(e){if(!e)return null;var r=e.getBoundingClientRect();"
                 + "if(!r||r.width<16||r.height<10)return null;"
                 + "return {x:r.left+r.width/2,y:r.top+r.height/2};}"
+                + "function seen(e){if(!e)return;try{e.scrollIntoView({block:'center'});}catch(x){}}"
                 + "var inp=document.querySelector('input[type=file]');"
-                + "out.input=rect(inp);"
-                + "var re=/上传|选择图片|点击上传|上传图片|拖拽|选图/;"
+                + "seen(inp);out.input=rect(inp);"
+                + "var re=/上传|选择图片|点击上传|上传图片|拖拽|选图|识图/;"
                 + "var els=document.querySelectorAll('button,a,label,div,span');"
                 + "for(var i=0;i<els.length;i++){var e=els[i];var t=(e.innerText||'').trim();"
                 + "if(!t||t.length>24||!re.test(t))continue;var r=rect(e);"
-                + "if(!r)continue;out.btn=r;break;}"
+                + "if(!r)continue;seen(e);out.btn=rect(e)||r;break;}"
                 + "return JSON.stringify(out);})()";
         web.evaluateJavascript(js, new ValueCallback<String>() {
             @Override
             public void onReceiveValue(String raw) {
                 JSONObject pick = jsonObject(unquote(raw));
-                JSONObject point = pick == null ? null : pick.optJSONObject("btn");
-                if (point == null && pick != null) point = pick.optJSONObject("input");
+                JSONObject btn = pick == null ? null : pick.optJSONObject("btn");
+                JSONObject inp = pick == null ? null : pick.optJSONObject("input");
+                JSONObject point = btn != null ? btn : inp;
                 if (point == null) {
-                    setHint("没找到上传按钮 —— 点页面上「上传图片」那一块，图已经替你选好了");
+                    if (round < 3) {
+                        setHint("正在找上传入口（第 " + round + " 次）…");
+                        handler.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                tryAutoTap(round + 1);
+                            }
+                        }, 1400);
+                    } else {
+                        setHint("没找到上传按钮 —— 点页面上「上传图片」那一块，图已经替你选好了");
+                    }
                     return;
                 }
                 tap(point.optDouble("x", 0), point.optDouble("y", 0));
+                // 点完文字按钮以后，input 往往才出现；紧接着再点它本身一次
                 handler.postDelayed(new Runnable() {
                     @Override
                     public void run() {
-                        if (!finished && !offered) {
-                            setHint("点一下页面上「上传图片」那一块，图已经替你选好了");
-                        }
+                        if (finished || offered) return;
+                        web.evaluateJavascript(
+                                "(function(){var i=document.querySelector('input[type=file]');"
+                                        + "if(!i)return '';try{i.scrollIntoView({block:'center'});}catch(x){}"
+                                        + "var r=i.getBoundingClientRect();"
+                                        + "return JSON.stringify({x:r.left+r.width/2,y:r.top+r.height/2});})()",
+                                new ValueCallback<String>() {
+                                    @Override
+                                    public void onReceiveValue(String again) {
+                                        if (finished || offered) return;
+                                        JSONObject p2 = jsonObject(unquote(again));
+                                        if (p2 != null) tap(p2.optDouble("x", 0), p2.optDouble("y", 0));
+                                        handler.postDelayed(new Runnable() {
+                                            @Override
+                                            public void run() {
+                                                if (finished || offered) return;
+                                                if (round < 3) {
+                                                    tryAutoTap(round + 1);
+                                                } else {
+                                                    setHint("还没打开选图 —— 请点一下页面上「上传图片」那一块（图已经替你选好了）");
+                                                }
+                                            }
+                                        }, TAP_GRACE_MS);
+                                    }
+                                });
                     }
-                }, TAP_GRACE_MS);
+                }, 700);
             }
         });
     }
@@ -304,8 +352,11 @@ public class WebSearchActivity extends Activity {
             float x = (float) (cssX * scale);
             float y = (float) (cssY * scale);
             long now = SystemClock.uptimeMillis();
+            web.requestFocusFromTouch();
             MotionEvent down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x, y, 0);
-            MotionEvent up = MotionEvent.obtain(now, now + 40, MotionEvent.ACTION_UP, x, y, 0);
+            down.setSource(android.view.InputDevice.SOURCE_TOUCHSCREEN);
+            MotionEvent up = MotionEvent.obtain(now, now + 60, MotionEvent.ACTION_UP, x, y, 0);
+            up.setSource(android.view.InputDevice.SOURCE_TOUCHSCREEN);
             web.dispatchTouchEvent(down);
             web.dispatchTouchEvent(up);
             down.recycle();
