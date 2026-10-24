@@ -27,8 +27,12 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -63,11 +67,23 @@ public class WebSearchActivity extends Activity {
     private static final long POLL_MS = 1500;
     private static final long LIMIT_MS = 90000;
     private static final long TAP_GRACE_MS = 2500;
+    /** 最多内嵌几张结果图：再多 JSON 就太大了，交付给页面的 intent 有大小上限。 */
+    private static final int THUMB_MAX = 12;
+    /** 内嵌图的最长边：结果面板里是小缩略图，360px 足够。 */
+    private static final int THUMB_SIDE = 360;
+    /** 单张下载的超时（毫秒）。引擎图不大，5 秒拿不到就跳过。 */
+    private static final int THUMB_TIMEOUT_MS = 5000;
+    /** 下载结果图时假装自己是引擎页面自己（防盗链要看 Referer）。 */
+    private static final String UA_MOBILE =
+            "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) "
+                    + "Chrome/120.0.0.0 Mobile Safari/537.36";
 
     private WebView web;
     private TextView hint;
     private String engine = "";
     private String extractJs = "";
+    /** 引擎搜索页地址：抓结果图时当 Referer 用（防盗链只认这个）。 */
+    private String searchUrl = "";
     private File imageFile;
     private Uri imageUri;
 
@@ -85,6 +101,7 @@ public class WebSearchActivity extends Activity {
         engine = safe(getIntent().getStringExtra(EXTRA_ENGINE));
         String label = safe(getIntent().getStringExtra(EXTRA_LABEL));
         String url = safe(getIntent().getStringExtra(EXTRA_URL));
+        searchUrl = url;
         extractJs = safe(getIntent().getStringExtra(EXTRA_EXTRACT));
         String image = safe(getIntent().getStringExtra(EXTRA_IMAGE));
 
@@ -213,7 +230,7 @@ public class WebSearchActivity extends Activity {
             @Override
             public void run() {
                 if (!finished && System.currentTimeMillis() - startAt > LIMIT_MS) {
-                    finishWith(lastExtract, "等太久了，先把手上的结果给你");
+                    finishWithThumbs(lastExtract, "等太久了，先把手上的结果给你");
                 }
             }
         }, LIMIT_MS + 5000);
@@ -326,7 +343,10 @@ public class WebSearchActivity extends Activity {
                     JSONArray list = obj == null ? null : obj.optJSONArray("similar");
                     if (list != null) similar = list.length();
                     if (similar >= 4) {
-                        finishWith(text, null);
+                        // 命中就先别急着回去：结果图在引擎那边有防盗链，页面直接 <img src> 会 403，
+                        // 表现就是「结果图全部消失」。这里用带 Referer 的原生请求抓下来，
+                        // 缩成 360px 的 JPEG 内嵌成 data URL，页面就一定能画出来。
+                        finishWithThumbs(text, null);
                         return;
                     }
                     if (!finished) handler.postDelayed(pollTask, POLL_MS);
@@ -366,6 +386,130 @@ public class WebSearchActivity extends Activity {
         data.putExtra(EXTRA_RESULT, "{\"error\":" + JSONObject.quote(message) + "}");
         setResult(RESULT_OK, data);
         finish();
+    }
+
+    /**
+     * 把结果图抓下来内嵌成 data URL，然后再交回页面。
+     *
+     * 为什么非要在原生做：百度/360 的结果图有防盗链，`<img src="https://t7.baidu.com/...">`
+     * 从我们自己的页面（file:// 或局域网地址）发出去没有 Referer，服务端回 403，
+     * 于是**结果图一张都画不出来** —— 用户看到的就是「结果图全部消失」。
+     * 在 WebView 里用 fetch 也不行（跨域、而且一样缺 Referer）。
+     * 所以这里用 HttpURLConnection 带上引擎页面的 Referer 去拿，缩到 360px 后压成 JPEG。
+     */
+    private void finishWithThumbs(final String json, final String note) {
+        if (finished) return;
+        final JSONObject obj = jsonObject(json);
+        if (obj == null) {
+            finishWith(json, note);
+            return;
+        }
+        setHint("拿到了，正在把结果图存成能显示的图（引擎有防盗链）…");
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                int got = 0;
+                int want = 0;
+                try {
+                    JSONArray list = obj.optJSONArray("similar");
+                    if (list != null) {
+                        for (int i = 0; i < list.length() && got < THUMB_MAX; i++) {
+                            JSONObject item = list.optJSONObject(i);
+                            if (item == null) continue;
+                            String url = safe(item.optString("u", ""));
+                            if (url.isEmpty() || url.startsWith("data:")) continue;
+                            want += 1;
+                            String data = fetchThumb(url);
+                            if (data == null) continue;
+                            item.put("d", data);
+                            got += 1;
+                        }
+                    }
+                } catch (Throwable exc) {
+                    android.util.Log.w("vsw-websearch", "finishWithThumbs: " + exc);
+                }
+
+                String extra = null;
+                if (got > 0) {
+                    extra = "结果图 " + got + " 张已存成本地小图（引擎有防盗链，直接引用会全部裂开）";
+                } else if (want > 0) {
+                    extra = "结果图没能取回来（引擎拦了请求），可以点「复制图片链接」自己在浏览器里看";
+                }
+                final String enriched = obj.toString();
+                final String merged = extra == null ? note : (note == null ? extra : note + " · " + extra);
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        finishWith(enriched, merged);
+                    }
+                });
+            }
+        }, "vsw-thumb-fetch").start();
+    }
+
+    /** 抓一张结果图，缩到 360px 压成 JPEG，返回 `data:image/jpeg;base64,…`；失败返回 null。 */
+    private String fetchThumb(String url) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setConnectTimeout(THUMB_TIMEOUT_MS);
+            conn.setReadTimeout(THUMB_TIMEOUT_MS);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", UA_MOBILE);
+            // 关键：把自己装成引擎自己的页面，防盗链才肯给图
+            conn.setRequestProperty("Referer", searchUrl == null ? "https://graph.baidu.com/" : searchUrl);
+            conn.setRequestProperty("Accept", "image/*,*/*;q=0.8");
+            if (conn.getResponseCode() != 200) return null;
+
+            InputStream in = conn.getInputStream();
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            byte[] chunk = new byte[16 * 1024];
+            int read;
+            int total = 0;
+            while ((read = in.read(chunk)) > 0) {
+                total += read;
+                if (total > 6 * 1024 * 1024) break;      // 单张上限 6 MB，防跑飞
+                buffer.write(chunk, 0, read);
+            }
+            in.close();
+            byte[] raw = buffer.toByteArray();
+
+            // 先读尺寸再抽样解码：结果图有些是 4K 截图，直接解会吃内存
+            android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.length, bounds);
+            int sample = 1;
+            int longest = Math.max(bounds.outWidth, bounds.outHeight);
+            while (longest / sample > THUMB_SIDE * 2) sample *= 2;
+
+            android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
+            opts.inSampleSize = sample;
+            android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.length, opts);
+            if (bitmap == null) return null;
+            try {
+                int w = bitmap.getWidth();
+                int h = bitmap.getHeight();
+                int side = Math.max(w, h);
+                android.graphics.Bitmap out = bitmap;
+                if (side > THUMB_SIDE) {
+                    float scale = (float) THUMB_SIDE / side;
+                    out = android.graphics.Bitmap.createScaledBitmap(bitmap,
+                            Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale)), true);
+                }
+                ByteArrayOutputStream jpeg = new ByteArrayOutputStream();
+                out.compress(android.graphics.Bitmap.CompressFormat.JPEG, 72, jpeg);
+                if (out != bitmap) out.recycle();
+                byte[] bytes = jpeg.toByteArray();
+                return "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP);
+            } finally {
+                bitmap.recycle();
+            }
+        } catch (Throwable exc) {
+            android.util.Log.w("vsw-websearch", "fetchThumb " + url + ": " + exc);
+            return null;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
     }
 
     /** 把一句提示塞进结果 JSON，页面能显示「为什么先给了你这些」。 */

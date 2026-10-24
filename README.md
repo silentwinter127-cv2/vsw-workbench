@@ -352,6 +352,32 @@ startActivityForResult(new Intent(this, QrScanActivity.class), REQ_SCAN);
 | 清单补 `<activity android:name=".QrScanActivity">`，锁竖屏 | 能启动了；预览旋转只按竖屏算，锁上更稳 |
 | `openScanner()` 外面再包一层 try/catch | 万一还打不开，提示手填地址，不闪退 |
 
+## 手机搜图「结果图全部消失」（r23）
+
+现象：手机上点「手机搜」，百度/360 的页面跑完了、识别结论也有，但结果图一张都不显示。
+
+根因不在提取脚本 —— 在**防盗链**。结果面板原来是这么画的：
+
+```html
+<img src="${esc(x.u)}">
+```
+
+`x.u` 是引擎的结果图地址（`https://t7.baidu.com/it/u=…`）。这种图只看 `Referer`：从引擎自己的页面发请求给图，从我们的页面（`file://` 或局域网地址）发请求就回 403。于是 `<img>` 全部加载失败，视觉上就是「图全没了」。在 WebView 里用 `fetch` 也不行 —— 跨域，而且同样没有对的 Referer。
+
+修法：**让原生带着引擎页面的 Referer 把图取回来**，缩成 360px 的 JPEG 内嵌成 data URL：
+
+| 位置 | 做法 |
+| --- | --- |
+| `WebSearchActivity.finishWithThumbs()` | 结果命中后不立刻返回，起 `vsw-thumb-fetch` 线程，取 `similar` 前 12 张 |
+| `WebSearchActivity.fetchThumb()` | `HttpURLConnection` + `Referer: <引擎搜索页>` + 移动 UA；先 `inJustDecodeBounds` 再 `inSampleSize` 抽样解码，压到 360px / JPEG 72；单张上限 6 MB |
+| 结果 JSON | 每张成功的加一个 `d` 字段（`data:image/jpeg;base64,…`） |
+| 手机页 | `<img src="${esc(x.d \|\| x.u)}">`；没取到的那张加 `referrerpolicy="no-referrer"` 再试一次 |
+| 面板文案 | 「相似图 5（其中 5 张已存成本地小图）」；一张都没取回来时如实说「结果图没能取回来（引擎拦了请求），可以点『复制图片链接』」 |
+
+为什么不用 `WebView` 的 `loadDataWithBaseURL` 或者让页面自己去抓：页面跑在 `file://` 里，跨域读响应体拿不到；`<img>` 又不可能带 Referer。**能带任意请求头的只有原生那一层**，所以这件事只能在那儿做。
+
+代价说清楚：多花几秒（12 张 × 最长 5 秒，实际通常 1–2 秒），结果 JSON 会变大（12 张小图约 200–400 KB），所以上限卡在 12 张、360px。
+
 ## 自测
 
 ```bash

@@ -252,6 +252,31 @@ print(json.dumps({'bytes': len(data)}))
     check('出错时把原因写在面板上',
       errSheet && /没有返回结果/.test(errSheet.body || ''), JSON.stringify(errSheet && errSheet.body));
 
+    // 防盗链：原生抓回来内嵌成 data URL 的那张（d）要优先用，没抓到的才退回远程 u
+    const embedded = await evaluate(`(async () => {
+      const px = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsL' +
+        'DBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAAB' +
+        'AAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==';
+      window.vswWebSearchResult(JSON.stringify({
+        guess: '橘猫', similar: [
+          { u: 'https://t7.baidu.com/a.jpg', d: px, page: 'https://example.com/a' },
+          { u: 'https://t8.baidu.com/b.jpg', page: '' },
+        ], sources: [], goods: [], note: '',
+      }));
+      await new Promise((r) => setTimeout(r, 200));
+      const imgs = $$('#sheetBody img');
+      return { srcs: imgs.map((i) => i.getAttribute('src') || ''),
+        body: $('#sheetBody').innerText.slice(0, 300) };
+    })()`);
+    check('有内嵌图时优先用内嵌的（iVBOR/JFIF data URL），不再直接引用远程地址',
+      embedded && embedded.srcs.length === 2
+        && embedded.srcs[0].indexOf('data:image/jpeg;base64,') === 0,
+      JSON.stringify(embedded && embedded.srcs.map((x) => x.slice(0, 32))));
+    check('没内嵌的那张退回远程地址', embedded && embedded.srcs[1] === 'https://t8.baidu.com/b.jpg',
+      JSON.stringify(embedded && embedded.srcs[1]));
+    check('统计里说清有几张存成了本地小图', embedded && /1 张已存成本地小图/.test(embedded.body || ''),
+      JSON.stringify(embedded && embedded.body));
+
     const errors = await evaluate('(() => (window.__ERRORS || []).length)()');
     check('全程没有未捕获异常', errors === 0, JSON.stringify(errors));
   } finally {

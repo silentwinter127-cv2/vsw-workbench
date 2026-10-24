@@ -1370,15 +1370,18 @@ function openPhoneSearchResult(data, ctx) {
   $('#cropConfirm').classList.add('hide');
   $('#cropStage').innerHTML = '';
   const links = similar.map((x) => x.u).filter(Boolean).join('\n');
+  // x.d 是原生用带 Referer 的请求抓回来、缩成小图的 data URL。
+  // 引擎的结果图有防盗链，直接用 x.u 会 403 —— 那正是「结果图全部消失」的原因。
+  const embedded = similar.filter((x) => x.d).length;
   const pages = sources.map((x) => x.url).filter(Boolean).join('\n');
   $('#sheetBody').innerHTML = `
     ${data.error ? `<div class="warn">${esc(data.error)}</div>` : ''}
     ${data.note ? `<div class="small">${esc(data.note)}</div>` : ''}
     ${data.guess ? `<div class="t1">识别结论：<b>${esc(data.guess)}</b></div>` : ''}
-    <div class="small">相似图 ${similar.length} · 来源网页 ${sources.length}${goods.length ? ` · 商品 ${goods.length}` : ''}</div>
+    <div class="small">相似图 ${similar.length}${embedded ? `（其中 ${embedded} 张已存成本地小图）` : ''} · 来源网页 ${sources.length}${goods.length ? ` · 商品 ${goods.length}` : ''}</div>
     ${similar.length ? `<div class="flist" style="margin-top:10px">${similar.slice(0, 40).map((x) => `
       <div class="fcard">
-        <img src="${esc(x.u)}" alt="" loading="lazy">
+        <img src="${esc(x.d || x.u)}" alt="" loading="lazy"${x.d ? '' : ' referrerpolicy="no-referrer"'}>
         <div class="meta2"><div class="ln"><span class="mono">${x.w || '?'}×${x.h || '?'}</span>
           ${x.page ? `<a href="${esc(x.page)}" target="_blank" rel="noopener">来源</a>` : ''}</div></div>
       </div>`).join('')}</div>` : '<div class="empty">没抓到相似图（引擎页面结构可能变了，或者还没出结果）</div>'}

@@ -439,6 +439,14 @@ APK 版把上面这套页面打进 `assets/mobile/index.html`，用 `file://` �
 
 ---
 
+### 结果图为什么会「全部消失」（r23）
+
+百度/360 的结果图有防盗链：它们只看 `Referer`。我们的结果面板原来直接 `<img src="${x.u}">` 引用远程图，从 `file://` 或局域网地址发出去没有 Referer，服务端回 403 —— 于是识别结论有、图一张都没有。WebView 里用 `fetch` 也救不了（跨域 + 同样没 Referer）。
+
+所以改成**原生带 Referer 去取图**：`WebSearchActivity.finishWithThumbs()` 在结果命中后起一个线程，对前 12 张调 `fetchThumb()`（`HttpURLConnection` + `Referer: <引擎页>` + 移动 UA，先 `inJustDecodeBounds` 再 `inSampleSize`，压成 360px / JPEG 72，单张上限 6 MB），把结果塞进每条 `d` 字段（data URL）。页面用 `x.d || x.u` 渲染，并在统计里如实写「其中 N 张已存成本地小图」；一张都没取回来时明说「引擎拦了请求，可以复制图片链接自己在浏览器里看」。
+
+代价：多 1–2 秒、结果 JSON 大 200–400 KB，所以上限卡 12 张 / 360px。
+
 ### 手机自己搜（半自动，r19）
 
 批量那条路要电脑。电脑不在手边时，APK 里的队列项还有一个「手机搜」：原生把图交给

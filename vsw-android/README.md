@@ -674,6 +674,19 @@ Invoke-WebRequest 'https://repo1.maven.org/maven2/com/google/zxing/core/3.5.3/co
    `window.vswUpdateProgress/vswUpdateFailed/vswUpdateNeedPerm` —— **进度和报错全都静默无效**。
    改名对齐后，探针里专门验了「进度条走到 42%」「校验失败显示原因」「缺权限时指路去设置」。
 
+### 手机搜图的结果图全裂了（r23）
+
+百度/360 的结果图有防盗链，只认 `Referer`。面板原来直接 `<img src="https://t7.baidu.com/…">`，从 `file://` 页面发出去没有 Referer → 403 → 一张都不显示（识别结论还在，所以看起来像「提取脚本坏了」，其实提取是好的）。
+
+修法：`WebSearchActivity` 命中结果后不立刻返回，先起 `vsw-thumb-fetch` 线程把前 12 张抓回来（`HttpURLConnection` 带 `Referer: <引擎搜索页>` + 移动 UA，5 秒超时、单张 6 MB 上限、`inSampleSize` 抽样解码、360px / JPEG 72），转成 `data:image/jpeg;base64,…` 塞进每条 `d` 字段；页面 `x.d || x.u`，并把「其中 N 张已存成本地小图」写在统计行。
+
+踩到的两个细节：
+
+- `Referer` 必须是**引擎搜索页**，不能是图片地址本身，否则照样 403。
+- 解码一定要先 `inJustDecodeBounds` 再 `inSampleSize`：结果图里有 4K 截图，直接解会吃掉几十 MB。
+
+验证：`vsw-probe-phone-search.js` 从 20 项加到 **23 项**（内嵌图优先、没内嵌的退回远程、统计文案），并新增 APK 内容检查（dex 里要有 `finishWithThumbs`/`fetchThumb`/`vsw-thumb-fetch`，页面里要有 `x.d || x.u`）。
+
 ### 点「扫码」就闪退（r22）
 
 小米 9 / MIUI 12.5 / 安卓 11 上用户实测：点扫码直接闪退。
