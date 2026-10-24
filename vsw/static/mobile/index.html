@@ -127,8 +127,13 @@ label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5
 .sheet.open{transform:none}
 .sheet .shead{display:flex;align-items:center;gap:8px;padding:calc(var(--safe-t) + 10px) 12px 10px;
   border-bottom:1px solid var(--line);background:var(--bg1)}
-.sheet .sbody{flex:1;overflow-y:auto;padding:12px 12px calc(var(--safe-b) + 20px)}
+.sheet .sbody, #sheetBody{flex:1;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:12px 12px calc(var(--safe-b) + 20px)}
+/* 面板底部的操作按钮吸在底部：内容再长也点得到（「存进结果板」就在这里） */
+.sheetact{position:sticky;bottom:calc(-1 * (var(--safe-b) + 20px));margin-top:12px;padding:10px 0 calc(var(--safe-b) + 6px);background:linear-gradient(180deg, rgba(0,0,0,0) 0%, var(--bg) 28%);
+z-index:2}
 .sheet img.hero{width:100%;border-radius:12px;background:#05080c;display:block}
+/* 固定操作栏：内容再长，「存进结果板」「关闭」也一直在屏幕底部，不用滚到底去找 */
+.sheet .sfoot{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:8px;padding:10px 12px calc(var(--safe-b) + 10px);border-top:1px solid var(--line);background:var(--bg1)}
 .kv{display:grid;grid-template-columns:74px 1fr;gap:5px 10px;font-size:13px;margin:10px 0}
 .kv dt{color:var(--mute)}
 .kv dd{margin:0;word-break:break-all}
@@ -1512,20 +1517,24 @@ function openPhoneSearchResult(data, ctx) {
     ${!shownSimilar.length && diagText ? `<div class="small">${esc(diagText)}</div>` : ''}
     ${data.guess ? `<div class="t1">识别结论：<b>${esc(data.guess)}</b></div>` : ''}
     <div class="small">相似图 ${shownSimilar.length}${shownEmbedded ? `（其中 ${shownEmbedded} 张已存成本地小图）` : ''} · 图源：${diag && diag.source === 'pcsimi' ? '引擎接口' : '页面里捡的'} · 来源网页 ${shownSources.length}${shownGoods.length ? ` · 商品 ${shownGoods.length}` : ''}</div>
-    ${shownSimilar.length ? `<div class="flist" style="margin-top:10px">${shownSimilar.slice(0, 40).map((x) => `
+    ${shownSimilar.length ? `<div class="flist" style="margin-top:10px">${shownSimilar.slice(0, 12).map((x) => `
       <div class="fcard">
         <img src="${esc(x.d || x.u)}" alt="" loading="lazy"${x.d ? '' : ' referrerpolicy="no-referrer"'} onerror="this.dataset.broken='1';this.style.visibility='hidden'">
         <div class="meta2"><div class="ln"><span class="mono">${x.w || '?'}×${x.h || '?'}</span>
           ${x.page ? `<a href="${esc(x.page)}" target="_blank" rel="noopener">来源</a>` : ''}</div></div>
-      </div>`).join('')}</div>` : '<div class="empty">没抓到相似图（引擎页面结构可能变了，或者还没出结果）</div>'}
+      </div>`).join('')}</div>
+      ${shownSimilar.length > 12 ? `<div class="small" style="margin-top:8px">上面只画了前 12 张；存进结果板会带上全部 ${shownSimilar.length} 张。</div>` : ''}` : '<div class="empty">没抓到相似图（引擎页面结构可能变了，或者还没出结果）</div>'}
     ${shownGoods.length ? `<div class="small" style="margin-top:10px">商品：${shownGoods.slice(0, 6).map((g) => `${esc(g.platform || '')} ¥${esc(g.price)} ${esc(g.title)}`).join(' · ')}</div>` : ''}
     ${shownSources.length ? `<div class="small" style="margin-top:10px">来源网页：<br>${shownSources.slice(0, 12).map((x) => `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title || x.url)}</a>`).join('<br>')}</div>` : ''}
-    <div class="row" style="margin-top:12px">
-      ${shownSimilar.length ? `<button class="btn sm primary" id="saveResults">存进结果板（${shownSimilar.length}）</button>` : ''}
-      ${links ? `<button class="btn sm" id="copyImgLinks">复制图片链接</button>` : ''}
-      ${pages ? `<button class="btn sm" id="copyPageLinks">复制来源链接</button>` : ''}
-      <button class="btn sm ghost" data-close-sheet>关闭</button>
-    </div>`;
+    `;
+  // 操作按钮放进面板底部的固定栏：不随内容滚走，永远点得到
+  const foot = $('#sheetFoot');
+  foot.classList.remove('hide');
+  foot.innerHTML = `
+    ${shownSimilar.length ? `<button class="btn sm primary" id="saveResults">存进结果板（${shownSimilar.length}）</button>` : ''}
+    ${links ? `<button class="btn sm" id="copyImgLinks">复制图片链接</button>` : ''}
+    ${pages ? `<button class="btn sm" id="copyPageLinks">复制来源链接</button>` : ''}
+    <button class="btn sm ghost" data-close-sheet>关闭</button>`;
   openSheet();
   // 图到底画出来没有：坏掉的图自己会打上 data-broken，两秒后数一次并明说
   setTimeout(() => {
@@ -3487,11 +3496,16 @@ async function importDataset(file) {
 
 /* ---------------------------------------------------------------- 壳：标签、面板 */
 function openSheet() {
+  // 首次说明是全屏遮罩（z-index 70 > 面板的 60）：它开着的时候面板上什么都点不动
+  const intro = $('#intro');
+  if (intro && !intro.classList.contains('hide')) intro.classList.add('hide');
   $('#sheet').classList.add('open');
   history.pushState({ sheet: 1 }, '');   // 让系统返回键先关面板，而不是退出应用
 }
 function closeSheet() {
   $('#sheet').classList.remove('open');
+  const foot = $('#sheetFoot');
+  if (foot) { foot.classList.add('hide'); foot.innerHTML = ''; }
 }
 
 function switchTab(tab) {
@@ -3704,6 +3718,7 @@ window.addEventListener('DOMContentLoaded', boot);
     <div id="cropStage"></div>
     <div id="sheetBody"></div>
   </div>
+  <div class="sfoot hide" id="sheetFoot"></div>
 </aside>
 </body>
 </html>

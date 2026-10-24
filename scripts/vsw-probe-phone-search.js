@@ -369,6 +369,43 @@ print(json.dumps({'bytes': len(data)}))
     check('这种时候不渲染那些样图', domOnly && domOnly.imgs === 0, JSON.stringify(domOnly && domOnly.imgs));
     check('并且告诉用户回搜索页点「上传图片」', domOnly && domOnly.hasHint, JSON.stringify(domOnly && domOnly.hasHint));
 
+    // ---- 面板底部固定操作栏（r39）：以前按钮在 3000px 长的滚动区最底下，等于点不到
+    // 首次说明是全屏遮罩（z-index 70），探针里先点掉它，否则任何点击都会命中它
+    await evaluate(`(() => {
+      const skip = document.querySelector('#introSkip');
+      if (skip) skip.click();
+      const intro = document.querySelector('#intro');
+      if (intro) intro.classList.add('hide');
+      return 1;
+    })()`);
+    await sleep(200);
+    await evaluate(`(() => {
+      const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+      const similar = Array.from({ length: 30 }, (_, i) => ({ u: 'https://mms0.baidu.com/it/u=' + i, d: png, w: 300, h: 200, page: '' }));
+      window.vswWebSearchResult(JSON.stringify({ similar, sources: [], goods: [], guess: '测试', diag: { pcsimi: 30, viaPcsimi: 30, source: 'pcsimi', hosts: {} } }));
+      return 1;
+    })()`);
+    await sleep(600);
+    const foot = await evaluate(`(() => {
+      const b = document.querySelector('#saveResults');
+      if (!b) return { none: true };
+      const r = b.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return { inFoot: !!b.closest('#sheetFoot'),
+               footVisible: !document.querySelector('#sheetFoot').classList.contains('hide'),
+               visible: r.y > 0 && r.bottom <= window.innerHeight,
+               onTop: !!(hit && (hit === b || b.contains(hit))),
+               hit: hit && (hit.id || hit.tagName),
+               cards: document.querySelectorAll('#sheetBody .fcard').length };
+    })()`);
+    if (foot && foot.none) console.log('  [诊断] 面板里没有 #saveResults');
+    check('「存进结果板」在固定底栏里，不随内容滚走', foot && foot.inFoot === true, JSON.stringify(foot));
+    check('30 张结果时不滚动也能看见按钮', foot && foot.visible === true, JSON.stringify(foot && foot.visible));
+    check('按钮中心点命中它自己（没被别的元素盖住）', foot && foot.onTop === true, JSON.stringify(foot && foot.onTop));
+    check('预览最多画 12 张（其余只给数字）', foot && foot.cards <= 12, JSON.stringify(foot && foot.cards));
+    check('关掉面板会把底栏清空', await evaluate(`(() => { closeSheet(); return !document.querySelector('#sheetFoot').innerHTML; })()`) === true, '');
+
+
     // 本地没有那张图（队列项是电脑上新加的）时，要现去电脑要一张，而不是弹
     // 「本地没有这张图：先同步一次快照再搜」。线上这个 bug 用户截图里出现过。
     const onDemand = await evaluate(`(async () => {
