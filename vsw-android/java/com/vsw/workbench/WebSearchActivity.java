@@ -71,6 +71,10 @@ public class WebSearchActivity extends Activity {
     private static final long LIMIT_MS = 20 * 60 * 1000L;
     /** 一次抓图最多累计几张：再多页面也画不下，intent 也扛不住。 */
     private static final int CAPTURE_MAX = 160;
+    /** 深挖一层：最多对前几张相似图各自再搜一次（每张都要开一次页面，慢，所以有上限）。 */
+    private static final int DEPTH_MAX = 8;
+    /** 深挖时每张图给多久出结果：到点还没结果就换下一张。 */
+    private static final long DEPTH_IMAGE_MS = 12000;
     private static final long TAP_GRACE_MS = 2500;
     /** 最多内嵌几张结果图：再多 JSON 就太大了，交付给页面的 intent 有大小上限。 */
     private static final int THUMB_MAX = 24;
@@ -128,6 +132,12 @@ public class WebSearchActivity extends Activity {
     private final java.util.LinkedHashSet<String> accUrls = new java.util.LinkedHashSet<String>();
     /** 最近一次提取的完整结果（保留 products/sources/diag 等字段）。 */
     private JSONObject accLatest = null;
+    /** 深挖阶段：待挖的图地址、挖到第几张、每张的开始时间。 */
+    private final java.util.ArrayList<String> depthUrls = new java.util.ArrayList<String>();
+    private int depthIndex = -1;
+    private long depthStartedAt = 0;
+    private boolean depthPhase = false;
+    private int depthBase = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -193,6 +203,17 @@ public class WebSearchActivity extends Activity {
             }
         });
 
+        Button deep = new Button(this);
+        deep.setText("深挖一层");
+        deep.setAllCaps(false);
+        deep.setTextSize(12f);
+        deep.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                startDepthCrawl();
+            }
+        });
+
         Button close = new Button(this);
         close.setText("关闭");
         close.setAllCaps(false);
@@ -229,6 +250,10 @@ public class WebSearchActivity extends Activity {
         startCapBtn = startCap;
         stopCapBtn = stopCap;
         stopCap.setEnabled(false);
+        startCap.setTextSize(12f);
+        stopCap.setTextSize(12f);
+        close.setTextSize(12f);
+        bar.addView(deep);
         bar.addView(startCap);
         bar.addView(stopCap);
         bar.addView(close);
@@ -518,6 +543,10 @@ public class WebSearchActivity extends Activity {
                             accumulate(obj);
                             // 继续往下滚：结果是一屏一屏懒加载的，不滚就只有首屏那几张
                             web.evaluateJavascript(VSW_SCROLL_JS, null);
+                            if (depthPhase
+                                    && System.currentTimeMillis() - depthStartedAt > DEPTH_IMAGE_MS) {
+                                nextDepthImage();
+                            }
                         } else {
                             setHint("还没把图交给识图：先点页底「点这里…」，等出结果再点「开始抓图」");
                         }
@@ -575,6 +604,72 @@ public class WebSearchActivity extends Activity {
             android.util.Log.w("vsw-websearch", "stopCapture: " + exc);
         }
         finishWithThumbs(base.toString(), "你点了结束抓图，累计 " + accSimilar.length() + " 张");
+    }
+
+    /**
+     * 深挖一层：对已经抓到的前几张相似图，各自再「以图搜图」一次。
+     *
+     * 做法是把每张图的地址喂给引擎的「按图搜」入口
+     * （百度：`graph.baidu.com/details?...&image=<url>`），等于用户手动点进那张相似图
+     * 再看它自己的相似结果 —— 只是自动串行跑，一次一张，抓到的都并进同一份累计。
+     * 上限 DEPTH_MAX 张：每张都要开一次页面，太多会等到天荒地老。
+     */
+    private void startDepthCrawl() {
+        if (depthPhase) {
+            setHint("正在深挖，等这一轮跑完");
+            return;
+        }
+        if (accSimilar.length() == 0) {
+            setHint("先点「开始抓图」抓一轮，再深挖");
+            return;
+        }
+        if (!"baidu".equals(engine)) {
+            setHint("深挖目前只支持百度识图（按图搜的地址是百度那套）");
+            return;
+        }
+        depthUrls.clear();
+        for (int i = 0; i < accSimilar.length() && depthUrls.size() < DEPTH_MAX; i++) {
+            JSONObject item = accSimilar.optJSONObject(i);
+            if (item == null) continue;
+            String u = safe(item.optString("u", ""));
+            if (u.isEmpty() || u.startsWith("data:")) continue;
+            depthUrls.add(u);
+        }
+        if (depthUrls.isEmpty()) {
+            setHint("没拿到可深挖的图地址");
+            return;
+        }
+        depthBase = accSimilar.length();
+        depthIndex = -1;
+        depthPhase = true;
+        capturing = true;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (startCapBtn != null) startCapBtn.setEnabled(false);
+                if (stopCapBtn != null) stopCapBtn.setEnabled(true);
+            }
+        });
+        nextDepthImage();
+    }
+
+    private void nextDepthImage() {
+        if (!depthPhase || finished) return;
+        depthIndex += 1;
+        if (depthIndex >= depthUrls.size()) {
+            depthPhase = false;
+            int added = accSimilar.length() - depthBase;
+            setHint("深挖完成：多抓到 " + added + " 张（累计 " + accSimilar.length() + " 张），点「结束抓图」交回");
+            stopCapture();
+            return;
+        }
+        String target = depthUrls.get(depthIndex);
+        String url = "https://graph.baidu.com/details?isfromtusoupc=1&tn=pc&carousel=0&image="
+                + java.net.URLEncoder.encode(target);
+        depthStartedAt = System.currentTimeMillis();
+        setHint("深挖 " + (depthIndex + 1) + "/" + depthUrls.size()
+                + "：正在看这张相似图自己的结果…（已多抓 " + Math.max(0, accSimilar.length() - depthBase) + " 张）");
+        web.loadUrl(url);
     }
 
     /** 把这一次提取到的相似图并入累计表（按 URL 去重，最多 CAPTURE_MAX 张）。 */
