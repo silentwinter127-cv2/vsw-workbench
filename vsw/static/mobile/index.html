@@ -1433,7 +1433,12 @@ async function savePhoneResults(similar, ctx, guess) {
     const dup = Number(res.duplicates || 0);
     const bad = (res.failures || []).length;
     const extra = [dup ? `重复 ${dup}` : '', bad ? `失败 ${bad}` : ''].filter(Boolean).join(' · ');
-    toast(`已收进结果板 ${n} 张${extra ? `（${extra}）` : ''}`, n === 0);
+    if (n === 0 && dup > 0) {
+      // 一张都没进来、但全是重复：这不是失败，是这些图库里已经有了
+      toast(`这 ${dup} 张都已经在库里了，没有新图`);
+    } else {
+      toast(`已收进结果板 ${n} 张${extra ? `（${extra}）` : ''}`, n === 0);
+    }
     if (n) {
       closeSheet();
       switchTab('board');
@@ -1505,7 +1510,7 @@ function openPhoneSearchResult(data, ctx) {
     ${shownGoods.length ? `<div class="small" style="margin-top:10px">商品：${shownGoods.slice(0, 6).map((g) => `${esc(g.platform || '')} ¥${esc(g.price)} ${esc(g.title)}`).join(' · ')}</div>` : ''}
     ${shownSources.length ? `<div class="small" style="margin-top:10px">来源网页：<br>${shownSources.slice(0, 12).map((x) => `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title || x.url)}</a>`).join('<br>')}</div>` : ''}
     <div class="row" style="margin-top:12px">
-      ${shownEmbedded ? `<button class="btn sm primary" id="saveResults">存进结果板（${shownEmbedded}）</button>` : ''}
+      ${shownSimilar.length ? `<button class="btn sm primary" id="saveResults">存进结果板（${shownSimilar.length}）</button>` : ''}
       ${links ? `<button class="btn sm" id="copyImgLinks">复制图片链接</button>` : ''}
       ${pages ? `<button class="btn sm" id="copyPageLinks">复制来源链接</button>` : ''}
       <button class="btn sm ghost" data-close-sheet>关闭</button>
