@@ -58,7 +58,7 @@ public class MainActivity extends Activity {
      * 用在应用名和启动屏里的构建标识。每次改 APK 都要改它 —— 这样"我装了新版吗"
      * 这个问题不需要靠猜（真机上真的发生过"装的是旧包"）。
      */
-    static final String BUILD_TAG = "r32";
+    static final String BUILD_TAG = "r34";
 
     private int assetBytes = 0;
     private long pageFileLength = 0;
@@ -830,8 +830,12 @@ public class MainActivity extends Activity {
             return;
         }
         if (requestCode == REQ_WEBSEARCH) {
-            String payload = (resultCode == RESULT_OK && data != null)
-                    ? data.getStringExtra(WebSearchActivity.EXTRA_RESULT) : null;
+            // 大 JSON 走静态交接（Intent extras 过 Binder 事务会 TransactionTooLarge 崩）
+            String payload = WebSearchActivity.takeResult();
+            if (payload == null && resultCode == RESULT_OK && data != null) {
+                payload = data.getStringExtra(WebSearchActivity.EXTRA_RESULT);
+                if ("static".equals(payload)) payload = WebSearchActivity.takeResult();
+            }
             if (payload == null || payload.trim().isEmpty()) {
                 payload = "{\"error\":\"搜索页没有返回结果\"}";
             }

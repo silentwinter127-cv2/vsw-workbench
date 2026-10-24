@@ -71,17 +71,34 @@ public class WebSearchActivity extends Activity {
     private static final int CAPTURE_MAX = 160;
     private static final long TAP_GRACE_MS = 2500;
     /** 最多内嵌几张结果图：再多 JSON 就太大了，交付给页面的 intent 有大小上限。 */
-    private static final int THUMB_MAX = 40;
+    private static final int THUMB_MAX = 24;
     /** 内嵌图的最长边：结果面板里是小缩略图，360px 足够。 */
     private static final int THUMB_SIDE = 360;
     /** 单张下载的超时（毫秒）。引擎图不大，5 秒拿不到就跳过。 */
     private static final int THUMB_TIMEOUT_MS = 5000;
     /** 内嵌图的总字节上限：intent 里塞太多会 TransactionTooLarge。 */
-    private static final int THUMB_TOTAL_MAX = 320 * 1024;
+    private static final int THUMB_TOTAL_MAX = 224 * 1024;
     /** 下载结果图时假装自己是引擎页面自己（防盗链要看 Referer）。 */
     private static final String UA_MOBILE =
             "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) "
                     + "Chrome/120.0.0.0 Mobile Safari/537.36";
+
+    /**
+     * 结果走进程内静态交接，不塞进 Intent。
+     *
+     * 为什么：Intent 的 extras 要过一次 Binder 事务（上限 1 MB 左右）。抓图累计几百 KB
+     * 的 JSON（160 条 + 内嵌小图）再乘上 parcel 开销，`setResult()` 就会抛
+     * TransactionTooLargeException —— 表现就是「结束抓图之后闪退」。
+     * 两个 Activity 在同一个进程里，直接用一个静态字段交接即可。
+     */
+    private static volatile String staticResult = null;
+
+    /** 取走上次交回的结果（取一次就清空）。 */
+    static String takeResult() {
+        String out = staticResult;
+        staticResult = null;
+        return out;
+    }
 
     private WebView web;
     private TextView hint;
@@ -480,6 +497,8 @@ public class WebSearchActivity extends Activity {
                         // 还没把图交给识图之前，页面上只有首页样图 —— 那些不是搜索结果，别收。
                         if (offered || !captured.isEmpty()) {
                             accumulate(obj);
+                            // 继续往下滚：结果是一屏一屏懒加载的，不滚就只有首屏那几张
+                            web.evaluateJavascript(VSW_SCROLL_JS, null);
                         } else {
                             setHint("还没把图交给识图：先点页底「点这里…」，等出结果再点「开始抓图」");
                         }
@@ -577,9 +596,15 @@ public class WebSearchActivity extends Activity {
         handler.removeCallbacksAndMessages(null);
         String payload = json == null || json.trim().isEmpty() ? "{}" : json.trim();
         if (note != null) payload = mergeNote(payload, note);
+        staticResult = payload;
         Intent data = new Intent();
-        data.putExtra(EXTRA_RESULT, payload);
-        setResult(RESULT_OK, data);
+        try {
+            // 只带一个标记：真正的 JSON 在 staticResult 里
+            data.putExtra(EXTRA_RESULT, "static");
+            setResult(RESULT_OK, data);
+        } catch (Throwable exc) {
+            android.util.Log.w("vsw-websearch", "setResult: " + exc);
+        }
         finish();
     }
 
@@ -664,6 +689,32 @@ public class WebSearchActivity extends Activity {
             }
         }, "vsw-thumb-fetch").start();
     }
+
+    /**
+     * 抓图期间每隔一次轮询往下滚一屏，并在到底时点一次「查看更多 / 下一页」。
+     *
+     * 我们不是在「抓这一张图的结果」这件事上偷懒 —— 是引擎把结果一屏一屏懒加载，
+     * 不滚就只有首屏那 8 张。滚下去，更多相关图才会被渲染出来，提取脚本才看得到。
+     */
+    private static final String VSW_SCROLL_JS =
+            "(function(){"
+            + "var before=window.scrollY||0;"
+            + "try{window.scrollBy(0,Math.round((window.innerHeight||800)*0.85));}catch(e){}"
+            + "var doc=document.documentElement||document.body;"
+            + "var h=doc?doc.scrollHeight:0;"
+            + "var atBottom=((window.scrollY||0)+(window.innerHeight||0))>=(h-60);"
+            + "var clicked='';"
+            + "if(atBottom){"
+            + "var re=/查看更多|加载更多|展开更多|更多结果|下一页|下页/;"
+            + "var els=document.querySelectorAll('button,a,div,span');"
+            + "for(var i=0;i<els.length;i++){var e=els[i];var t=(e.innerText||'').trim();"
+            + "if(!t||t.length>8||!re.test(t))continue;"
+            + "var r=e.getBoundingClientRect();if(!r||r.width<20||r.height<10)continue;"
+            + "try{e.click();clicked=t;}catch(x){}break;}"
+            + "if(!clicked){try{window.scrollTo(0,0);}catch(x){}}"   // 到底又没按钮：回到顶部再来一轮
+            + "}"
+            + "return JSON.stringify({y:window.scrollY,moved:(window.scrollY||0)>before,h:h,atBottom:atBottom,clicked:clicked});"
+            + "})()";
 
     /** 把提取脚本的 diag 读成一句人话：捕获到几条 pcsimi、页面里都有哪些图主机。 */
     private static String diagnose(JSONObject diag) {

@@ -822,3 +822,8 @@ r18 在真机上的第一次「下载并安装」就炸了：包下完、SHA256 
 `WebSearchActivity` 顶栏两个按钮：`startCapture()` 置 `capturing=true`，`pollTask` 里
 `accumulate()` 按 `u` 去重累计（`CAPTURE_MAX=160`）；`stopCapture()` 把 `accSimilar`
 塞进最新提取结果（并写 `diag.capture`）再 `finishWithThumbs`。`THUMB_MAX` 12 → 40。
+
+### 结束抓图闪退 / 只抓首屏（r33/r34）
+
+结果改走进程内 `staticResult`（Intent extras 过 Binder 会 `TransactionTooLargeException`）；
+抓图期间每次轮询滚一屏、到底点「查看更多 / 下一页」，把懒加载的结果顶出来。

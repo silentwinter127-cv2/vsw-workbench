@@ -608,3 +608,16 @@ scripts/              自测、真实链路验证、引擎探针、APK 验证、
 
 两条守卫：① 还没上传图之前不累计（那时页面上只有首页样图）② 20 分钟硬上限才会自动收工。
 内嵌小图上限从 12 张提到 40 张，总字节仍卡在 320 KB（intent 会 `TransactionTooLarge`）。
+
+## 结束抓图闪退 + 只能抓到首屏（r33/r34）
+
+**闪退的真因**：结果原来走 `setResult()` 的 Intent extras，而 extras 要过一次 Binder
+事务（1 MB 左右）。抓图累计 160 条 + 内嵌小图，parcel 开销一乘就抛
+`TransactionTooLargeException` —— 表现正是「点结束抓图就闪退」。
+修法：两个 Activity 同一进程，改用静态字段 `WebSearchActivity.takeResult()` 交接，
+Intent 里只留一个 `"static"` 标记，`setResult` 外面再包一层 `try/catch` 兜底。
+内嵌小图预算也从 40 张/320 KB 收到 24 张/224 KB。
+
+**只能抓首屏**：引擎的结果是一屏一屏懒加载的，不滚页就只有首屏那 8 张。
+现在抓图期间每次轮询都往下滚一屏（`VSW_SCROLL_JS`），滚到底就把「查看更多 / 加载更多 /
+下一页」点一次；到底又没按钮就回到顶部再来一轮。累计按 URL 去重，上限 160 张。
