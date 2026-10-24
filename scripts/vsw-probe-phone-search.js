@@ -120,7 +120,16 @@ print(json.dumps({'bytes': len(data)}))
     await send('Page.enable');
     const evaluate = async (expression) => {
       const res = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-      if (res.result && res.result.exceptionDetails) return { __error: res.result.exceptionDetails.text };
+      if (res.result && res.result.exceptionDetails) {
+        const d = res.result.exceptionDetails;
+        const desc = String((d.exception && d.exception.description) || d.text || '');
+        console.log('  [evaluate 出错]', desc.slice(0, 400));
+        return { __error: d.text, desc: desc.slice(0, 300) };
+      }
+      if (res.result && res.result.exceptionDetails) {
+        const exc = res.result.exceptionDetails.exception || {};
+        console.log('  [evaluate 出错]', String(exc.description || res.result.exceptionDetails.text || '').slice(0, 400));
+      }
       return res.result && res.result.result ? res.result.result.value : null;
     };
 
@@ -129,7 +138,7 @@ print(json.dumps({'bytes': len(data)}))
 
     // 基础数据：三个队列项（百度 / 360 / 不支持自动识图的引擎），本地只给百度那项一张图
     const setup = await evaluate(`(async () => {
-      window.__CALLS = [];
+      window.__SAVE_CALLS = [];
       window.__SEARCH = null;
       window.__ERRORS = [];
       window.addEventListener('error', (e) => window.__ERRORS.push(String(e.message)));
@@ -276,6 +285,67 @@ print(json.dumps({'bytes': len(data)}))
       JSON.stringify(embedded && embedded.srcs[1]));
     check('统计里说清有几张存成了本地小图', embedded && /1 张已存成本地小图/.test(embedded.body || ''),
       JSON.stringify(embedded && embedded.body));
+
+    // 「存进结果板」：手机搜到的图要能收进工作台，否则结果板里永远没有这些图
+    const saved = await evaluate(`(async () => {
+      S.server = 'http://probe.local';
+      S.online = true;
+      window.__CALLS = [];
+      window.fetch = async (url, opts) => {
+        let body = {};
+        try { body = JSON.parse((opts && opts.body) || '{}'); } catch (e) { body = {}; }
+        window.__SAVE_CALLS.push({ url: String(url), body: body });
+        const u = String(url);
+        if (u.indexOf('/api/health') >= 0) {
+          return { ok: true, status: 200, json: async () => ({ ok: true, vision: { available: true } }) };
+        }
+        const snap = u.indexOf('/api/mobile/snapshot') >= 0;
+        return { ok: true, status: 200, json: async () => (snap
+          ? { findings: [], seeds: [], variants: [], jobs: [], trash: [], archives: [], archived: [], jobs_total: 0 }
+          : { imported: [{ id: 1 }, { id: 2 }], errors: [] }) };
+      };
+      window.vswWebSearchResult(JSON.stringify({
+        guess: '橘猫',
+        similar: [{ u: 'https://t7.baidu.com/a.jpg', d: 'data:image/jpeg;base64,AAAA' }],
+        sources: [], goods: [], note: '',
+        diag: { pcsimi: 3, viaPcsimi: 1, source: 'pcsimi', hosts: {} }
+      }));
+      await new Promise((r) => setTimeout(r, 250));
+      const btn = $('#saveResults');
+      const label = btn ? btn.textContent : '';
+      const bodyText = ($('#sheetBody') || {}).innerText || '';
+      const srcText = bodyText.indexOf('图源：引擎接口') >= 0 ? '图源：引擎接口' : '';
+      // 直接调真函数（按钮存在性由上面那项断言；这里验它到底发了什么请求）。
+      // S.online 会被 checkOnline 的定时器改，所以紧贴着调用前再置一次。
+      S.online = true;
+      await savePhoneResults([{ u: 'https://t7.baidu.com/a.jpg', d: 'data:image/jpeg;base64,AAAA' }], { label: '百度识图' });
+      await new Promise((r) => setTimeout(r, 350));
+      const all = window.__SAVE_CALLS || [];
+      const syncCall = all.filter((c) => c && String(c.url || '').indexOf('/api/mobile/sync') >= 0)[0] || null;
+      const toastText = (($$('#toast') && $$('#toast')[0]) || $('#toast') || {}).textContent || '';
+      return { label: label, saved: syncCall, src: srcText, toastText: toastText,
+        dbg2: { calls: all.length, online: S.online, server: S.server, urls: all.map((c) => String(c && c.url)) } };
+    })()`);
+    check('结果能一键存进结果板，按钮上写着张数', saved && /存进结果板（1）/.test(saved.label || ''),
+      JSON.stringify(saved && (saved.dbg || saved)));
+    check('在线时点它，明确告诉用户存了几张', saved && /已存进结果板/.test(saved.toastText || ''),
+      JSON.stringify(saved && saved.toastText));
+
+    // 离线时不能丢图：先存进手机待同步，联网后再推给电脑
+    const offline = await evaluate(`(async () => {
+      S.online = false;
+      const before = (await local.all('pending')).length;
+      await savePhoneResults([{ u: 'https://t7.baidu.com/off.jpg', d: 'data:image/jpeg;base64,BBBB' }], { label: '百度识图' });
+      await new Promise((r) => setTimeout(r, 250));
+      const rows = await local.all('pending');
+      return { added: rows.length - before,
+        url: rows.length ? String((rows[rows.length - 1].payload || {}).data_url || '') : '' };
+    })()`);
+    check('离线时先存进手机待同步，不丢图', offline && offline.added >= 1, JSON.stringify(offline && offline.added));
+    check('待同步里带的也是内嵌的 data URL', offline && String(offline.url).indexOf('data:image/jpeg;base64,') === 0,
+      JSON.stringify(offline && String(offline.url).slice(0, 32)));
+
+    check('面板写明图是从引擎接口来的', saved && /图源：引擎接口/.test(saved.src || ''), JSON.stringify(saved && saved.src));
 
     const errors = await evaluate('(() => (window.__ERRORS || []).length)()');
     check('全程没有未捕获异常', errors === 0, JSON.stringify(errors));
