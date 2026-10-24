@@ -1392,7 +1392,16 @@ window.vswWebSearchResult = function (payload) {
 // 把手机搜到的图收进工作台（能联网就直接推，离线就先存手机待同步）。
 // 以前这里只有「复制链接」——结果看完就没了，结果板里自然没有这些图。
 async function savePhoneResults(similar, ctx, guess) {
-  const picks = (similar || []).filter((x) => x.u || x.d).slice(0, 12);
+  // 抓图是累计的：一次可能有几十张。以前只送前 12 张，用户看到的就是「少了很多」。
+  const seen = new Set();
+  const picks = [];
+  for (const x of (similar || [])) {
+    const key = x.u || x.d;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    picks.push(x);
+    if (picks.length >= 60) break;
+  }
   if (!picks.length) {
     return toast('这次没有可收的图（引擎没返回结果）', true);
   }

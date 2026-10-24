@@ -827,3 +827,8 @@ r18 在真机上的第一次「下载并安装」就炸了：包下完、SHA256 
 
 结果改走进程内 `staticResult`（Intent extras 过 Binder 会 `TransactionTooLargeException`）；
 抓图期间每次轮询滚一屏、到底点「查看更多 / 下一页」，把懒加载的结果顶出来。
+
+### 抓图三处修正（r35）
+
+页面端收进结果板不再只送 12 张（去重最多 60）；`accumulate()` 遍历结果对象所有数组
+（related/products/more 也收）；抓图中点「关闭」会先弹确认，别让人手快把这一轮丢掉。

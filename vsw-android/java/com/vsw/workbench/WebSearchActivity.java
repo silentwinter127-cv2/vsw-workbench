@@ -1,6 +1,8 @@
 package com.vsw.workbench;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
@@ -197,6 +199,23 @@ public class WebSearchActivity extends Activity {
         close.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
+                if (capturing && accSimilar.length() > 0) {
+                    // 抓了一半就关掉 = 这一轮白抓。先说清楚，别让人手快点了。
+                    new AlertDialog.Builder(WebSearchActivity.this)
+                            .setTitle("还在抓图")
+                            .setMessage("已经抓到 " + accSimilar.length() + " 张，点「关闭」这些就交不回去了。"
+                                    + "要的话点「结束抓图」，结果会自己回页面。")
+                            .setPositiveButton("继续抓图", null)
+                            .setNegativeButton("仍然关闭", new DialogInterface.OnClickListener() {
+                                @Override
+                                public void onClick(DialogInterface dialog, int which) {
+                                    finishWithError("你关掉了搜索页，这一轮抓到的 "
+                                            + accSimilar.length() + " 张没有交回去");
+                                }
+                            })
+                            .show();
+                    return;
+                }
                 finishWithError("你关掉了搜索页");
             }
         });
@@ -519,7 +538,7 @@ public class WebSearchActivity extends Activity {
      */
     private void startCapture() {
         capturing = true;
-        setHint("抓图中：往下滚看更多结果，抓够了点「结束抓图」（已抓 " + accSimilar.length() + " 张）");
+        setHint("抓图中：会自动往下滚，抓够了点「结束抓图」；⚠️ 别点「关闭」——关掉这一轮就白抓了（已抓 " + accSimilar.length() + " 张）");
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -561,18 +580,24 @@ public class WebSearchActivity extends Activity {
     /** 把这一次提取到的相似图并入累计表（按 URL 去重，最多 CAPTURE_MAX 张）。 */
     private void accumulate(JSONObject obj) {
         if (obj == null) return;
-        JSONArray list = obj.optJSONArray("similar");
-        if (list == null || list.length() == 0) return;
         int added = 0;
-        for (int i = 0; i < list.length() && accSimilar.length() < CAPTURE_MAX; i++) {
-            JSONObject item = list.optJSONObject(i);
-            if (item == null) continue;
-            String u = safe(item.optString("u", ""));
-            if (u.isEmpty() || u.startsWith("data:")) continue;
-            if (accUrls.contains(u)) continue;
-            accUrls.add(u);
-            accSimilar.put(item);
-            added += 1;
+        // 不只是 similar：引擎还会把「相关图片 / 更多结果 / 商品图」放在别的数组里，
+        // 只要元素带 u（图片地址）就一起收 —— 用户滚出来的深层结果就不至于漏掉。
+        java.util.Iterator<String> keys = obj.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            JSONArray list = obj.optJSONArray(key);
+            if (list == null || list.length() == 0) continue;
+            for (int i = 0; i < list.length() && accSimilar.length() < CAPTURE_MAX; i++) {
+                JSONObject item = list.optJSONObject(i);
+                if (item == null) continue;
+                String u = safe(item.optString("u", ""));
+                if (u.isEmpty() || u.startsWith("data:")) continue;
+                if (accUrls.contains(u)) continue;
+                accUrls.add(u);
+                accSimilar.put(item);
+                added += 1;
+            }
         }
         if (added > 0) {
             setHint("抓图中：已抓 " + accSimilar.length() + " 张 · 往下滚能抓到更多，抓够点「结束抓图」");
