@@ -398,6 +398,45 @@ startActivityForResult(new Intent(this, QrScanActivity.class), REQ_SCAN);
 
 代价说清楚：多花几秒（12 张 × 最长 5 秒，实际通常 1–2 秒），结果 JSON 会变大（12 张小图约 200–400 KB），所以上限卡在 12 张、360px。
 
+## 手机搜「抓到 8 张无关图」的两层原因（r25 / r26 / r27）
+
+用户连报三次同一件事，最后一张截图给了铁证：面板上那行小字写着
+
+```
+相似图 8（其中 8 张已存成本地小图） · 图源：页面里捡的 · 来源网页 0
+```
+
+`图源：页面里捡的` 的意思是 **`pcsimi` 一条都没捕到** —— 也就是那次图片根本没传上去，
+页面停在百度识图首页。而那 8 张（啤酒瓶、水花、花、人像、雪山）正好就是首页的样图。
+所以我们一直不是在展示「搜索结果」，是在展示首页的推荐位。
+
+三层的修法，一层一层剥：
+
+| 层 | 症状 | 修法 |
+| --- | --- | --- |
+| 呈现（r25/r26） | 存进结果板后板里是空的 | 原来打的是 `/api/mobile/sync` 的 `imports`（建的是**种子**），结果板列的是 `findings`。新增 `POST /api/mobile/results` → `service.add_mobile_results()` → `ingest_payload(candidates=…)` |
+| 判定（r27） | 面板把首页样图当结果，还给了「存进结果板」按钮 | `diag.source === 'dom'` 时直接判失败：写「这次没把图交给引擎…回到搜索页点一下「上传图片」」，清空图片列表、不给保存按钮 |
+| 去重（r27） | 结果板里同一张啤酒图 6 条 | 引擎同一张图带多个尺寸地址（`~tplv-…`、`?x-oss-process=…`、`_500x500`）。`Service._image_key()` 归一地址（去查询串 + 去尺寸后缀）后去重，库里已有的地址直接算 `duplicates` |
+
+**顺手纠正一句我自己写错的话。** r23 的文案说「引擎有防盗链，直接引用会全部裂开」。实测不成立：
+从库里取 549 条真实引擎图地址（`mms0/1/2.baidu.com`、`p0.ssl.qhimgs1.com`），
+用「无 Referer / `https://graph.baidu.com/` / `https://graph.baidu.com/pcpage/index?tpl_from=pc`」
+三种方式请求，**全部 200**。所以「图看不见」跟防盗链无关，是压根没搜到东西。
+
+### 为什么不能绕过网页直接调上传接口
+
+试过：把图 multipart POST 到 `https://graph.baidu.com/upload?uptime=…`（带移动 UA、Origin、Referer），
+返回
+
+```json
+{"status":1,"msg":"Reject","data":null}
+```
+
+所以在服务端替用户上传这条路走不通，只能靠 WebView 里真实的用户手势点那次上传
+（`input.click()` 拿不到 user activation，这是 Chromium 的硬限制）。
+当前实现是：自动算坐标点一次，点不动就明说「点一下页面上「上传图片」那一块，图已经替你选好了」。
+
+
 ## 自测
 
 ```bash

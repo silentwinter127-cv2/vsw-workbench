@@ -73,6 +73,17 @@ def main():
         ]})
         check("同一张再收一次不会多出一条", r2["new_findings"] == 0 and r2["duplicates"] >= 1, str(r2))
 
+        print("B2 同一张图的多个尺寸地址只算重复")
+        # 真机上这类「同一张首页样图八个尺寸 URL」被当成 8 个对象收进结果板过，
+        # 所以这里专门钉住：只差尺寸参数/后缀的地址必须归一成同一个键。
+        r4 = svc.add_mobile_results({"job_id": job_id, "items": [
+            {"image_url": "https://mms-graph.cdn.bcebos.com/home-beer.jpg~tplv-abc123", "source_url": "https://example.com/a"},
+            {"image_url": "https://mms-graph.cdn.bcebos.com/home-beer.jpg", "source_url": "https://example.com/a"},
+            {"image_url": "https://mms-graph.cdn.bcebos.com/home-beer.jpg?x-oss-process=image/resize,w_500", "source_url": "https://example.com/a"},
+        ]})
+        check("尺寸不同的同一张只下载一次", r4["new_findings"] <= 1, str(r4))
+        check("另外两笔算重复", r4["duplicates"] >= 2, str(r4))
+
         print("C 队列项状态")
         job = svc.store.job(job_id)
         check("队列项进入「待复查」（说明这次搜索有货）", (job or {}).get("status") in ("review", "done"), str((job or {}).get("status")))

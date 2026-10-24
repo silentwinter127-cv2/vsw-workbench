@@ -408,7 +408,7 @@ public class WebSearchActivity extends Activity {
             finishWith(json, note);
             return;
         }
-        setHint("拿到了，正在把结果图存成能显示的图（引擎有防盗链）…");
+        setHint("拿到了，正在把结果图抓成本地小图…");
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -446,7 +446,7 @@ public class WebSearchActivity extends Activity {
                     // 否则用户只看到一句「没抓到图」，我们这边也无从下手。
                     extra = "没抓到相似图（诊断：" + diagnose(obj.optJSONObject("diag")) + "）";
                 } else if (got > 0) {
-                    extra = "结果图 " + got + "/" + want + " 张已存成本地小图（引擎有防盗链，直接引用会全部裂开）";
+                    extra = "结果图 " + got + "/" + want + " 张已抓成本地小图";
                 } else if (want > 0) {
                     extra = "结果图 0/" + want + " 张取回来"
                             + (lastThumbStatus > 0 ? "（最后一张回 HTTP " + lastThumbStatus + "）" : "")

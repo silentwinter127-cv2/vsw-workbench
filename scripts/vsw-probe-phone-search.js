@@ -348,6 +348,27 @@ print(json.dumps({'bytes': len(data)}))
 
     check('面板写明图是从引擎接口来的', saved && /图源：引擎接口/.test(saved.src || ''), JSON.stringify(saved && saved.src));
 
+    // domOnly：一张图都没交上去时，页面上能捡到的只有百度识图首页的样图。
+    // 上一版把 8 张样图当成「搜索结果」显示并存进结果板，用户看到的是一堆无关照片。
+    const domOnly = await evaluate(`(() => {
+      document.querySelectorAll('#sheetBody').forEach((el) => { el.innerHTML = ''; });
+      window.vswWebSearchResult({ similar: [
+        { u: 'https://mms-graph.cdn.bcebos.com/home-beer.jpg', w: 882, h: 693 },
+        { u: 'https://mms-graph.cdn.bcebos.com/home-splash.jpg?x-oss-process=image/resize,w_500', w: 1024, h: 1024 },
+        { u: 'https://mms-graph.cdn.bcebos.com/home-splash.jpg', w: 1024, h: 1024 },
+      ], sources: [], goods: [], guess: '', diag: { pcsimi: 0, source: 'dom' } });
+      const body = document.body.innerText || '';
+      const html = document.querySelector('#sheetBody').innerHTML;
+      return { hasWarn: body.indexOf('这次没把图交给引擎') >= 0,
+        noSave: body.indexOf('存进结果板') < 0,
+        imgs: (html.match(/<img/g) || []).length,
+        hasHint: body.indexOf('点一下「上传图片」') >= 0 };
+    })()`);
+    check('没交上图时面板直接说清（不把首页样图当结果）', domOnly && domOnly.hasWarn, JSON.stringify(domOnly));
+    check('这种时候不给「存进结果板」按钮', domOnly && domOnly.noSave, JSON.stringify(domOnly && domOnly.noSave));
+    check('这种时候不渲染那些样图', domOnly && domOnly.imgs === 0, JSON.stringify(domOnly && domOnly.imgs));
+    check('并且告诉用户回搜索页点「上传图片」', domOnly && domOnly.hasHint, JSON.stringify(domOnly && domOnly.hasHint));
+
     const errors = await evaluate('(() => (window.__ERRORS || []).length)()');
     check('全程没有未捕获异常', errors === 0, JSON.stringify(errors));
   } finally {

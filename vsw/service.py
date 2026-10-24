@@ -42,6 +42,9 @@ BLOCKED_HOST_PATTERNS = (r"^localhost$", r"^127\.", r"^0\.", r"^10\.", r"^192\.1
 class ServiceError(RuntimeError):
     pass
 
+# 引擎缩略图常见的尺寸后缀：`~tplv-xxx`、`!w100`、`_500x500` 之类
+_SIZE_SUFFIX = re.compile(r"(~tplv-[a-z0-9_\-]+|![wh]\d+|_\d+x\d+)$")
+
 
 def _safe_name(text: str, fallback: str = "img") -> str:
     text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "_", (text or "").strip())
@@ -1984,7 +1987,34 @@ class Workbench:
                 "source_url": str(item.get("source_url") or "").strip() or url,
                 "title": str(item.get("title") or ""),
             })
+        # 同一张图在引擎页里常有多个尺寸/裁切的 URL（bcbos 的 `home-xxx~tplv-...`、
+        # `?x-oss-process=...`、`w=..&h=..`），只按完整 URL 去重会收进一堆"看起来一样"的对象。
+        # 这里按「去掉尺寸参数后的地址」再收一次，重复的直接算 duplicates。
+        seen_keys = set()
+        unique: List[Dict[str, Any]] = []
+        for cand in cands:
+            key = self._image_key(cand["image_url"])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            unique.append(cand)
+        deduped = len(cands) - len(unique)
+        # data URL 是内容本身，别拿它去跟库里的 http 地址比（比也没意义，逐字节去重在下游）
+        known = self._known_image_urls(
+            [c["image_url"] for c in unique if not c["image_url"].startswith("data:")])
+        if known:
+            kept = [c for c in unique
+                    if c["image_url"].startswith("data:")
+                    or self._image_key(c["image_url"]) not in known]
+            deduped += len(unique) - len(kept)
+            unique = kept
+        cands = unique
         if not cands:
+            if deduped:
+                # 全都是库里已经有的：这不是错误，就是「都重复了」
+                return {"ok": True, "job": self.store.job(job_id), "parsed": 0,
+                        "fetched": 0, "new_findings": 0, "duplicates": deduped,
+                        "failures": []}
             raise ServiceError("没有可以收进来的图片")
         outcome = self.ingest_payload(job_id, candidates=cands, download=True,
                                      fetch_limit=max(1, len(cands)), note="手机搜")
@@ -1994,9 +2024,33 @@ class Workbench:
             "parsed": outcome.get("parsed", 0),
             "fetched": outcome.get("fetched", 0),
             "new_findings": outcome.get("new_findings", 0),
-            "duplicates": outcome.get("duplicates", 0),
+            "duplicates": int(outcome.get("duplicates") or 0) + deduped,
             "failures": outcome.get("failures", []),
         }
+
+    @staticmethod
+    def _image_key(url: str) -> str:
+        """把一个图片地址归一成「同一张图」的键：去掉查询串与尺寸后缀。"""
+        raw = str(url or "").strip().lower()
+        if not raw:
+            return ""
+        raw = raw.split("?", 1)[0].split("#", 1)[0]
+        raw = _SIZE_SUFFIX.sub("", raw)
+        return raw
+
+    def _known_image_urls(self, urls: List[str]) -> set:
+        """这些图片地址里，哪些已经在库里（结果或来源）出现过了。"""
+        keys = {self._image_key(u) for u in urls if u}
+        if not keys:
+            return set()
+        known = set()
+        rows = self.store.query(
+            "SELECT image_url FROM findings WHERE COALESCE(archived_at,0)=0 LIMIT 20000")
+        for row in rows:
+            k = self._image_key(row["image_url"])
+            if k in keys:
+                known.add(k)
+        return known
 
     # -------------------------------------------------------------------- 归档
     def repair_source_labels(self) -> Dict[str, Any]:
