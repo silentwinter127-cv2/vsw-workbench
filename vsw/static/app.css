@@ -144,9 +144,23 @@ button.btn:disabled { opacity: .45; cursor: not-allowed; }
 .qbar .tab { font-size: 12px; }
 .list { display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow: auto; }
 .item {
-  display: grid; grid-template-columns: 46px 1fr auto; gap: 10px;
+  /* 中间那列必须能缩：种子文件名/备注里常有一长串没空格的字符，
+     1fr 的 min-content 会被它撑到上千像素，把右边的「自动识图/打开识图」整排挤出可视区
+     （用户报过「版式 bug 把搜索按钮挤掉了」）。minmax(0,1fr) + min-width:0 才缩得回来。 */
+  display: grid; grid-template-columns: 46px minmax(0, 1fr) auto; gap: 10px;
   align-items: center; padding: 7px 9px;
   background: var(--bg-2); border: 1px solid var(--line-soft); border-radius: 8px;
+}
+.item > * { min-width: 0; }
+.item > .row { flex-wrap: wrap; justify-content: flex-end; }
+.item .t1, .item .t2 { overflow-wrap: anywhere; }
+/* 备注/路径那一行最多两行，别让一串 base64 文件名把整条撑成一米高 */
+.item .t2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; }
+@media (max-width: 700px) {
+  /* 真到手机宽度：按钮换到第二行整行铺开，否则会被挤成一根竖条 */
+  .item { grid-template-columns: 46px minmax(0, 1fr); row-gap: 6px; }
+  .item > .row { grid-column: 1 / -1; justify-content: flex-start; }
 }
 .item:hover { border-color: var(--line); }
 .item.sel { border-color: var(--accent); background: var(--accent-soft); }
@@ -468,6 +482,37 @@ input[type=password]:focus { outline: none; border-color: var(--accent); }
 .topbar > * { flex: 0 0 auto; }
 .topbar .tabs { flex: 1 1 auto; min-width: 0; }
 .topbar button, .topbar .pill { white-space: nowrap; }
+/* 每个 tab 自己也不许折 —— 否则窄屏下会被压成「种/子/图/片/池」一列竖排。 */
+.tab { white-space: nowrap; }
+
+/* ------------------------------------------------------------ 窄屏（手机/平板开电脑版）
+   在 800px 上下，顶栏会从 59px 高变成 800px 高：tabs 被 min-width:0 压到 40px，
+   每个中文字都换一行。这里让顶栏换行、tabs 独占一行横向滚动，表格也自己滚。 */
+@media (max-width: 1100px) {
+  .topbar { flex-wrap: wrap; gap: 8px 12px; padding: 8px 12px; }
+  .topbar .tabs {
+    order: 5; flex: 1 1 100%; min-width: 0;
+    flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain;
+    padding-bottom: 2px; scrollbar-width: none;
+  }
+  .topbar .tabs::-webkit-scrollbar { height: 0; }
+  .topbar .spacer { display: none; }
+  .brand { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+  .brand span { display: none; }
+  main { padding: 12px; }
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  .filter-grid { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  /* 宽表格（归档/指标）横向滚，不要把整页撑出横向滚动条 */
+  .panel { overflow-x: auto; }
+  table.matrix { min-width: 720px; }
+}
+
+@media (max-width: 640px) {
+  body { font-size: 13px; }
+  .topbar .pill { font-size: 11px; padding: 2px 8px; }
+  .metrics { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+  .board { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+}
 
 /* 面板里的按钮别被窄栏挤成竖排字（「加入 / 进来」「生成」都中过招）。
    规则和顶栏那条同一个毛病：flex 项默认可缩，缩到比文字窄就换行了。 */

@@ -78,7 +78,9 @@ main{padding:12px 12px calc(var(--safe-b) + 84px)}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#06111f;font-weight:600}
 .btn.danger{border-color:rgba(255,107,107,.5);color:var(--danger)}
 .btn.ghost{background:transparent}
-.btn[disabled]{opacity:.42}
+.btn[disabled],.btn:disabled{opacity:.42}
+.btn:disabled{cursor:not-allowed}
+.btn:disabled:active{background:var(--bg2)}
 .btn.sm{padding:6px 10px;font-size:12.5px;border-radius:9px}
 .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .row.tight{gap:6px}
@@ -276,6 +278,7 @@ label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5
     </details>
 
     <div class="row tight" id="queueActions" style="margin-bottom:10px"></div>
+    <div id="autoState" class="card hide" style="margin-bottom:10px"></div>
     <div id="queueList"></div>
   </section>
 
@@ -1335,7 +1338,14 @@ function renderQueueActions(rows) {
     };
     return;
   }
+  const autoN = (S.autoPreview && S.autoPreview.count) || 0;
+  const autoLabel = (S.autoPreview && S.autoPreview.running)
+    ? `自动搜图中 ${S.autoPreview.done}/${S.autoPreview.total}`
+    : (autoN ? `自动搜图（${autoN}）` : '自动搜图');
   host.innerHTML = `
+    <button class="btn sm primary" id="autoRunBtn"
+      ${(S.online && autoN && !(S.autoPreview && S.autoPreview.running)) ? '' : 'disabled'}
+      title="让电脑上的真实浏览器把这批待处理任务一个个搜完">${autoLabel}</button>
     <button class="btn sm" id="queueSelBtn">选择</button>
     <button class="btn sm danger" id="queueDeleteFiltered"
       ${rows.length ? '' : 'disabled'}>删除筛选结果（${rows.length}）</button>`;
@@ -1356,6 +1366,8 @@ function renderQueueActions(rows) {
       <span class="small">按引擎清理：</span>${presets}</div>`;
   }
 
+  const autoBtn = $('#autoRunBtn');
+  if (autoBtn) autoBtn.onclick = () => startAutoSearch();
   $('#queueSelBtn').onclick = () => { S.queueSelectMode = true; renderQueue(); };
   $('#queueDeleteFiltered').onclick = () => deleteQueueJobs(rows.map((j) => j.id), '当前筛选下的');
   $$('#queueActions [data-preset-engine]').forEach((btn) => {
@@ -1408,6 +1420,113 @@ async function refreshQueueFromServer(opts) {
   }
 }
 
+/* ------------------------------------------------------------ 自动搜图（手机下命令）
+ * 手机里没有能替引擎上传图片的浏览器内核，所以「自动搜图」是：
+ * 手机把待处理任务交给电脑 → 电脑的无头浏览器一个个真跑 → 结果照常入库。
+ * 排队与串行都在服务端，手机可以关屏走人，回来点一下就看进度。
+ */
+async function loadAutoPreview() {
+  if (!S.online || !S.server) return;
+  try {
+    const out = await api('/api/auto/preview?status=pending,review&limit=20');
+    const state = await api('/api/auto/state');
+    S.autoPreview = {
+      count: Number(out.count) || 0,
+      skipped: out.skipped || {},
+      running: !!state.running,
+      done: Number(state.done) || 0,
+      total: Number(state.total) || 0,
+    };
+    renderAutoState(state);
+  } catch (e) {
+    S.autoPreview = null;
+  }
+}
+
+function renderAutoState(st) {
+  const box = $('#autoState');
+  if (!box) return;
+  const running = !!(st && st.running);
+  const results = (st && st.results) || [];
+  if (!running && !results.length) {
+    box.classList.add('hide');
+    box.innerHTML = '';
+    return;
+  }
+  box.classList.remove('hide');
+  const ok = results.filter((r) => r.ok).length;
+  const gained = results.reduce((n, r) => n + (Number(r.new_findings) || 0), 0);
+  const head = running
+    ? `电脑正在自动搜图：第 ${st.done + 1}/${st.total} 个 · ${esc(st.current_engine || '')}`
+    : `自动搜图结束：${results.length} 个任务，成功 ${ok} 个，新进 ${gained} 张`;
+  const rowsHtml = results.slice(-6).reverse().map((r) => {
+    const mark = r.ok ? '<b style="color:var(--diff)">成功</b>' : '<b style="color:var(--danger)">失败</b>';
+    return `<div class="small">#${esc(r.job_id)} ${esc(r.engine)} · ${mark} · `
+      + `新进 ${Number(r.new_findings) || 0}${r.error ? ` · ${esc(String(r.error).slice(0, 60))}` : ''}</div>`;
+  }).join('');
+  box.innerHTML = `
+    <div class="row"><b>${head}</b><div class="spacer"></div>
+      ${running ? '<span class="small">可以关掉这个页面，电脑会接着跑</span>'
+        : '<button class="btn sm ghost" id="autoClearBtn">收起</button>'}</div>
+    ${rowsHtml}`;
+  const clear = $('#autoClearBtn');
+  if (clear) {
+    clear.onclick = () => {
+      box.classList.add('hide');
+      box.innerHTML = '';
+      S.autoPreview = null;
+      renderQueue();
+    };
+  }
+}
+
+async function startAutoSearch() {
+  if (!S.online) { toast('这一步要连着电脑（手机自己跑不了引擎页面）', true); return; }
+  try {
+    const out = await post('/api/auto/run', { statuses: ['pending', 'review'], limit: 20 });
+    toast(`已交给电脑跑 ${out.queued} 个任务，可以关屏走人`);
+    S.autoPreview = { count: 0, running: true, done: 0, total: out.queued };
+    renderAutoState({ running: true, done: 0, total: out.queued,
+                      current_engine: '', results: [] });
+    pollAutoState();
+  } catch (e) {
+    toast(String(e.message || e), true);
+  }
+}
+
+function pollAutoState() {
+  if (pollAutoState._timer) return;
+  const tick = async () => {
+    let st = null;
+    try { st = await api('/api/auto/state'); } catch (e) { /* 断网就下一轮再看 */ }
+    if (st) {
+      renderAutoState(st);
+      S.autoPreview = {
+        count: 0, running: !!st.running, done: Number(st.done) || 0, total: Number(st.total) || 0,
+      };
+      if (!st.running) {
+        clearInterval(pollAutoState._timer);
+        pollAutoState._timer = null;
+        const gained = (st.results || []).reduce((n, r) => n + (Number(r.new_findings) || 0), 0);
+        if (st.results && st.results.length) {
+          const okCount = (st.results || []).filter((r) => r.ok).length;
+          // 先把队列与快照刷新完，最后再报结论 —— 反过来的话「同步完成」会盖掉这句话，
+          // 用户只看到「同步完成」，不知道自动搜图到底搜到了几张。
+          try { await refreshQueueFromServer({ silent: true }); await syncSnapshot({ silent: true }); }
+          catch (e) { /* 刷新失败不影响结论 */ }
+          const bad = (st.results || []).length - okCount;
+          toast(`自动搜图跑完了：${okCount} 个成功${bad ? `、${bad} 个失败` : ''}，新进 ${gained} 张`);
+        }
+        await loadAutoPreview();
+        if (S.tab === 'queue') renderQueue();
+      }
+    }
+    if (pollAutoState._timer && S.tab === 'queue') renderQueue();
+  };
+  pollAutoState._timer = setInterval(tick, 2500);
+  tick();
+}
+
 function renderQueue() {
   const gate = $('#queueGate');
   if (!S.online) {
@@ -1435,6 +1554,7 @@ function renderQueue() {
   const rows = queueRows();
   renderQueueFilters(rows);
   renderQueueActions(rows);
+  loadAutoPreview();
 
   $('#queueList').innerHTML = rows.map((j) => {
     const thumb = thumbSrcMap()[`job:${j.id}`] || '';
@@ -1695,10 +1815,14 @@ function mergedAlbumItems() {
 
 function syncAlbumBar() {
   const n = S.albumPick.size;
+  const items = mergedAlbumItems();
   const look = $('#archiveMergeLook');
   const save = $('#archiveMergeSave');
   const clear = $('#archiveMergeClear');
   const hint = $('#archiveMergeHint');
+  // 勾了批次就让按钮可点。以前是「本地没有对象就 disabled」，勾到空批次时按钮看着
+  // 和能点的没区别（.btn[disabled] 属性选择器匹配不到 el.disabled），点了没反应 ——
+  // 用户以为「手机上不能合并」。现在一律可点，空的情况在动作里说清楚。
   if (look) {
     look.disabled = n === 0;
     look.textContent = n ? `合并查看（${n}）` : '合并查看';
@@ -1709,9 +1833,15 @@ function syncAlbumBar() {
   }
   if (clear) clear.style.display = n ? '' : 'none';
   if (hint) {
-    hint.textContent = n
-      ? `已勾选 ${Array.from(S.albumPick).map((i) => `#${i}`).join(' ')} · 跨批次去重后按发散度排序`
-      : '勾选下面的批次，把几批合成一个相册看';
+    if (!n) {
+      hint.textContent = '勾选下面的批次，把几批合成一个相册看';
+    } else if (!items.length) {
+      hint.textContent = `已勾选 ${n} 批，但本地这批里没有对象（空批次：对象已被恢复归档或删除）`
+        + (S.online ? ' · 点「合并查看」会再去电脑上要一次' : '');
+    } else {
+      hint.textContent = `已勾选 ${Array.from(S.albumPick).map((i) => `#${i}`).join(' ')}`
+        + ` · 共 ${items.length} 个对象 · 跨批次去重后按发散度排序`;
+    }
   }
 }
 
@@ -1733,6 +1863,13 @@ async function openMergedAlbum() {
     }
     S.archived = await local.all('archived');
     items = mergedAlbumItems();
+  }
+
+  // 补完还是空的：明确说一句，别让人对着空面板猜
+  if (!items.length) {
+    toast(ids.length === 1
+      ? `批次 #${ids[0]} 里没有对象（空批次：对象已被恢复归档或删除）`
+      : '勾中的批次里都没有对象（空批次：对象已被恢复归档或删除）', true);
   }
 
   const totalSources = items.reduce((n, f) => n + sourceCount(f), 0);
@@ -1797,7 +1934,7 @@ function renderArchive() {
   const stats = (snap.stats) || {};
   $('#archiveMetrics').innerHTML = [
     ['活动对象', live.length],
-    ['已归档', S.findings.filter((f) => f.archived_at).length],
+    ['已归档', S.archived.length],
     ['批次', S.archives.length],
     ['回收站', S.trash.length],
   ].map(([l, n]) => `<div class="metric"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');

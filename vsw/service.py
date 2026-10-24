@@ -77,6 +77,12 @@ class Workbench:
         self._reindex_state: Dict[str, Any] = {"running": False, "done": 0, "total": 0, "note": ""}
         self._browser_state: Dict[str, Any] = {"running": False, "job_id": 0, "engine": "",
                                               "phase": "", "started": 0.0, "error": "", "found": 0}
+        # 手机上「一键自动搜图」跑的是同一套无头浏览器，只是把任务排成一条队。
+        # 只允许一条队（一台机器的浏览器一次只能干一件事），状态放这里给手机轮询。
+        self._auto_lock = threading.Lock()
+        self._auto: Dict[str, Any] = {"running": False, "total": 0, "done": 0, "current": 0,
+                                      "current_engine": "", "phase": "", "started": 0.0,
+                                      "finished": 0.0, "error": "", "results": []}
         self._tag_pool: List[Tuple[int, np.ndarray]] = []
         self._tag_matrix: Optional[np.ndarray] = None
         self.reap_stale_jobs()
@@ -748,6 +754,117 @@ class Workbench:
 
     def browser_state(self) -> Dict[str, Any]:
         return dict(self._browser_state)
+
+    # ------------------------------------------------- 批量自动搜图（手机上一键跑）
+    def auto_state(self) -> Dict[str, Any]:
+        with self._auto_lock:
+            state = dict(self._auto)
+            state["results"] = [dict(r) for r in (self._auto.get("results") or [])]
+            state["browser"] = dict(self._browser_state)
+            return state
+
+    def auto_candidates(self, *, statuses: Sequence[str] = ("pending", "review"),
+                        engines: Optional[Sequence[str]] = None,
+                        limit: int = 12) -> Dict[str, Any]:
+        """找出"能被无头浏览器自动跑"的队列项，给手机端那个一键按钮用。"""
+        wanted = set(engines or [])
+        picked: List[Dict[str, Any]] = []
+        skipped: Dict[str, int] = {}
+        for status in statuses:
+            rows = self.store.jobs(status=status, limit=400)
+            for job in rows:
+                engine = job.get("engine") or ""
+                if wanted and engine not in wanted:
+                    continue
+                if not self.browser_capable(engine):
+                    skipped[engine] = skipped.get(engine, 0) + 1
+                    continue
+                if len(picked) >= max(1, int(limit)):
+                    continue
+                picked.append({"job_id": int(job["id"]), "engine": engine,
+                               "status": job.get("status") or "",
+                               "variant_id": int(job.get("variant_id") or 0),
+                               "seed_id": int(job.get("seed_id") or 0)})
+        return {"items": picked, "count": len(picked), "skipped": skipped}
+
+    def start_auto_batch(self, job_ids: Optional[Sequence[int]] = None, *,
+                         statuses: Sequence[str] = ("pending", "review"),
+                         engines: Optional[Sequence[str]] = None, limit: int = 12,
+                         timeout_ms: int = 90000) -> Dict[str, Any]:
+        """把一串队列项依次交给无头浏览器跑完。
+
+        手机端只按一个按钮：服务端自己排队、自己串行，手机可以随时关屏/关页面 ——
+        进度落在 ``auto_state()`` 里，回来再看就行。一次只允许一条队，因为一台机器的
+        浏览器一次只能开一个识图页。
+        """
+        if self._auto.get("running"):
+            raise ServiceError("已经有一批自动搜图在跑了，等它跑完再来一批")
+        if self._browser_state.get("running"):
+            raise ServiceError("已经有一个自动识图任务在跑，请等它结束")
+
+        jobs: List[Dict[str, Any]] = []
+        if job_ids:
+            for jid in job_ids:
+                job = self.store.job(int(jid))
+                if job is None:
+                    continue
+                if not self.browser_capable(job.get("engine") or ""):
+                    raise ServiceError(f"引擎 {job.get('engine')} 不支持自动识图，"
+                                       f"只能手动「打开识图」")
+                jobs.append(job)
+            if not jobs:
+                raise ServiceError("没找到要跑的任务")
+        else:
+            found = self.auto_candidates(statuses=statuses, engines=engines, limit=limit)
+            ids = [int(item["job_id"]) for item in found["items"]]
+            for jid in ids:
+                job = self.store.job(jid)
+                if job is not None:
+                    jobs.append(job)
+            if not jobs:
+                hint = "、".join(sorted(found["skipped"])) if found["skipped"] else ""
+                raise ServiceError("待处理里没有能用自动识图的（引擎不支持无头浏览器"
+                                   + (f"：{hint}" if hint else "") + "）")
+
+        started = time.time()
+        with self._auto_lock:
+            self._auto = {"running": True, "total": len(jobs), "done": 0,
+                          "current": 0, "current_engine": "", "phase": "准备开始",
+                          "started": started, "finished": 0.0, "error": "", "results": []}
+
+        def worker() -> None:
+            for index, job in enumerate(jobs, 1):
+                job_id = int(job["id"])
+                engine = job.get("engine") or ""
+                with self._auto_lock:
+                    self._auto.update({"current": index, "current_engine": engine,
+                                       "phase": f"第 {index}/{len(jobs)} 个：{engine}"})
+                began = time.time()
+                try:
+                    outcome = self.browser_search(job_id, timeout_ms=timeout_ms)
+                    record = {"job_id": job_id, "engine": engine,
+                              "ok": bool(outcome.get("ok")),
+                              "new_findings": int(outcome.get("new_findings") or 0),
+                              "duplicates": int(outcome.get("duplicates") or 0),
+                              "error": str(outcome.get("error") or "")[:200],
+                              "seconds": round(time.time() - began, 1)}
+                except Exception as exc:  # noqa: BLE001 单个失败不该中断整批
+                    record = {"job_id": job_id, "engine": engine, "ok": False,
+                              "new_findings": 0, "duplicates": 0,
+                              "error": str(exc)[:200],
+                              "seconds": round(time.time() - began, 1)}
+                    self.log(f"批量自动搜图 #{job_id} 失败：{exc}")
+                with self._auto_lock:
+                    self._auto["results"].append(record)
+                    self._auto["done"] = index
+                time.sleep(1.0)  # 给引擎页面一点收敛时间，别连着打
+            with self._auto_lock:
+                self._auto.update({"running": False, "finished": time.time(),
+                                   "current": 0, "current_engine": "", "phase": "完成"})
+
+        threading.Thread(target=worker, name="vsw-auto-batch", daemon=True).start()
+        return {"started": True, "queued": len(jobs),
+                "job_ids": [int(j["id"]) for j in jobs], "state": self.auto_state()}
 
     # ----------------------------------------------------------------- fetching
     def fetch_bytes(self, url: str, timeout: float = 20.0) -> Tuple[bytes, str]:

@@ -408,6 +408,29 @@ class Router:
         def browser_state(**_kw: Any) -> Dict[str, Any]:
             return svc.browser_state()
 
+        # ------------------------------------------------------ 批量自动搜图
+        # 手机上没有浏览器内核可以替它上传文件，所以「自动搜图」是手机下命令、这台机器
+        # 的无头浏览器干活。排队与串行都在服务端，手机可以关屏走人，回来再看进度。
+        @self.get("/api/auto/preview")
+        def auto_preview(query: Dict[str, List[str]], **_kw: Any) -> Dict[str, Any]:
+            statuses = tuple(x for x in self._first(query, "status", "pending,review").split(",") if x)
+            engines = [x for x in self._first(query, "engine", "").split(",") if x] or None
+            return svc.auto_candidates(statuses=statuses, engines=engines,
+                                       limit=int(self._first(query, "limit", "12") or 12))
+
+        @self.get("/api/auto/state")
+        def auto_state(**_kw: Any) -> Dict[str, Any]:
+            return svc.auto_state()
+
+        @self.post("/api/auto/run")
+        def auto_run(body: Dict[str, Any], **_kw: Any) -> Dict[str, Any]:
+            job_ids = [int(x) for x in (body.get("job_ids") or [])]
+            statuses = tuple(body.get("statuses") or ("pending", "review"))
+            engines = body.get("engines") or None
+            return svc.start_auto_batch(job_ids or None, statuses=statuses, engines=engines,
+                                        limit=int(body.get("limit") or 12),
+                                        timeout_ms=int(body.get("timeout_ms") or 90000))
+
         @self.post("/api/job/*/finish")
         def finish(wild: str, body: Dict[str, Any], **_kw: Any) -> Dict[str, Any]:
             return {"job": svc.finish_job(int(wild), status=body.get("status") or "done",
