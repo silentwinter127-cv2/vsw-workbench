@@ -369,6 +369,36 @@ print(json.dumps({'bytes': len(data)}))
     check('这种时候不渲染那些样图', domOnly && domOnly.imgs === 0, JSON.stringify(domOnly && domOnly.imgs));
     check('并且告诉用户回搜索页点「上传图片」', domOnly && domOnly.hasHint, JSON.stringify(domOnly && domOnly.hasHint));
 
+    // 本地没有那张图（队列项是电脑上新加的）时，要现去电脑要一张，而不是弹
+    // 「本地没有这张图：先同步一次快照再搜」。线上这个 bug 用户截图里出现过。
+    const onDemand = await evaluate(`(async () => {
+      try {
+      await local.del('assets', 'vthumb:4321');
+      S.online = true;
+      let asked = '';
+      const realFetch = window.fetch;
+      window.fetch = function (url, opts) {
+        const u = String(url || '');
+        if (u.indexOf('/api/variant/4321/thumb') >= 0) {
+          asked = u;
+          return Promise.resolve(new Response(new Blob([new Uint8Array(64)], { type: 'image/jpeg' }), { status: 200 }));
+        }
+        return realFetch.apply(this, arguments);
+      };
+      if (window.__SEARCH) window.__SEARCH.length = 0;
+      const job = { id: 4321, engine: 'baidu', seed_id: 9, variant_id: 4321, variant_kind: 'full', status: 'pending' };
+      await startPhoneSearch(4321);
+      if (window.__SEARCH) window.__SEARCH.length = 0;
+      const b64 = await jobImageBase64(job);
+      window.fetch = realFetch;
+      return { asked: asked, len: String(b64 || '').length };
+      } catch (e) { return { error: String((e && e.stack) || e) }; }
+    })()`);
+    if (onDemand && onDemand.error) console.log('  [诊断]', onDemand.error);
+    check('本地缺图时会现去电脑取那张变体图', onDemand && String(onDemand.asked || '').indexOf('/api/variant/4321/thumb') >= 0,
+      JSON.stringify(onDemand));
+    check('取回来能转成 base64 交给原生', onDemand && onDemand.len > 40, JSON.stringify(onDemand && onDemand.len));
+
     const errors = await evaluate('(() => (window.__ERRORS || []).length)()');
     check('全程没有未捕获异常', errors === 0, JSON.stringify(errors));
   } finally {

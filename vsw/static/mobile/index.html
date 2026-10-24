@@ -1333,6 +1333,34 @@ async function jobImageBase64(job) {
     const rec = await local.get('assets', key);
     if (rec && rec.blob && rec.blob.size) return blobToBase64(rec.blob);
   }
+  // 本地没有（常见：队列项是电脑上新加的，快照还没把这张变体图带下来）——
+  // 只要还连着电脑，就现去要一张，顺手存进本地缓存。以前这里直接返回空串，
+  // 于是「手机搜」会弹「本地没有这张图：先同步一次快照再搜」，明明联网。
+  if (!S.online || !S.server) return '';
+  const remote = await jobImageRemoteUrl(job);
+  if (!remote) return '';
+  try {
+    const blob = await netFetch(remote).then((r) => (r.ok ? r.blob() : null));
+    if (!blob || !blob.size) return '';
+    const key = (job.variant_id && KEY.variantThumb(job.variant_id))
+      || (job.seed_id && KEY.seedThumb(job.seed_id)) || '';
+    if (key) local.put('assets', { key, blob, at: Date.now() });
+    return await blobToBase64(blob);
+  } catch (e) {
+    return '';
+  }
+}
+
+/** 这个队列项在电脑上的那张图地址：变体缩略图优先，其次种子缩略图/原图。 */
+async function jobImageRemoteUrl(job) {
+  if (!S.server) return '';
+  if (job.variant_id && job.variant_thumb) return relToMediaServer(job.variant_thumb);
+  if (job.variant_id) return S.server.replace(/\/+$/, '') + '/api/variant/' + job.variant_id + '/thumb';
+  if (job.seed_id) {
+    const seed = (S.seeds || []).find((s) => Number(s.id) === Number(job.seed_id));
+    const rel = seed && (seed.thumb_path || seed.rel_path);
+    if (rel) return relToMediaServer(rel);
+  }
   return '';
 }
 
@@ -1342,7 +1370,7 @@ async function startPhoneSearch(jobId) {
   const cfg = PHONE_SEARCH[job.engine];
   if (!cfg) return toast('这个引擎在手机里还没配置提取脚本', true);
   const b64 = await jobImageBase64(job);
-  if (!b64) return toast('本地没有这张图：先同步一次快照再搜', true);
+  if (!b64) return toast('这张图本地没有、也连不上电脑：先同步一次快照再搜', true);
   S.phoneSearch = { jobId: job.id, engine: job.engine, label: cfg.label };
   toast('图已经替你选好，在打开的页面里点一下「上传图片」');
   try {
@@ -2004,6 +2032,12 @@ async function ensureJobThumbs(rows) {
     let filled = false;
     if (variant && variant.thumb) {
       filled = await fetchInto(KEY.variantThumb(variant.id), variant.thumb);
+    }
+    // 快照里的 variants 是截断的：新加的队列项常常不在 S.variants 里，
+    // 于是这一行头像永远空白。直接用 id 去要那张变体缩略图。
+    if (!filled && j.variant_id) {
+      filled = await fetchInto(KEY.variantThumb(j.variant_id),
+        'api/variant/' + j.variant_id + '/thumb');
     }
     if (!filled && seed && (seed.thumb_path || seed.rel_path)) {
       filled = await fetchInto(KEY.seedThumb(seed.id), seed.thumb_path || seed.rel_path);
