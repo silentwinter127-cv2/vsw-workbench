@@ -1585,7 +1585,10 @@ async function flushLocalFindings(opts = {}) {
       const msg = why ? `电脑收不下：${why}` : '电脑那边没有新增也没有重复 —— 这次没送成';
       toast(msg, true);
     } else if (!opts.silent) {
-      toast(`手机上那 ${moved} 张已经送进电脑，指标算好了`);
+      // 用户会问「抓到 30 张怎么只剩 9 张」—— 把折叠原因一起说出来，别让他以为是丢了。
+      const folded = Number(res.new_findings || 0) < moved && res.explain;
+      toast(`手机上那 ${moved} 张已经送进电脑${folded ? '：' + res.explain : '，指标算好了'}`,
+            false);
     }
   } catch (e) {
     toast('送进电脑失败：' + (e && e.message ? e.message : e), true);

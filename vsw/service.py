@@ -2025,15 +2025,54 @@ class Workbench:
             raise ServiceError("没有可以收进来的图片")
         outcome = self.ingest_payload(job_id, candidates=cands, download=True,
                                      fetch_limit=max(1, len(cands)), note="手机搜")
+        # 「抓到 30 张，最后只有 9 张」是用户真实会问的问题（m06251）。原因必须是可读的：
+        # 三层去重把同一张图的其它尺寸/裁切折叠掉了，不是丢了。这里把折叠原因分好类带回去。
+        layers: Dict[str, int] = {}
+        samples: List[Dict[str, Any]] = []
+        for rec in (outcome.get("duplicate_records") or [])[:80]:
+            layer = str(rec.get("dup_layer") or "unknown")
+            layers[layer] = layers.get(layer, 0) + 1
+            if len(samples) < 8:
+                samples.append({
+                    "image_url": str(rec.get("image_url") or ""),
+                    "dup_layer": layer,
+                    "dup_of": int(rec.get("dup_of") or 0),
+                })
+        dup_total = int(outcome.get("duplicates") or 0) + deduped
+        new_n = int(outcome.get("new_findings") or 0)
+        parts: List[str] = [f"新图 {new_n} 张"]
+        if deduped:
+            parts.append(f"同一张图的其它尺寸 {deduped} 张（地址只差尺寸参数）")
+        for layer, cnt in sorted(layers.items(), key=lambda kv: -kv[1]):
+            parts.append(f"{self._layer_text(layer)} {cnt} 张")
+        explain = "；".join(parts) if dup_total or deduped else f"新图 {new_n} 张"
         return {
             "ok": True,
             "job": outcome.get("job"),
             "parsed": outcome.get("parsed", 0),
             "fetched": outcome.get("fetched", 0),
-            "new_findings": outcome.get("new_findings", 0),
-            "duplicates": int(outcome.get("duplicates") or 0) + deduped,
+            "new_findings": new_n,
+            "duplicates": dup_total,
+            "url_dups": deduped,
+            "dup_layers": layers,
+            "dup_samples": samples,
+            "explain": explain,
             "failures": outcome.get("failures", []),
         }
+
+    @staticmethod
+    def _layer_text(layer: str) -> str:
+        """把去重层归成人话。"""
+        layer = (layer or "").lower()
+        if layer.startswith("file") or "sha" in layer:
+            return "和库里某张逐字节相同"
+        if "phash" in layer or layer == "phash":
+            return "和库里某张几乎是同一张（感知哈希）"
+        if "semantic" in layer or "vec" in layer:
+            return "和库里某张语义几乎相同"
+        if not layer or layer == "unknown":
+            return "和库里某张重复"
+        return f"和库里某张重复（{layer}）"
 
     def _album_job(self, first_url: str) -> int:
         """为「手机相册」推回来的那批图现造一条队列项。

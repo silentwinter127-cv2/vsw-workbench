@@ -1,4 +1,4 @@
-﻿"""手机搜的结果要真的进结果板（findings），不是变成种子。
+"""手机搜的结果要真的进结果板（findings），不是变成种子。
 
 这条链路以前根本不存在：手机点「存进结果板」打的是 /api/mobile/sync 的 imports，
 服务端 apply_mobile_sync 走 import_bytes —— 那是建**种子**。结果板列的是 findings，
@@ -132,6 +132,19 @@ def main():
             check("空列表会被拒", True, str(exc))
         r3 = svc.add_mobile_results({"job_id": job_id, "items": [{"image_url": "data:image/png;base64,bm90LWFuLWltYWdl", "source_url": "https://x/1"}]})
         check("坏图只记失败，不塞空对象", r3["new_findings"] == 0 and r3["failures"], str(r3["failures"])[:120])
+        # ---- E. 「30 张只出 9 张」要说清原因 ---------------------------------
+        # 用户真的会问这个（m06251）：三层去重把同一张图的其它尺寸折叠了，
+        # 不解释就像「图丢了」。所以返回体必须带上折叠原因。
+        r6 = svc.add_mobile_results({"job_id": job_id, "items": [
+            {"image_url": data_url(shape((20, 60, 200), 3)), "source_url": "https://example.com/e/1"},
+            {"image_url": data_url(shape((20, 60, 200), 3)), "source_url": "https://example.com/e/1"},
+            {"image_url": data_url(shape((20, 60, 200), 3)), "source_url": "https://example.com/e/1"},
+        ]})
+        check("同一张连推三遍不会出错", bool(r6.get("ok")), str(r6)[:120])
+        check("返回里有折叠原因 explain",
+              isinstance(r6.get("explain"), str) and bool(r6["explain"]), r6.get("explain"))
+        check("重复的会归到某一层 dup_layers",
+              isinstance(r6.get("dup_layers"), dict), str(r6.get("dup_layers"))[:120])
         try:
             svc.store.close()
         except Exception:

@@ -777,3 +777,14 @@ r41 的自动推送只发了 `image_url`（引擎那张图的远程地址），�
 r41 的「上一层」把压栈写在了轮询线程里、用的是 `web.getUrl()` —— 后台线程读 WebView 拿到 `null`，
 栈永远是空的，按钮就一直是灰的。现在地址在 `onPageFinished`（UI 线程）里记进 `currentUrl`，深挖只读它。
 另外按钮改成永远可点：栈空时点它回引擎首页，而不是给一个死按钮。
+
+### 抓到 30 张，结果板只多 9 个对象（r44）
+
+服务端本来就在去重，只是没说清楚。`add_mobile_results` 现在把折叠原因分类带回来：
+`new_findings`（新图）、`url_dups`（地址只差尺寸参数、连下载都省了）、
+`dup_layers`（按 `file` / `phash` / `semantic` 分层计数）、`dup_samples`（最多 8 条样例）、
+`explain`（一句话，例如「新图 9 张；同一张图的其它尺寸 12 张；和库里某张几乎是同一张（感知哈希） 9 张」）。
+
+真实数据：`ledger` 里 `job_id=1023` 那批是 `findings_new 9 / dup_images 21` —— 百度对同一张画给多个尺寸，
+三层去重把它们折叠成一条，所以「30 张变 9 张」是去重生效，不是抓丢了。
+手机端推完会把 `explain` 拼进 toast，探针 `vsw-probe-mobile-results.py` 16 项覆盖。
