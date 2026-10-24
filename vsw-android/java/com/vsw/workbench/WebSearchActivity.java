@@ -73,6 +73,8 @@ public class WebSearchActivity extends Activity {
     private static final int THUMB_SIDE = 360;
     /** 单张下载的超时（毫秒）。引擎图不大，5 秒拿不到就跳过。 */
     private static final int THUMB_TIMEOUT_MS = 5000;
+    /** 内嵌图的总字节上限：intent 里塞太多会 TransactionTooLarge。 */
+    private static final int THUMB_TOTAL_MAX = 320 * 1024;
     /** 下载结果图时假装自己是引擎页面自己（防盗链要看 Referer）。 */
     private static final String UA_MOBILE =
             "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -93,6 +95,8 @@ public class WebSearchActivity extends Activity {
     private boolean offered = false;
     private long startAt = 0;
     private String lastExtract = "";
+    /** 最近一次取图拿到的 HTTP 状态码（0 = 还没试过），失败时写进提示里。 */
+    private int lastThumbStatus = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -410,6 +414,8 @@ public class WebSearchActivity extends Activity {
             public void run() {
                 int got = 0;
                 int want = 0;
+                int bytes = 0;
+                lastThumbStatus = 0;
                 try {
                     JSONArray list = obj.optJSONArray("similar");
                     if (list != null) {
@@ -418,11 +424,13 @@ public class WebSearchActivity extends Activity {
                             if (item == null) continue;
                             String url = safe(item.optString("u", ""));
                             if (url.isEmpty() || url.startsWith("data:")) continue;
+                            if (bytes > THUMB_TOTAL_MAX) break;      // 太大的就不带了，intent 会扛不住
                             want += 1;
                             String data = fetchThumb(url);
                             if (data == null) continue;
                             item.put("d", data);
                             got += 1;
+                            bytes += data.length();
                         }
                     }
                 } catch (Throwable exc) {
@@ -430,10 +438,19 @@ public class WebSearchActivity extends Activity {
                 }
 
                 String extra = null;
-                if (got > 0) {
-                    extra = "结果图 " + got + " 张已存成本地小图（引擎有防盗链，直接引用会全部裂开）";
+                int similarCount = 0;
+                JSONArray simList = obj.optJSONArray("similar");
+                if (simList != null) similarCount = simList.length();
+                if (similarCount == 0) {
+                    // 一张都没抓到：把提取脚本自己的诊断信息带回去，
+                    // 否则用户只看到一句「没抓到图」，我们这边也无从下手。
+                    extra = "没抓到相似图（诊断：" + diagnose(obj.optJSONObject("diag")) + "）";
+                } else if (got > 0) {
+                    extra = "结果图 " + got + "/" + want + " 张已存成本地小图（引擎有防盗链，直接引用会全部裂开）";
                 } else if (want > 0) {
-                    extra = "结果图没能取回来（引擎拦了请求），可以点「复制图片链接」自己在浏览器里看";
+                    extra = "结果图 0/" + want + " 张取回来"
+                            + (lastThumbStatus > 0 ? "（最后一张回 HTTP " + lastThumbStatus + "）" : "")
+                            + "，可以点「复制图片链接」自己在浏览器里看";
                 }
                 final String enriched = obj.toString();
                 final String merged = extra == null ? note : (note == null ? extra : note + " · " + extra);
@@ -447,8 +464,46 @@ public class WebSearchActivity extends Activity {
         }, "vsw-thumb-fetch").start();
     }
 
+    /** 把提取脚本的 diag 读成一句人话：捕获到几条 pcsimi、页面里都有哪些图主机。 */
+    private static String diagnose(JSONObject diag) {
+        if (diag == null) return "提取脚本没给诊断";
+        StringBuilder sb = new StringBuilder();
+        sb.append("pcsimi 请求 ").append(diag.optInt("pcsimi", 0)).append(" 条");
+        if (diag.has("viaPcsimi")) sb.append("、走接口拿到 ").append(diag.optInt("viaPcsimi", 0)).append(" 张");
+        JSONObject hosts = diag.optJSONObject("hosts");
+        if (hosts != null && hosts.length() > 0) {
+            sb.append("、页面图片主机 ");
+            int shown = 0;
+            java.util.Iterator<String> it = hosts.keys();
+            while (it.hasNext() && shown < 3) {
+                String host = it.next();
+                sb.append(host).append("×").append(hosts.optInt(host, 0)).append(" ");
+                shown += 1;
+            }
+        } else {
+            sb.append("、页面里没读到图");
+        }
+        return sb.toString().trim();
+    }
+
     /** 抓一张结果图，缩到 360px 压成 JPEG，返回 `data:image/jpeg;base64,…`；失败返回 null。 */
     private String fetchThumb(String url) {
+        // 防盗链的规则各站不同：先拿引擎页的完整地址试，被拒就退回站点根，
+        // 最后兜底 graph.baidu.com（360 的图对 Referer 宽松些，多试一次不花钱）。
+        String[] referers = new String[]{searchUrl, originOf(searchUrl), "https://graph.baidu.com/"};
+        for (int i = 0; i < referers.length; i++) {
+            String referer = referers[i];
+            if (referer == null || referer.isEmpty()) continue;
+            int status = fetchThumbWith(url, referer);
+            if (status == 200) return fetchThumbBytes(url, referer);
+            lastThumbStatus = status;
+            if (status == 404 || status == 410) return null;   // 图本身没了，换 Referer 也没用
+        }
+        return null;
+    }
+
+    /** 只问状态码，不下载（换 Referer 重试前先确认能通）。 */
+    private int fetchThumbWith(String url, String referer) {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URL(url).openConnection();
@@ -456,8 +511,35 @@ public class WebSearchActivity extends Activity {
             conn.setReadTimeout(THUMB_TIMEOUT_MS);
             conn.setInstanceFollowRedirects(true);
             conn.setRequestProperty("User-Agent", UA_MOBILE);
-            // 关键：把自己装成引擎自己的页面，防盗链才肯给图
-            conn.setRequestProperty("Referer", searchUrl == null ? "https://graph.baidu.com/" : searchUrl);
+            conn.setRequestProperty("Referer", referer);
+            conn.setRequestProperty("Accept", "image/*,*/*;q=0.8");
+            return conn.getResponseCode();
+        } catch (Throwable exc) {
+            return -1;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    private static String originOf(String url) {
+        if (url == null) return "";
+        try {
+            java.net.URI uri = new java.net.URI(url);
+            return uri.getScheme() + "://" + uri.getHost() + "/";
+        } catch (Exception exc) {
+            return "";
+        }
+    }
+
+    private String fetchThumbBytes(String url, String referer) {
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setConnectTimeout(THUMB_TIMEOUT_MS);
+            conn.setReadTimeout(THUMB_TIMEOUT_MS);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", UA_MOBILE);
+            conn.setRequestProperty("Referer", referer);
             conn.setRequestProperty("Accept", "image/*,*/*;q=0.8");
             if (conn.getResponseCode() != 200) return null;
 

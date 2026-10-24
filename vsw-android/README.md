@@ -676,7 +676,9 @@ Invoke-WebRequest 'https://repo1.maven.org/maven2/com/google/zxing/core/3.5.3/co
 
 ### 手机搜图的结果图全裂了（r23）
 
-百度/360 的结果图有防盗链，只认 `Referer`。面板原来直接 `<img src="https://t7.baidu.com/…">`，从 `file://` 页面发出去没有 Referer → 403 → 一张都不显示（识别结论还在，所以看起来像「提取脚本坏了」，其实提取是好的）。
+~~百度/360 的结果图有防盗链，只认 Referer。~~ **这个判断是错的，已实测推翻**：`mms*.baidu.com`、`p0.ssl.qhimgs1.com` 带不带 Referer 都回 200。真实情况更可能是**提取这一侧就没抓到图**（`similar` 为空），面板于是显示「没抓到相似图」—— 既没图也没统计行，和用户看到的一模一样。
+
+r24 起先加诊断再谈修复：结果为空时把 `diag`（pcsimi 请求条数、页面图片主机分布）写进面板；标题带版本号；抽图从白名单主机放宽到「≥96px 的图都要」。
 
 修法：`WebSearchActivity` 命中结果后不立刻返回，先起 `vsw-thumb-fetch` 线程把前 12 张抓回来（`HttpURLConnection` 带 `Referer: <引擎搜索页>` + 移动 UA，5 秒超时、单张 6 MB 上限、`inSampleSize` 抽样解码、360px / JPEG 72），转成 `data:image/jpeg;base64,…` 塞进每条 `d` 字段；页面 `x.d || x.u`，并把「其中 N 张已存成本地小图」写在统计行。
 
