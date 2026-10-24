@@ -143,6 +143,32 @@ python -m vsw.server --root vsw/data --unprotect   # 关掉密钥闸门
 令牌，走请求头 `X-VSW-Session`（同样认 `Authorization: Bearer`）。访客密钥走
 `X-VSW-Key` 或链接上的 `?key=`——`<img>` 带不了请求头，分享链接是必要的退路。
 
+## 不在同一个局域网的人怎么进来
+
+局域网地址（`192.168.x.x`）只在一个网里能用。要让别的城市的人打开，有两种办法，
+这个项目内置了第二种：
+
+| 办法 | 要做什么 | 代价 |
+| --- | --- | --- |
+| 端口转发 | 路由器上把端口开出去 | 家宽大多在运营商 NAT 后面，根本没有公网 IPv4，多半转发不出去 |
+| **Tailscale Funnel** | 装 Tailscale 登录，页面里点「打开公网通道」 | 免路由器、免公网 IP、证书由 Tailscale 边缘终止 |
+
+```bat
+python -m vsw.server --root vsw/data --host 0.0.0.0 --port 8799 --tunnel
+```
+
+启动日志会打印 `🌍 公网地址：https://<节点名>.ts.net/`。也可以在页面右上角
+「共享 / 账号」→「不在同一个局域网 / 别的城市」里点一下开关（只有主人能点）。
+
+三条要点：
+
+1. **先有门槛才能开。** 没有账号也没有密钥时，服务端会拒绝开公网（`400` +
+   「先建第一个账号（或 --protect 上锁）再开公网」）——否则谁拿到地址都能读写。
+2. **经隧道进来的人算「外部设备」。** Funnel 回源时对端地址永远写成 `127.0.0.1`，
+   真正的来源在 `X-Forwarded-For` 里，所以 `_is_local()` 先看这个头。否则整个互联网
+   都会被当成"跑服务的那台电脑"，谁都能抢先建出主人账号。
+3. **关掉它**：重启加 `--no-tunnel`，或在面板里点「关闭公网通道」。
+
 ## 快速开始
 
 ```bat
@@ -191,15 +217,34 @@ python scripts/vsw-check-syntax.py                                            # 
 ```
 
 手机端每个真实修过的坑都有一个行为探针（从 APK 里解出内置页面，用同内核浏览器跑）：
-`vsw-probe-import-queue.js`、`-queue-filter.js`、`-queue-thumbs.js`、`-trash-thumbs.js`、
-`-archive-view.js`、`-archive-merge.js`。
+`vsw-probe-import-queue.js`（11 项）、`-queue-filter.js`（14）、`-queue-thumbs.js`（7）、
+`-trash-thumbs.js`（5）、`-archive-view.js`（20）、`-archive-merge.js`（40）。
+服务端一旦开了账号，这些探针都要带 `--sid <会话令牌>` 跑（否则它们的接口调用全是 401）：
+
+```bash
+node scripts/vsw-probe-archive-view.js --apk vsw-workbench.apk      --origin http://127.0.0.1:8799 --sid "$(cat token.txt)"
+```
 
 权限与账号是服务端语义，各有独立探针（自建临时数据目录 + 临时密钥库，在随机端口上跑真服务）：
 
 ```bash
 python scripts/vsw-probe-access.py      # 45 项：密钥、角色分级、限速、页面壳子免检
-python scripts/vsw-probe-accounts.py    # 65 项：建号、邀请码、工作区隔离、协作、会话头、共用语义引擎、本机/远程判定
+python scripts/vsw-probe-accounts.py    # 67 项：建号、邀请码、工作区隔离、协作、会话头、共用语义引擎、本机/远程判定
+python scripts/vsw-probe-tunnel.py      # 35 项：公网通道解析、XFF 优先、只有主人能开、没门槛时拒绝开
 ```
+
+### 加了身份之后，每条"绕开请求头"的通道都要过一遍
+
+账号/密钥是请求头里的东西，但这几类通道**加不了请求头**，第一次上线就踩了两个：
+
+* `<img src>` / 裸 `fetch()` 取图 —— 手机端 `ensureThumbs()` 一开始就是裸 `fetch`，
+  开了账号之后 `/media/...` 全 401，代码里 `continue` 掉，于是缩略图一张都不补、
+  控制台一行红都没有（用户看到的是「列表一片空白」）。改走统一加头的 `netFetch()`。
+* `<a download href>` —— 归档 zip 靠它交给系统下载器，`<a>` 带不了头，同样 401。
+  `withKey(url)` 改成"会话令牌优先、其次访客密钥"（`?sid=` / `?key=`，服务端两种都认）。
+
+判断标准很简单：**只要有一处仍然在裸 `fetch` 或裸 `<img>`，开了账号之后它就会静默失效。**
+探针里专门留了这几项回归（补图从 0 张变 228 张、zip 从 `status:401` 变合法 PK 头）。
 
 ## 仓库结构
 
@@ -212,6 +257,7 @@ vsw/                  桌面工作台 + 手机端页面（同一份手机页面�
   service.py          闭环：入库 → 变体 → 队列 → 检索 → 三层去重 → 聚类 → 排序 → 回流 → 图谱
   server.py           纯标准库 HTTP 服务：JSON API + 单页 UI + 媒体服务 + 手机端接口 + 身份闸门
   accounts.py         账号 / 工作区 / 成员 / 会话 / 邀请码（auth.sqlite3，PBKDF2 口令哈希）
+  tunnel.py           公网通道（Tailscale Funnel）：状态解析、开/关、节点名
   hub.py              工作区句柄表：一个工作区 = 一个数据目录，按请求绑定
   access.py           访客密钥：加盐哈希、角色、失败限速
   static/             桌面端 index.html / app.css / app.js（无框架）

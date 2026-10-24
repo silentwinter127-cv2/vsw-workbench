@@ -27,6 +27,8 @@ function parseArgs() {
     if (argv[i] === '--apk') out.apk = argv[++i];
     else if (argv[i] === '--page') out.page = argv[++i];
     else if (argv[i] === '--origin') out.origin = argv[++i];
+
+    else if (argv[i] === '--sid') out.sid = argv[++i];
     else if (!out.page && !out.apk) out.page = argv[i];
   }
   return out;
@@ -127,8 +129,10 @@ async function main() {
     await sleep(3000);
 
     // 先把地址填好，避免首次引导挡住导入面板
-    await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)})`);
     await send('Page.navigate', { url: pageUrl });
+    await sleep(1200);
+    await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); ${args.sid ? `localStorage.setItem('vsw.sid', ${JSON.stringify(args.sid)});` : ''}`);
+    await send('Page.reload');
     await sleep(2500);
 
     // 造 3 张真实的小图（png），塞进导入队列并打开面板
@@ -224,8 +228,8 @@ async function main() {
           JSON.stringify(queued && queued.topSeeds));
 
     const seeded = await evaluate(`(async () => {
-      const res = await fetch(${JSON.stringify(args.origin)} + '/api/seeds?limit=500', { cache: 'no-store' });
-      const list = (await res.json()).seeds || [];
+      // 用页面的 api()：它带 cookie / X-VSW-Session，裸 fetch 在有账号时只有 401。
+      const list = (await api('/api/seeds?limit=500')).seeds || [];
       return list.filter((s) => /探针/.test(s.title || '')).map((s) => s.title);
     })()`);
     check('工作台里确实多了这三张（按标题能找到）',

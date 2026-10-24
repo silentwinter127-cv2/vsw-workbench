@@ -32,6 +32,8 @@ function parseArgs() {
     if (argv[i] === '--apk') out.apk = argv[++i];
     else if (argv[i] === '--page') out.page = argv[++i];
     else if (argv[i] === '--origin') out.origin = argv[++i];
+
+    else if (argv[i] === '--sid') out.sid = argv[++i];
     else if (!out.page && !out.apk) out.page = argv[i];
   }
   return out;
@@ -102,8 +104,13 @@ async function main() {
     results.push({ label, ok: !!ok });
     console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${label}${!ok && detail ? ' :: ' + detail : ''}`);
   };
+  // 服务端开了账号之后，Node 侧的裸 fetch 一律 401 —— 带上探针拿到的那把会话令牌。
+  const authHeaders = () => (args.sid ? { 'X-VSW-Session': args.sid } : {});
   const json = async (url, opts) => {
-    const res = await fetch(url, opts);
+    // 服务端开了账号之后，Node 侧的裸 fetch 一律 401 —— 带上探针拿到的那把会话令牌。
+    const conf = Object.assign({}, opts || {});
+    if (args.sid) conf.headers = Object.assign({ 'X-VSW-Session': args.sid }, conf.headers || {});
+    const res = await fetch(url, conf);
     const text = await res.text();
     let data = null;
     try { data = JSON.parse(text); } catch (e) { data = { __raw: text.slice(0, 200) }; }
@@ -172,7 +179,7 @@ async function main() {
 
   // ---------------------------------------------------------------- B. 打包
   console.log('\nB. 打包：合并 zip');
-  const zipRes = await fetch(`${origin}/api/archive/merge/zip?ids=${idsParam}`);
+  const zipRes = await fetch(`${origin}/api/archive/merge/zip?ids=${idsParam}`, { headers: authHeaders() });
   const zipBuf = Buffer.from(await zipRes.arrayBuffer());
   const disposition = zipRes.headers.get('content-disposition') || '';
   check('合并 zip 能下载（200 且非空）', zipRes.ok && zipBuf.length > 1000,
@@ -185,7 +192,7 @@ async function main() {
         zipRes.status !== 400, `status=${zipRes.status}`);
 
   // 反证：如果通配路由抢了字面路由，HEAD 会变成 400（int('merge') 解析失败）
-  const headRes = await fetch(`${origin}/api/archive/merge/zip?ids=${idsParam}`, { method: 'HEAD' });
+  const headRes = await fetch(`${origin}/api/archive/merge/zip?ids=${idsParam}`, { method: 'HEAD', headers: authHeaders() });
   check('同一个地址用 HEAD 也是 200（下载预览/断点都靠它）',
         headRes.ok && Number(headRes.headers.get('content-length') || 0) > 1000,
         `status=${headRes.status} len=${headRes.headers.get('content-length')}`);
@@ -208,7 +215,7 @@ async function main() {
           JSON.stringify((man.items || [])[0] || {}).slice(0, 120));
   }
 
-  const singleZip = await fetch(`${origin}/api/archive/${useIds[0]}/zip`);
+  const singleZip = await fetch(`${origin}/api/archive/${useIds[0]}/zip`, { headers: authHeaders() });
   const singleBuf = Buffer.from(await singleZip.arrayBuffer());
   check('单个批次的 zip 仍然可用（回归：新路由不能架空前一个）',
         singleZip.ok && singleBuf[0] === 0x50 && singleBuf[1] === 0x4b,
@@ -267,11 +274,13 @@ async function main() {
 
     // ------------------------------------------------------------ D. 手机端
     console.log('\nD. 手机端：勾选 → 合并查看 / 合并保存');
-    await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(origin)})`);
     await send('Page.navigate', { url: pageUrl });
+    await sleep(1200);
+    await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); ${args.sid ? `localStorage.setItem('vsw.sid', ${JSON.stringify(args.sid)});` : ''}`);
+    await send('Page.reload');
     await sleep(2500);
     if (!(await evaluate('S.server'))) {
-      await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(origin)}); location.reload();`);
+      await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); ${args.sid ? `localStorage.setItem('vsw.sid', ${JSON.stringify(args.sid)});` : ''}; location.reload();`);
       await sleep(3000);
     }
     const booted = await evaluate('({ server: S.server, hasAlbumPick: S.albumPick instanceof Set })');
@@ -401,6 +410,14 @@ async function main() {
 
     // ------------------------------------------------------------ E. 桌面端
     console.log('\nE. 桌面端：勾选批次 → 合并');
+    if (args.sid) {
+      // 桌面端是 http 源，靠 cookie 认人；先把这个会话塞进浏览器，
+      // 否则服务端开了账号之后页面只显示登录卡，表格里一行都没有。
+      await send('Network.enable');
+      await send('Network.setCookie', {
+        name: 'vsw_sid', value: args.sid, domain: new URL(origin).hostname, path: '/',
+      });
+    }
     await send('Page.navigate', { url: origin + '/' });
     await sleep(2000);
     await evaluate(`document.querySelector('.tab[data-view="sources"]').click()`);

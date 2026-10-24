@@ -316,6 +316,7 @@ label.field > span{display:block;font-size:12px;color:var(--dim);margin-bottom:5
     <div class="card" id="accountCard">
       <div class="row"><b>账号</b><div class="spacer"></div><span class="small" id="accState">未登录</span></div>
       <div id="accWho" class="small" style="margin:6px 0"></div>
+      <div id="accPublic" class="hide" style="margin:6px 0"></div>
       <div id="accLogged" class="hide">
         <label class="field"><span>工作区</span>
           <select id="accWs"></select></label>
@@ -703,10 +704,13 @@ function post(path, body) {
   }).then(readJson);
 }
 
-/* <img src> 与 <a download> 带不了请求头，只能把密钥放进查询串。 */
+/* 直链（<a download>、<img>）带不了请求头，只能把凭证塞进查询串。
+   会话令牌优先，其次访客密钥；服务端两种都认（?sid= / ?key=）。 */
 function withKey(url) {
-  if (!S.key) return url;
-  return url + (url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(S.key);
+  const token = S.sid || S.key;
+  if (!token) return url;
+  const name = S.sid ? 'sid' : 'key';
+  return url + (url.includes('?') ? '&' : '?') + name + '=' + encodeURIComponent(token);
 }
 
 async function checkOnline() {
@@ -934,7 +938,9 @@ async function ensureThumbs(rows, kind = 'finding') {
   for (const row of missing) {
     const rel = spec.rel(row);
     try {
-      const resp = await fetch(relToMediaServer(rel), { cache: 'force-cache' });
+      // 必须走 netFetch：服务端开了账号/密钥之后，裸 fetch 取图只会拿到 401，
+      // 补图就成了"静默失败"——列表里一片空白，控制台一行红都没有。
+      const resp = await netFetch(relToMediaServer(rel), { cache: 'force-cache' });
       if (!resp.ok) continue;
       const blob = await resp.blob();
       if (!blob.size) continue;
@@ -2486,11 +2492,53 @@ async function refreshAccount() {
     renderAccount();
     // 这台电脑开了账号、而我还没进去 —— 直接把「我的」摆到面前，别让人对着空结果板发呆
     if (me && me.accounts && !me.logged_in && S.tab !== 'me') switchTab('me');
+    if (me && me.logged_in) refreshPublic();
     return me;
   } catch (e) {
     S.me = null;
     renderAccount();
     return null;
+  }
+}
+
+/* 公网地址（Tailscale Funnel）：不在同一个局域网的人靠它进来。
+   只在登录之后问 —— 没登录时 /api/access 不给 share。 */
+async function refreshPublic() {
+  if (!S.server) return;
+  try {
+    const info = await api('/api/access');
+    S.share = (info && info.share) || null;
+  } catch (e) {
+    S.share = null;
+  }
+  renderAccPublic();
+}
+
+function renderAccPublic() {
+  const box = $('#accPublic');
+  if (!box) return;
+  const pub = S.share && S.share.public;
+  if (!pub || !pub.running || !pub.url) {
+    box.classList.add('hide');
+    box.innerHTML = '';
+    return;
+  }
+  box.classList.remove('hide');
+  box.innerHTML = `公网地址：<code>${esc(pub.url)}/</code>
+    <div class="row" style="margin-top:6px">
+      <button class="btn ghost" id="accPubCopy">复制公网地址</button>
+    </div>`;
+  const btn = $('#accPubCopy');
+  if (btn) {
+    btn.onclick = async () => {
+      const url = `${pub.url}/m/`;
+      try {
+        await navigator.clipboard.writeText(url);
+        toast('已复制 ' + url);
+      } catch (e) {
+        toast(url);
+      }
+    };
   }
 }
 
@@ -2501,6 +2549,7 @@ function renderAccount() {
   const logged = $('#accLogged');
   const out = $('#accLoggedOut');
   if (!state) return;
+  renderAccPublic();
   const on = !!(me && me.accounts);
   if (!on) {
     state.textContent = S.key ? '访客密钥' : '未上锁';

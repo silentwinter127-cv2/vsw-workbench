@@ -2118,6 +2118,9 @@ function shareLinksHtml(info, code) {
   (share.desktop || []).forEach((u) => add('电脑上打开', u));
   (share.phone || []).forEach((u) => add('手机上打开', u));
   if (!rows.length) rows.push('<div class="meta">还不知道本机的局域网地址，先确认服务在跑。</div>');
+  if (share.public && share.public.running && share.public.url) {
+    add('公网（不在局域网也能开）', `${share.public.url}/`);
+  }
   const locked = !!(info && info.enabled);
   if (code) {
     rows.unshift('<div class="hint small">下面这些链接里带着密钥，点开就能进，不用再手打 —— 别发到公开群里。</div>');
@@ -2209,7 +2212,77 @@ function renderShare(info) {
   const foot = $('#shareFoot');
   if (foot) foot.textContent = '';
 
+  renderPublic(info);
+
   loadWorkspaceBits();
+}
+
+/** 公网通道（Tailscale Funnel）：不在同一局域网的人靠这条地址进来。 */
+function renderPublic(info) {
+  const box = $('#sharePublic');
+  if (!box) return;
+  const pub = (info && info.share && info.share.public) || null;
+  const isOwner = !!(info && info.me && info.me.role === 'owner');
+  const me = (info && info.me) || {};
+  if (!pub) {
+    box.innerHTML = '<div class="meta">这台机器的服务端没报告公网状态。</div>';
+    return;
+  }
+  if (!pub.available) {
+    box.innerHTML = `<div class="meta">${esc(pub.error || '没装 Tailscale')}</div>
+      <p class="hint small">装 Tailscale 并登录后，这里会出现一个 <code>https://…ts.net</code> 地址，
+      不用动路由器、也不用公网 IP —— 家里宽带大多是运营商 NAT，端口转发根本转发不出去。</p>`;
+    return;
+  }
+  const blocked = pub.blocked || '';
+  if (pub.running && pub.url) {
+    box.innerHTML = `
+      <div class="linkrow">
+        <span class="meta">公网地址</span>
+        <code>${esc(pub.url)}/</code>
+        <button class="btn ghost" data-copy="${esc(pub.url)}/">复制</button>
+      </div>
+      <div class="acts" style="margin-top:8px">
+        ${isOwner ? '<button class="btn ghost" id="tunnelStop">关闭公网通道</button>' : ''}
+      </div>
+      <p class="hint small">这条地址在手机上用流量也能打开。走公网的人算「外部设备」——
+      不能替你建第一个账号，只能登录或凭密钥进来。</p>`;
+    const copy = box.querySelector('[data-copy]');
+    if (copy) copy.onclick = () => copyText(copy.dataset.copy);
+    const stopBtn = $('#tunnelStop');
+    if (stopBtn) stopBtn.onclick = () => tunnelAction('stop');
+    return;
+  }
+  box.innerHTML = `
+    <p class="hint small">现在只能在同一个局域网里打开（地址以 <code>192.168.</code> 开头）。
+    要让外网的人也能开，开一条公网通道：</p>
+    <div class="acts">
+      ${isOwner ? '<button class="btn primary" id="tunnelStart">打开公网通道</button>' : ''}
+    </div>
+    ${blocked ? `<p class="hint small" style="color:#ffb020">${esc(blocked)}</p>` : ''}
+    ${pub.error ? `<p class="hint small">${esc(pub.error)}</p>` : ''}`;
+  const go = $('#tunnelStart');
+  if (go) go.onclick = () => tunnelAction('start');
+}
+
+async function tunnelAction(action) {
+  const btn = $('#tunnelStart') || $('#tunnelStop');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = action === 'start' ? '正在打开…' : '正在关闭…';
+  }
+  try {
+    const data = await api('/api/tunnel', { method: 'POST', body: { action } });
+    if (action === 'start') {
+      if (data && data.running && data.url) toast(`公网已开：${data.url}/`);
+      else toast((data && data.error) || '公网通道没起来');
+    } else {
+      toast('公网通道已关闭');
+    }
+  } catch (err) {
+    toast(err.message || '操作失败');
+  }
+  openShare();
 }
 
 // ------------------------------------------------------- 成员 / 邀请码

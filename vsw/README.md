@@ -219,6 +219,24 @@ python -m vsw.server --root vsw/data --host 127.0.0.1 --port 8799
 自动识图另需 **Node 18+**（本机 22/24 都有，驱动只用标准库 + 全局 `WebSocket`）与本机 Edge/Chrome。
 语义层需要本机模型 `D:\siglip2-base-patch16-224`；**没有它也能跑**，工作台自动退化为文件层 + 感知哈希层，公式与队列照常工作。
 
+### 让不在同一个局域网的人也能打开
+
+局域网地址只在一个网里能用。本机已装 Tailscale 的话，服务可以自己开一条公网通道：
+
+```bat
+python -m vsw.server --root data --host 0.0.0.0 --port 8799 --tunnel    :: 开
+python -m vsw.server --root data --host 0.0.0.0 --port 8799 --no-tunnel :: 关
+```
+
+页面里也能点：右上角「共享 / 账号」→「不在同一个局域网 / 别的城市」→「打开公网通道」
+（只有主人能点）。启动日志会打印 `🌍 公网地址：https://<节点名>.ts.net/`。
+
+- **先有门槛才能开**：没账号也没密钥时会拒绝（400 +「先建第一个账号…再开公网」）。
+- **经隧道进来的人算外部设备**：Funnel 回源的对端固定写成 `127.0.0.1`，真实来源在
+  `X-Forwarded-For` 里，所以 `Handler._is_local()` 先看这个头 —— 否则整个互联网都能
+  抢先建出主人账号。
+- 手机端登录后「我的」页会显示这条公网地址，一键复制。
+
 ### 分人用：账号、私人工作区、协作
 
 默认不设防（本机与同一局域网都能读写）。要分人用，就在页面顶栏右上角（或「共享 / 账号」面板里）
@@ -241,6 +259,12 @@ python -m vsw.server --root vsw/data --host 127.0.0.1 --port 8799
 实现位置：[`vsw/accounts.py`](accounts.py)（账号/工作区/成员/会话/邀请码）、
 [`vsw/hub.py`](hub.py)（工作区句柄表）、[`vsw/access.py`](access.py)（访客密钥）、
 [`vsw/server.py`](server.py) 的 `_resolve/_bind/_guard`（每请求定身份 + 绑工作区）。
+
+**加了身份之后，所有"绕开请求头"的通道都要查一遍。** `<img>` 带不了头、`<a download>` 带不了头、
+裸 `fetch` 忘了带 —— 这三处第一次上线就各踩了一次：手机端补缩略图用裸 `fetch` 取 `/media/`，
+开了账号之后全 401 又被 `continue` 掉，表现是「列表一片空白、控制台没有红字」；归档 zip 走
+`<a download>`，同样 401。现在取图统一走 `netFetch()`，直链统一定 `withKey(url)`
+（会话令牌优先、其次访客密钥，`?sid=` / `?key=`，服务端两种都认）。
 
 **语义模型只有一份。** 工作区各占一个数据目录，但 `VisionEngine` 是 `VisionEngine.instance()`
 的全进程单例（`[engine.py](engine.py)` 的 `_lock`/`_instance`，`[service.py](service.py:75)`

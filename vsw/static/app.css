@@ -468,3 +468,8 @@ input[type=password]:focus { outline: none; border-color: var(--accent); }
 .topbar > * { flex: 0 0 auto; }
 .topbar .tabs { flex: 1 1 auto; min-width: 0; }
 .topbar button, .topbar .pill { white-space: nowrap; }
+
+/* 面板里的按钮别被窄栏挤成竖排字（「加入 / 进来」「生成」都中过招）。
+   规则和顶栏那条同一个毛病：flex 项默认可缩，缩到比文字窄就换行了。 */
+.sharerow .btn, .shareme .btn, #shareAccount .btn, #shareOwnerOnly .btn { white-space: nowrap; flex: 0 0 auto; }
+.sharerow input, .sharerow select, #shareAccount input, #shareAccount select { min-width: 0; }

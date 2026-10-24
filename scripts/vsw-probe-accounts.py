@@ -325,8 +325,13 @@ def probe(base, root, svc, auth, access, hub_ref=None) -> int:
     from vsw.server import Handler as _H, lan_addresses as _lan
 
     class _Stub:
-        def __init__(self, ip):
+        """只喂 IP 来源，_is_local 用真实现 —— 这样 XFF 那条分支也被测到。"""
+
+        _forwarded_ip = _H._forwarded_ip
+
+        def __init__(self, ip, xff=""):
             self._ip = ip
+            self.headers = {"X-Forwarded-For": xff} if xff else {}
 
         def _client_ip(self):
             return self._ip
@@ -346,6 +351,11 @@ def probe(base, root, svc, auth, access, hub_ref=None) -> int:
     check("J 外网地址不算本机", _H._is_local(_Stub(remote)) is False)
     other = "192.168.1.250" if not own or own[0] != "192.168.1.250" else "192.168.1.251"
     check("J 同网段别人的机器不算本机", _H._is_local(_Stub(other)) is False, other)
+    # 公网通道回源时对端固定是 127.0.0.1，只有 X-Forwarded-For 能说明真实来源
+    check("J 隧道里对端 127 但 XFF 是公网 → 不算本机",
+          _H._is_local(_Stub("127.0.0.1", "8.8.8.8")) is False)
+    check("J 隧道里 XFF 是回环 → 算本机",
+          _H._is_local(_Stub("127.0.0.1", "127.0.0.1")) is True)
 
     print()
     total = PASS + FAIL

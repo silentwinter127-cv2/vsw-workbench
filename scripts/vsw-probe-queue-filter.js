@@ -28,6 +28,8 @@ function parseArgs() {
     if (argv[i] === '--apk') out.apk = argv[++i];
     else if (argv[i] === '--page') out.page = argv[++i];
     else if (argv[i] === '--origin') out.origin = argv[++i];
+
+    else if (argv[i] === '--sid') out.sid = argv[++i];
     else if (!out.page && !out.apk) out.page = argv[i];
   }
   return out;
@@ -117,33 +119,33 @@ async function main() {
       return res.result && res.result.result ? res.result.result.value : null;
     };
 
-    // 先造测试队列项（用真实种子的某个变体，避免污染其它数据）
+    console.log(`内核 ${version.Browser}\n页面 ${pageUrl}\n`);
+    await send('Page.navigate', { url: pageUrl });
+    await sleep(1200);
+    await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); ${args.sid ? `localStorage.setItem('vsw.sid', ${JSON.stringify(args.sid)});` : ''}`);
+    await send('Page.reload');
+    await sleep(2500);
+    const ready = await evaluate('S.server');
+    if (!ready) {
+      await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); ${args.sid ? `localStorage.setItem('vsw.sid', ${JSON.stringify(args.sid)});` : ''}; location.reload();`);
+      await sleep(3000);
+    }
+
+    // 造测试队列项（用真实种子的某个变体，避免污染其它数据）。
+    // 必须在页面加载之后做：只有页面里的 api()/post() 才带得上身份。
     const created = await evaluate(`(async () => {
-      const res = await fetch(${JSON.stringify(args.origin)} + '/api/queue?status=all&limit=50');
-      const q = await res.json();
-      const seed = (q.jobs || []).find(j => j.seed_id);
-      if (!seed) return { error: '队列里没有可用的种子' };
-      // 用种子重新入队一个"指定变体"，这样能精确认出自己造的那几条
-      const make = await fetch(${JSON.stringify(args.origin)} + '/api/queue/enqueue', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ seed_ids: [seed.seed_id], engines: ['baidu'], kinds: ['edges'] }),
-      });
-      const out = await make.json();
-      return { seedId: seed.seed_id, jobIds: out.job_ids || [] };
+      try {
+        const q = await api('/api/queue?status=all&limit=200');
+        const seed = (q.jobs || []).find((j) => j.seed_id);
+        if (!seed) return { error: '队列里没有可用的种子' };
+        const out = await post('/api/queue/enqueue',
+          { seed_ids: [seed.seed_id], engines: ['baidu'], kinds: ['edges'] });
+        return { seedId: seed.seed_id, jobIds: out.job_ids || [] };
+      } catch (e) { return { error: String(e && e.message || e) }; }
     })()`);
     check('已造出用于验证的测试队列项', created && created.jobIds && created.jobIds.length > 0,
           JSON.stringify(created));
     const testIds = new Set((created && created.jobIds) || []);
-
-    console.log(`内核 ${version.Browser}\n页面 ${pageUrl}\n`);
-    await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)})`);
-    await send('Page.navigate', { url: pageUrl });
-    await sleep(2500);
-    const ready = await evaluate('S.server');
-    if (!ready) {
-      await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); location.reload();`);
-      await sleep(3000);
-    }
 
     // 拉队列写本地库
     const synced = await evaluate(`(async () => {

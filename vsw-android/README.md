@@ -8,7 +8,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `vsw-workbench.apk` | 可直接安装的 release 包（约 602 KB，用你自己的密钥库自签；当前 r15 为 616,493 字节） |
+| `vsw-workbench.apk` | 可直接安装的 release 包（约 602 KB，用你自己的密钥库自签；当前 r16 为 620,589 字节） |
 | `vsw-workbench-debug.apk` | 带调试签名的版本（`build_apk.bat` 不带参数时的产物） |
 
 包名 `com.vsw.workbench` · 应用名「视觉搜索工作台」· minSdk 24（Android 7.0+）· targetSdk 34。
@@ -98,6 +98,7 @@ node ../scripts/vsw-probe-archive-merge.js --apk ../vsw-workbench.apk --origin h
 python ../scripts/vsw-probe-access.py
 
 # 10) 账号 / 私人工作区 / 协作：建号、邀请码、隔离、会话头、共用语义引擎、本机/远程判定（65 项）
+# 11) 公网通道：Funnel 状态解析、XFF 优先、只有主人能开、没门槛时拒绝开（35 项）
 python ../scripts/vsw-probe-accounts.py
 
 # 0) 语法闸门：内联脚本一处语法错，整页就不能点（比行为探针便宜得多，先跑它）
@@ -407,6 +408,58 @@ r14 的修法还留着一个坑：**在这台机器上用局域网地址打开�
 在临时实例上用局域网地址 `POST /api/auth/setup` 直接返回 200 并种下会话（修前是 403）。
 `vsw-probe-accounts.py` 加了 J 段 4 项：回环算本机、本机网卡算本机、`8.8.8.8` 不算、
 同网段别人的机器不算（61 → 65 项）。
+
+### 不在同一个局域网的人打不开 → 公网通道（r16）
+
+用户反馈「其他用户打不开，因为是局域网」。局域网地址当然只在一个网里能用，所以补了一条
+**公网通道**：本机装了 Tailscale，就用它的 Funnel 把 `https://<节点名>.ts.net/` 代理到
+`127.0.0.1:8799` —— 不用碰路由器，也不需要公网 IP（家宽多在运营商 NAT 后面，端口转发根本
+转发不出去），TLS 由 Tailscale 边缘终止。
+
+新增 `vsw/tunnel.py`（`exe/available/parse_status/status/start/stop/node_name`，`status` 带
+20 秒缓存）+ 接口 `GET|POST /api/tunnel`（POST 的 `action` 是 `start`/`stop`，在 `_OWNER_WRITES`
+里，所以只有主人能点）+ `--tunnel` / `--no-tunnel` 两个启动开关。页面入口在「共享 / 账号」→
+「不在同一个局域网 / 别的城市」，手机端登录后「我的」页也会显示这条地址，可一键复制。
+
+**踩到一个必须记下来的坑：Funnel 回源时对端地址永远写成 `127.0.0.1`。** 真实来源在
+`X-Forwarded-For` 里（还带 `Tailscale-User-Login`）。如果 `_is_local()` 只看对端地址，
+整个互联网都会被当成"跑服务的那台电脑" —— 谁先打开谁就把主人账号建走了。所以
+`Handler._forwarded_ip()` + `_is_local()` 改成 **有 XFF 就只按 XFF 判断**。
+
+另一道闸：没有账号也没有有效密钥时，`POST /api/tunnel {action:"start"}` 一律 400
+（「先建第一个账号（或 --protect 上锁）再开公网 —— 现在库里没有任何门槛，开到公网等于谁拿到
+地址都能读写」），避免"开得出去、收不回来"。
+
+顺带修了两个界面毛病（都是 flex 项默认可缩导致的）：
+
+* 顶栏「建第一个账号」被挤成 `建第一个 / 账号` 两行 → `.topbar button { white-space: nowrap }`；
+* 共享面板里「加入 / 进来」「生成」竖排 → `.sharerow .btn` 等同一条规则。
+
+`scripts/vsw-probe-tunnel.py`（35 项）：把 `vsw.tunnel` 的 `status/start/stop` 换成假实现
+（真的 `tailscale funnel off` 是机器级开关，探针真去开一次会把用户正在用的地址关掉），
+只验我们自己的逻辑：状态解析、XFF 压过对端、只有主人能开、没门槛时 400、`/api/access` 里
+出现 `share.public`、经隧道的外部设备 `can_setup=false` 且读数据 401 但页面壳子 200。
+
+真机上的现状（r16 之前实测过公网地址）：`https://silentwinter.tailf5fb77.ts.net/api/health` → 200，
+`/api/auth` → `accounts: true, logged_in: false, can_setup: false`，`/api/seeds` → 401。
+
+### 开了账号之后，取图和下载都得带身份（r16）
+
+同一轮验证里翻出两个**只在"已经有账号"之后才出现**的 bug，都是"能看见的地方全绿、看不见的地方
+一片空白"那种：
+
+1. **手机端补图静默失败。** `ensureThumbs()` 里补图用的是裸 `fetch(relToMediaServer(rel))` ——
+   没带 `X-VSW-Key` / `X-VSW-Session`。服务端一开账号，`/media/...` 全是 401，代码里又是
+   `continue`，于是缩略图一张都不补、控制台一行红都没有。表现就是用户早先报的「列表里一片空白」。
+   改成 `netFetch(...)`（它统一加身份头）。实测同一脚本：修前 `assets 0 / _thumbs 209`，
+   修后 `assets 228 / _thumbs 228`。
+2. **「保存到手机」下载 401。** 归档 zip 走 `<a download href=...>`，而 `<a>` 带不了请求头。
+   `withKey(url)` 原来只认访客密钥，登录用户的会话没进去。改成"会话令牌优先、其次密钥"
+   （`?sid=` / `?key=`，服务端两种都认）。探针里那三项 `size:156 / status:401 / 没有文件名`
+   就是它。
+
+教训和 r14 那次一样：**新加一层身份，就得把所有"绕开请求头"的通道都过一遍** ——
+`<img>`、`<a download>`、裸 `fetch`、`Background` 下载，一个漏了就是静默失效。
 
 ### ⚠ 还没验证到的（真机才能确认）
 

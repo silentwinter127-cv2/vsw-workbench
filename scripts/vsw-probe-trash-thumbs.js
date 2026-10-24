@@ -30,6 +30,8 @@ function parseArgs() {
     if (argv[i] === '--apk') out.apk = argv[++i];
     else if (argv[i] === '--page') out.page = argv[++i];
     else if (argv[i] === '--origin') out.origin = argv[++i];
+
+    else if (argv[i] === '--sid') out.sid = argv[++i];
     else if (!out.page && !out.apk) out.page = argv[i];
   }
   return out;
@@ -123,8 +125,10 @@ async function main() {
     // 先写地址再**重新加载**：boot() 只在页面加载时读一次 localStorage，
     // 写完不刷新的话应用内存里 S.server 还是空的，媒体请求就没有主机名
     // （第一版探针就栽在这里，误判成应用 bug）。
-    await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)})`);
     await send('Page.navigate', { url: pageUrl });
+    await sleep(1200);
+    await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); ${args.sid ? `localStorage.setItem('vsw.sid', ${JSON.stringify(args.sid)});` : ''}`);
+    await send('Page.reload');
     await sleep(2500);
     const ready = await evaluate(`({ server: S.server, online: S.online,
       stored: localStorage.getItem('vsw.server'), origin: location.origin, proto: location.protocol })`);
@@ -132,7 +136,7 @@ async function main() {
       + ` · localStorage=${JSON.stringify(ready && ready.stored)} · ${ready && ready.proto}`);
     if (!ready || !ready.server) {
       // 地址丢了就没法验证图片补齐 —— 直接把它补上并重新加载一次，别让探针假失败
-      await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); location.reload();`);
+      await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); ${args.sid ? `localStorage.setItem('vsw.sid', ${JSON.stringify(args.sid)});` : ''}; location.reload();`);
       await sleep(3000);
       const again = await evaluate(`({ server: S.server, online: S.online })`);
       console.log(`      二次尝试后: ${again && again.server} · online=${again && again.online}`);
@@ -160,8 +164,8 @@ async function main() {
 
     // 拉一次快照并写入本地库（模拟手机同步过）
     const synced = await evaluate(`(async () => {
-      const res = await fetch(${JSON.stringify(args.origin)} + '/api/mobile/snapshot?images=thumbs&limit=300&trash=1&archives=1');
-      const snap = await res.json();
+      // 用页面的 api()：它带 cookie / X-VSW-Session。裸 fetch 在"服务端有账号"时只会拿到 401。
+      const snap = await api('/api/mobile/snapshot?images=thumbs&limit=300&trash=1&archives=1');
       for (const store of ['findings','trash','archives','jobs','seeds','variants']) {
         const rows = store === 'findings' ? snap.findings : store === 'trash' ? snap.trash
                    : store === 'archives' ? snap.archives : store === 'jobs' ? snap.jobs

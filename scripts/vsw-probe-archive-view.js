@@ -41,6 +41,8 @@ function parseArgs() {
     if (argv[i] === '--apk') out.apk = argv[++i];
     else if (argv[i] === '--page') out.page = argv[++i];
     else if (argv[i] === '--origin') out.origin = argv[++i];
+
+    else if (argv[i] === '--sid') out.sid = argv[++i];
     else if (!out.page && !out.apk) out.page = argv[i];
   }
   return out;
@@ -135,12 +137,14 @@ async function main() {
     };
 
     console.log(`内核 ${version.Browser}\n页面 ${pageUrl}\n`);
-    await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)})`);
     await send('Page.navigate', { url: pageUrl });
+    await sleep(1200);
+    await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); ${args.sid ? `localStorage.setItem('vsw.sid', ${JSON.stringify(args.sid)});` : ''}`);
+    await send('Page.reload');
     await sleep(2500);
     const ready = await evaluate('S.server');
     if (!ready) {
-      await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); location.reload();`);
+      await evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)}); ${args.sid ? `localStorage.setItem('vsw.sid', ${JSON.stringify(args.sid)});` : ''}; location.reload();`);
       await sleep(3000);
     }
     console.log(`      应用地址: ${(await evaluate('S.server')) || '(空)'}`);
@@ -302,7 +306,8 @@ async function main() {
     const zipExpr = [
       '(async () => {',
       '  const id = ' + Number(probeBatch) + ';',
-      "  const url = S.server.replace(/\\/+$/, '') + '/api/archive/' + id + '/zip';",
+      // 走页面真正用的那种地址：<a download> 带不了请求头，只能把凭证放进查询串。
+      "  const url = withKey(S.server.replace(/\\/+$/, '') + '/api/archive/' + id + '/zip');",
       "  const head = await fetch(url, { method: 'HEAD' });",
       '  const res = await fetch(url);',
       '  const buf = await res.arrayBuffer();',

@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import engines as engines_mod
 from . import imaging
+from . import tunnel as tunnel_mod
 from .access import (AccessStore, ROLE_EDIT, ROLE_LABEL, ROLE_OWNER, ROLE_RANK,
                      ROLE_VIEW, ensure_owner_key, looks_like_code)
 from .accounts import (AccountError, AccountStore, SESSION_COOKIE, SESSION_DAYS,
@@ -45,6 +46,7 @@ _OWNER_WRITES = (
     "/api/reindex",             # 重建索引
     "/api/rescore",             # 重算发散度
     "/api/settings",            # 改阈值/权重（全局口径）
+    "/api/tunnel",              # 开关公网通道（等于决定这份数据给谁看）
 )
 _OWNER_DELETES = ("/api/finding/",)   # 删一条结果
 
@@ -1065,6 +1067,52 @@ class Handler(BaseHTTPRequestHandler):
         self._who = who
         return True
 
+    def _tunnel_guard(self) -> str:
+        """开公网之前必须先有门槛，否则等于把整个库交给互联网。
+
+        Funnel 一开，拿到地址的人就能读、能写；如果这时还没账号也没密钥，
+        连"谁是主人"都拦不住。所以宁可拒绝开，并把话说明白。
+        """
+        if self.auth is not None and self.auth.has_users():
+            return ""
+        store = self._access_store()
+        if store is not None and store.enabled():
+            return ""
+        return ("先建第一个账号（或 --protect 上锁）再开公网 —— "
+                "现在库里没有任何门槛，开到公网等于谁拿到地址都能读写。")
+
+    def _handle_tunnel(self, method: str, path: str) -> None:
+        """公网通道（Tailscale Funnel）。GET 看状态，POST 开/关。
+
+        为什么不自己实现：家宽多半没有公网 IPv4，端口转发根本转发不出去；
+        Funnel 由 Tailscale 边缘节点回源，路由器不用动、证书也不用自己签。
+        """
+        from . import tunnel as _tunnel
+
+        if method == "GET":
+            data = _tunnel.status()
+            data["blocked"] = self._tunnel_guard()
+            self._send(200, data)
+            return
+
+        body = getattr(self, "_body_cache", None)
+        if body is None:
+            body, _ = self._read_body()
+        action = str(body.get("action") or "").strip().lower()
+        if action not in ("start", "stop"):
+            self._send(400, {"error": "action 只能是 start 或 stop"})
+            return
+        if action == "start":
+            blocked = self._tunnel_guard()
+            if blocked:
+                self._send(400, {"error": blocked, "blocked": blocked})
+                return
+            data = _tunnel.start(bound_port())
+        else:
+            data = _tunnel.stop()
+        data["blocked"] = self._tunnel_guard()
+        self._send(200 if data.get("ok", True) else 400, data)
+
     def _handle_access(self, method: str, path: str) -> None:
         """密钥相关的接口。放在 Handler 里（而不是 Router），因为要读写这颗 cookie。"""
         self._bind(self._resolve())
@@ -1185,6 +1233,18 @@ class Handler(BaseHTTPRequestHandler):
         host = self._client_ip()
         return host in ("::1", "localhost", "0:0:0:0:0:0:0:1") or host.startswith("127.")
 
+    def _forwarded_ip(self) -> str:
+        """隧道/反代写进来的真实来源地址（没有就空串）。
+
+        Tailscale Funnel 回源时对端永远是 ``127.0.0.1``，真正的调用者在
+        ``X-Forwarded-For`` 里 —— 实测确实带（还带 ``Tailscale-User-Login``）。
+        """
+        for name in ("X-Forwarded-For", "X-Real-IP"):
+            raw = (self.headers.get(name) or "").strip()
+            if raw:
+                return raw.split(",")[0].strip()
+        return ""
+
     def _is_local(self) -> bool:
         """请求是不是**跑服务的这台机器**自己发出来的。
 
@@ -1194,7 +1254,18 @@ class Handler(BaseHTTPRequestHandler):
 
         所以「第一台电脑能建账号」这句话要按**机器**判断，而不是按**回环**判断：
         否则用户照着面板提示点开局域网地址，反而被挡住。
+
+        **但经过隧道/反代时必须先看 X-Forwarded-For**：Funnel 回源的对端固定是
+        127.0.0.1，若只认对端地址，整个公网都会被当成"本机"，谁都能抢先建出主人账号。
         """
+        forwarded = self._forwarded_ip()
+        if forwarded:
+            if forwarded == "::1" or forwarded.startswith("127."):
+                return True
+            try:
+                return forwarded in set(lan_addresses())
+            except Exception:
+                return False
         if self._is_loopback():
             return True
         host = self._client_ip()
@@ -1532,6 +1603,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self._guard("GET", path):
             return
+        if path.startswith("/api/tunnel"):
+            self._safely(self._handle_tunnel, "GET", path)
+            return
         if path.startswith("/api/"):
             status, payload = self.router.dispatch("GET", path, self._query(), {}, b"")
             self._send(status, payload)
@@ -1553,7 +1627,13 @@ class Handler(BaseHTTPRequestHandler):
         except ServiceError as exc:
             self._send(400, {"error": str(exc)})
             return
+        # 体已经读完了：后面自己接管请求的处理器（/api/tunnel）要用同一份，
+        # 再调一次 _read_body() 会卡在那里等永远不会到来的数据，直到超时。
+        self._body_cache = body
         if not self._guard("POST", path):
+            return
+        if path.startswith("/api/tunnel"):
+            self._safely(self._handle_tunnel, "POST", path)
             return
         if path.startswith("/api/"):
             status, payload = self.router.dispatch("POST", path, self._query(), body, raw)
@@ -1749,6 +1829,7 @@ def _share_info(host: str, service: Workbench) -> Dict[str, Any]:
         "desktop": base,
         "phone": [f"{url}/m/" for url in base],
         "lan": lan_addresses() if wildcard else [],
+        "public": tunnel_mod.status(),
         "root": service.root,
     }
 
@@ -1962,6 +2043,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--unprotect", action="store_true",
                         help="临时拆锁：本次启动不校验密钥（密钥仍留在库里，"
                              "下次不带这个参数又会上锁）")
+    parser.add_argument("--tunnel", action="store_true",
+                        help="同时开到公网（Tailscale Funnel）：给一个 https 地址，"
+                             "不在同一局域网的人也能打开。需要先有账号或密钥")
+    parser.add_argument("--no-tunnel", action="store_true",
+                        help="启动时把已经开着的公网通道关掉")
     args = parser.parse_args(argv)
 
     root = os.path.abspath(args.root)
@@ -2008,6 +2094,28 @@ def main(argv: Optional[List[str]] = None) -> int:
     ok, reason = service.vision.available()
     print(f"[vsw] 语义引擎：{'就绪 ' + service.vision.model_dir if ok else '不可用 - ' + reason}")
     print_phone_hint(args.host, port)
+
+    # ------------------------------------------------------------- 公网通道
+    if args.no_tunnel:
+        off = tunnel_mod.stop()
+        print("[vsw] 已关闭公网通道" + ("（原来就没开）" if not off.get("running") else ""))
+    elif args.tunnel:
+        if not tunnel_mod.available():
+            print("[vsw] ⚠ --tunnel 需要 Tailscale：https://tailscale.com/download "
+                  "装好并登录后重试（它能在没有公网 IP 的情况下给出 https 地址）")
+        elif not auth.has_users() and not access.enabled():
+            print("[vsw] ⚠ 拒绝开公网：库里没有任何门槛。先建第一个账号（或 --protect 上锁）——"
+                  "否则谁拿到地址都能读写")
+        else:
+            pub = tunnel_mod.start(port)
+            if pub.get("running") and pub.get("url"):
+                print(f"[vsw] 🌍 公网地址：{pub['url']}/")
+                print("[vsw]      这条地址不在局域网也能打开；关掉它：重启时加 --no-tunnel")
+                print("[vsw]      注意：走公网的人是「外部设备」，不能替你建第一个账号")
+            else:
+                print(f"[vsw] ⚠ 公网通道没起来：{pub.get('error') or '未知原因'}")
+                print("[vsw]      常见原因：Tailscale 没登录，或后台没在管理台启用 Funnel/HTTPS")
+
     if args.host in ("0.0.0.0", "::") and not access.enabled() and not args.unprotect \
             and not auth.has_users():
         print("[vsw] ⚠ 已监听 0.0.0.0 但没有密钥：同一网络里的人都能读写你的工作台。"

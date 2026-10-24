@@ -23,13 +23,14 @@ const path = require('path');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function parseArgs() {
-  const out = { apk: '', page: '', origin: 'http://127.0.0.1:8799', keep: false };
+  const out = { apk: '', page: '', origin: 'http://127.0.0.1:8799', sid: '', keep: false };
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i];
     if (key === '--apk') out.apk = argv[++i];
     else if (key === '--page') out.page = argv[++i];
     else if (key === '--origin') out.origin = argv[++i];
+    else if (key === '--sid') out.sid = argv[++i];
     else if (key === '--keep') out.keep = true;
   }
   return out;
@@ -150,6 +151,25 @@ async function main() {
     console.log(`内置页面 ${extracted ? extracted.bytes : '?'} 字节（从 APK 中解出）\n`);
 
     await cdp.send('Page.navigate', { url: pageUrl });
+    await sleep(2200);
+
+    // 第一次打开（还没填地址）才会弹引导页 —— 必须在填地址之前抓这一刻。
+    const fresh = await cdp.evaluate(`(() => {
+      const q = (s) => document.querySelector(s);
+      return {
+        booted: !!(window.vswHandleBack && window.vswQrResult),
+        introVisible: !!(q('#intro') && !q('#intro').classList.contains('hide')),
+        introServer: !!q('#introServer'), introImport: !!q('#introImport'),
+        navButtons: document.querySelectorAll('nav button').length,
+        swPill: q('#swPill') ? q('#swPill').textContent : '',
+        protocol: location.protocol,
+      };
+    })()`);
+    // 先把电脑地址填进去再刷新：boot() 只在加载时读一次 localStorage，
+    // 不填地址的话应用连本地库都不建，后面几项全成了假失败。
+    await cdp.evaluate(`localStorage.setItem('vsw.server', ${JSON.stringify(args.origin)});`
+      + (args.sid ? ` localStorage.setItem('vsw.sid', ${JSON.stringify(args.sid)});` : '') + " 'ok'");
+    await cdp.send('Page.reload');
     await sleep(3000);
 
     const boot = await cdp.evaluate(`(() => {
@@ -166,12 +186,15 @@ async function main() {
       };
     })()`);
     check('页面加载且脚本跑起来（boot 完成）', boot && boot.booted, JSON.stringify(boot));
-    check('首次启动引导会弹出（否则对方看到空白页）', boot && boot.introVisible);
+    check('首次启动引导会弹出（否则对方看到空白页）', fresh && fresh.introVisible,
+          JSON.stringify(fresh && { introVisible: fresh.introVisible }));
     check('引导页有「填地址」和「导入数据集」两条路',
-          boot && boot.introServer && boot.introImport);
-    check('五个标签页都在', boot && boot.navButtons === 5, String(boot && boot.navButtons));
+          fresh && fresh.introServer && fresh.introImport);
+    check('五个标签页都在', (fresh || boot) && (fresh || boot).navButtons === 5,
+          String((fresh || boot) && (fresh || boot).navButtons));
     check('file:// 下不依赖 service worker（如实标注）',
-          boot && /内置|不可用/.test(boot.swPill || ''), boot && boot.swPill);
+          (fresh || boot) && /内置|不可用/.test((fresh || boot).swPill || ''),
+          (fresh || boot) && (fresh || boot).swPill);
     check('无 JS 异常', cdp.errors.length === 0, cdp.errors.slice(0, 2).join(' | '));
 
     const net = await cdp.evaluate(`(async () => {
@@ -191,9 +214,9 @@ async function main() {
         } catch (e) { resolve({ ok: false, error: String(e) }); }
       });
       try {
-        const res = await fetch(${JSON.stringify(args.origin)} + '/api/mobile/snapshot?images=none&limit=3&trash=0', { cache: 'no-store' });
-        const snap = await res.json();
-        out.snapshot = { ok: res.ok, counts: snap.counts };
+        // 走页面的 api()：它带 cookie / X-VSW-Session；裸 fetch 在服务端有账号时只有 401。
+        const snap = await api('/api/mobile/snapshot?images=none&limit=3&trash=0');
+        out.snapshot = { ok: true, counts: snap.counts };
         const db = await new Promise((resolve, reject) => {
           const req = indexedDB.open('vsw-mobile');   // 不写死版本：应用会自己迁移到最新版
           req.onsuccess = () => resolve(req.result);
