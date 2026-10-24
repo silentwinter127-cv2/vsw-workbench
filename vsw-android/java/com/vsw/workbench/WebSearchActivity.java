@@ -65,10 +65,13 @@ public class WebSearchActivity extends Activity {
 
     private static final String SUBDIR = "websearch";
     private static final long POLL_MS = 1500;
-    private static final long LIMIT_MS = 90000;
+    /** 硬上限：只有它到点才会自动收工（以前 90 秒就自动返回，用户还没来得及往下滚）。 */
+    private static final long LIMIT_MS = 20 * 60 * 1000L;
+    /** 一次抓图最多累计几张：再多页面也画不下，intent 也扛不住。 */
+    private static final int CAPTURE_MAX = 160;
     private static final long TAP_GRACE_MS = 2500;
     /** 最多内嵌几张结果图：再多 JSON 就太大了，交付给页面的 intent 有大小上限。 */
-    private static final int THUMB_MAX = 12;
+    private static final int THUMB_MAX = 40;
     /** 内嵌图的最长边：结果面板里是小缩略图，360px 足够。 */
     private static final int THUMB_SIDE = 360;
     /** 单张下载的超时（毫秒）。引擎图不大，5 秒拿不到就跳过。 */
@@ -97,6 +100,15 @@ public class WebSearchActivity extends Activity {
     private String lastExtract = "";
     /** 最近一次取图拿到的 HTTP 状态码（0 = 还没试过），失败时写进提示里。 */
     private int lastThumbStatus = 0;
+    /** 用户点了「开始抓图」之后才累计；没点之前只是看页面。 */
+    private Button startCapBtn;
+    private Button stopCapBtn;
+    private boolean capturing = false;
+    /** 累计到的相似图（按 URL 去重）和它们对应的 URL 集合。 */
+    private final JSONArray accSimilar = new JSONArray();
+    private final java.util.LinkedHashSet<String> accUrls = new java.util.LinkedHashSet<String>();
+    /** 最近一次提取的完整结果（保留 products/sources/diag 等字段）。 */
+    private JSONObject accLatest = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -142,31 +154,23 @@ public class WebSearchActivity extends Activity {
         hint.setSingleLine(false);
         hint.setMaxLines(2);
 
-        Button upload = new Button(this);
-        upload.setText("上传");
-        upload.setAllCaps(false);
-        upload.setOnClickListener(new View.OnClickListener() {
+        Button startCap = new Button(this);
+        startCap.setText("开始抓图");
+        startCap.setAllCaps(false);
+        startCap.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                if (offered) {
-                    setHint("图已经交给网页了，等它出结果…");
-                    return;
-                }
-                tryAutoTap(true);
-        // 百度首页的上传卡片是懒渲染的：太早点等于点在空气上。
-        // 之后两次只认 input[type=file]，找到就点，找不到就等着（不乱点）。
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                tryAutoTap(false);
+                startCapture();
             }
-        }, 2500);
-        handler.postDelayed(new Runnable() {
+        });
+
+        Button stopCap = new Button(this);
+        stopCap.setText("结束抓图");
+        stopCap.setAllCaps(false);
+        stopCap.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void run() {
-                tryAutoTap(false);
-            }
-        }, 6000);
+            public void onClick(View view) {
+                stopCapture();
             }
         });
 
@@ -186,7 +190,11 @@ public class WebSearchActivity extends Activity {
         titles.addView(hint);
         bar.addView(titles, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        bar.addView(upload);
+        startCapBtn = startCap;
+        stopCapBtn = stopCap;
+        stopCap.setEnabled(false);
+        bar.addView(startCap);
+        bar.addView(stopCap);
         bar.addView(close);
 
         web = new WebView(this);
@@ -265,7 +273,11 @@ public class WebSearchActivity extends Activity {
             @Override
             public void run() {
                 if (!finished && System.currentTimeMillis() - startAt > LIMIT_MS) {
-                    finishWithThumbs(lastExtract, "等太久了，先把手上的结果给你");
+                    if (capturing) {
+                        stopCapture();
+                    } else {
+                        finishWithThumbs(lastExtract, "这个页面开了太久（20 分钟），先收工");
+                    }
                 }
             }
         }, LIMIT_MS + 5000);
@@ -435,7 +447,7 @@ public class WebSearchActivity extends Activity {
         }
     }
 
-    /** 每 1.5 秒跑一次提取脚本，够了就把结果交回去。 */
+    /** 每 1.5 秒跑一次提取脚本：抓图中就累计，不抓就只是保持 lastExtract 是最新的。 */
     private final Runnable pollTask = new Runnable() {
         @Override
         public void run() {
@@ -463,21 +475,90 @@ public class WebSearchActivity extends Activity {
                     String text = unquote(raw);
                     if (text != null && text.length() > 2) lastExtract = text;
                     JSONObject obj = jsonObject(text);
-                    int similar = 0;
-                    JSONArray list = obj == null ? null : obj.optJSONArray("similar");
-                    if (list != null) similar = list.length();
-                    if (similar >= 4) {
-                        // 命中就先别急着回去：结果图在引擎那边有防盗链，页面直接 <img src> 会 403，
-                        // 表现就是「结果图全部消失」。这里用带 Referer 的原生请求抓下来，
-                        // 缩成 360px 的 JPEG 内嵌成 data URL，页面就一定能画出来。
-                        finishWithThumbs(text, null);
-                        return;
+                    if (obj != null) accLatest = obj;
+                    if (capturing) {
+                        // 还没把图交给识图之前，页面上只有首页样图 —— 那些不是搜索结果，别收。
+                        if (offered || !captured.isEmpty()) {
+                            accumulate(obj);
+                        } else {
+                            setHint("还没把图交给识图：先点页底「点这里…」，等出结果再点「开始抓图」");
+                        }
                     }
                     if (!finished) handler.postDelayed(pollTask, POLL_MS);
                 }
             });
         }
     };
+
+    /**
+     * 开始抓图 / 结束抓图：由用户自己决定什么时候开始、什么时候收工。
+     *
+     * 以前是「抓到 4 张以上就自动返回」—— 结果用户只拿到首屏那 8 张，往下滚出来的
+     * 更多结果根本没机会进仓。现在抓图窗口完全交给用户：点「开始抓图」后每 1.5 秒
+     * 把页面上的相似图按 URL 去重累计，滚多少、看多少页就抓多少，最后点「结束抓图」
+     * 才收工。
+     */
+    private void startCapture() {
+        capturing = true;
+        setHint("抓图中：往下滚看更多结果，抓够了点「结束抓图」（已抓 " + accSimilar.length() + " 张）");
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (startCapBtn != null) startCapBtn.setEnabled(false);
+                if (stopCapBtn != null) stopCapBtn.setEnabled(true);
+            }
+        });
+    }
+
+    private void stopCapture() {
+        capturing = false;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (startCapBtn != null) startCapBtn.setEnabled(true);
+                if (stopCapBtn != null) stopCapBtn.setEnabled(false);
+            }
+        });
+        if (accSimilar.length() == 0) {
+            // 一张都没累计到：把现场（含诊断）交回去，让页面说清断在哪一步。
+            finishWithThumbs(lastExtract, "这一轮没抓到图：先点页底「点这里」把图交给识图，等结果出来了再点「开始抓图」");
+            return;
+        }
+        JSONObject base = accLatest == null ? new JSONObject() : accLatest;
+        try {
+            base.put("similar", accSimilar);
+            JSONObject diag = base.optJSONObject("diag");
+            if (diag == null) {
+                diag = new JSONObject();
+                base.put("diag", diag);
+            }
+            diag.put("capture", accSimilar.length());
+        } catch (Throwable exc) {
+            android.util.Log.w("vsw-websearch", "stopCapture: " + exc);
+        }
+        finishWithThumbs(base.toString(), "你点了结束抓图，累计 " + accSimilar.length() + " 张");
+    }
+
+    /** 把这一次提取到的相似图并入累计表（按 URL 去重，最多 CAPTURE_MAX 张）。 */
+    private void accumulate(JSONObject obj) {
+        if (obj == null) return;
+        JSONArray list = obj.optJSONArray("similar");
+        if (list == null || list.length() == 0) return;
+        int added = 0;
+        for (int i = 0; i < list.length() && accSimilar.length() < CAPTURE_MAX; i++) {
+            JSONObject item = list.optJSONObject(i);
+            if (item == null) continue;
+            String u = safe(item.optString("u", ""));
+            if (u.isEmpty() || u.startsWith("data:")) continue;
+            if (accUrls.contains(u)) continue;
+            accUrls.add(u);
+            accSimilar.put(item);
+            added += 1;
+        }
+        if (added > 0) {
+            setHint("抓图中：已抓 " + accSimilar.length() + " 张 · 往下滚能抓到更多，抓够点「结束抓图」");
+        }
+    }
 
     // ------------------------------------------------------------------ 收尾
 

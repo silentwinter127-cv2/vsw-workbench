@@ -816,3 +816,9 @@ r18 在真机上的第一次「下载并安装」就炸了：包下完、SHA256 
 `WebSearchActivity.onPageFinished` 注入 `#vsw-cta` 浮层按钮。点它 → 在真实点击事件里
 `input.click()` → `onShowFileChooser` 交回预选图（`window.__vswOffered` 回写、按钮变绿）。
 自动派发合成触摸这条路在 Xiaomi 15 / HyperOS 上拿不到 user activation，已放弃当作主路径。
+
+### 手动抓图：开始 / 结束（r32）
+
+`WebSearchActivity` 顶栏两个按钮：`startCapture()` 置 `capturing=true`，`pollTask` 里
+`accumulate()` 按 `u` 去重累计（`CAPTURE_MAX=160`）；`stopCapture()` 把 `accSimilar`
+塞进最新提取结果（并写 `diag.capture`）再 `finishWithThumbs`。`THUMB_MAX` 12 → 40。
