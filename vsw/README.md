@@ -799,3 +799,11 @@ r41 的「上一层」把压栈写在了轮询线程里、用的是 `web.getUrl(
 「已归档」那个数字原来是本地缓存条数，现在按批次的对象数求和 —— 离线时也能看出真实规模。
 
 新增探针 `scripts/vsw-probe-archive-fold.js`（17 项）。
+
+### 开屏检测新版本（r46）
+
+一进应用就问一次有没有新版，有就弹一张卡：「发现新版本 r46 · 你现在是 r45 · 新包 0.7 MB」+
+说明 + 「立即更新」/「以后再说」。跳过是按版本记的（`localStorage['vsw.updateSkip']`），
+同一版不再烦你，下一版照样弹。浏览器里、没填电脑地址时都不问；连上电脑那一下也会顺手问一次。
+
+`scripts/vsw-probe-update-gate.js --page vsw/static/mobile/index.html`（24 项）覆盖这些行为。

@@ -79,6 +79,13 @@ main{padding:12px 12px calc(var(--safe-b) + 84px)}
 .card.fold .chev{flex:0 0 auto;opacity:.7;font-size:12px;width:12px;text-align:center}
 .card.fold .cardbody{display:none;margin-top:8px}
 .card.fold.open .cardbody{display:block}
+/* 开屏更新弹层 */
+.gate{position:fixed;inset:0;z-index:80;background:rgba(0,0,0,.6);display:flex;
+  align-items:center;justify-content:center;padding:18px}
+.gate.hide{display:none}
+.gatecard{width:100%;max-width:420px;background:var(--bg1);border:1px solid var(--line);
+  border-radius:16px;padding:16px;box-shadow:0 18px 60px rgba(0,0,0,.45)}
+.btn.wide{flex:1 1 auto;width:100%}
 .pickbox{display:flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 22px}
 .pickbox input{width:18px;height:18px;accent-color:var(--accent)}
 .btn{padding:9px 14px;border-radius:10px;border:1px solid var(--line);background:var(--bg2);
@@ -3562,6 +3569,14 @@ function updateEls() {
 
 function vswUpdateProgress(pct, text) {
   const el = updateEls();
+  const g = gateEls();
+  if (GATE.open) {
+    g.bar.classList.remove('hide');
+    g.fill.style.width = Math.max(0, Math.min(100, Number(pct) || 0)) + '%';
+    g.barText.textContent = text || (pct + '%');
+    g.now.disabled = true;
+    g.later.disabled = true;
+  }
   el.bar.classList.remove('hide');
   el.fill.style.width = Math.max(0, Math.min(100, Number(pct) || 0)) + '%';
   el.barText.textContent = text || (pct + '%');
@@ -3571,6 +3586,13 @@ function vswUpdateProgress(pct, text) {
 
 function vswUpdateFailed(message) {
   const el = updateEls();
+  const g = gateEls();
+  if (GATE.open) {
+    g.bar.classList.add('hide');
+    g.now.disabled = false;
+    g.later.disabled = false;
+    g.notes.textContent = '更新没成功：' + String(message || '');
+  }
   UPDATE.busy = false;
   el.bar.classList.add('hide');
   el.check.disabled = false;
@@ -3618,6 +3640,12 @@ function vswUpdateInfo(info) {
     el.install.classList.add('hide');
   }
   renderUpdateCard();
+  // 开屏那次自动问的：有新版本就弹出来（同一版本点过「以后再说」就不再烦）
+  if (GATE.auto) {
+    GATE.auto = false;
+    if (info.update_available && !updateSkipped(info.build)) openUpdateGate(info);
+    else closeUpdateGate();          // 已是最新 / 被跳过：别让上一次的弹层留在屏幕上
+  }
 }
 
 function renderUpdateCard() {
@@ -3626,6 +3654,53 @@ function renderUpdateCard() {
   el.card.classList.toggle('hide', !inApp);
   if (!inApp) return;
   el.build.textContent = '当前 ' + AndroidBridge.buildTag();
+}
+
+/* 开屏检测：一进应用就问一次电脑有没有新版本。
+   「以后再说」记在这台手机上（按 build 记），同一版本不再自动弹，免得每次开都烦。 */
+const GATE = { open: false, info: null, skipKey: 'vsw.updateSkip' };
+
+function gateEls() {
+  return {
+    box: $('#updGate'), title: $('#updTitle'), meta: $('#updMeta'), notes: $('#updNotes'),
+    bar: $('#updBar'), fill: $('#updBarFill'), barText: $('#updBarText'),
+    now: $('#updNow'), later: $('#updLater'),
+  };
+}
+
+function updateSkipped(build) {
+  try { return localStorage.getItem(GATE.skipKey) === String(build || ''); } catch (e) { return false; }
+}
+
+function openUpdateGate(info) {
+  const el = gateEls();
+  const size = info.size ? (info.size / 1048576).toFixed(1) + ' MB' : '';
+  GATE.open = true;
+  GATE.info = info;
+  el.title.textContent = '发现新版本 ' + (info.build || '');
+  el.meta.textContent = '你现在是 ' + (info.current || '未知') + (size ? ' · 新包 ' + size : '')
+    + (info.source === 'github' ? ' · 来自 GitHub' : '');
+  el.notes.textContent = info.notes || '';
+  el.bar.classList.add('hide');
+  el.fill.style.width = '0%';
+  el.now.disabled = false;
+  el.later.disabled = false;
+  el.box.classList.remove('hide');
+}
+
+function closeUpdateGate() {
+  const el = gateEls();
+  GATE.open = false;
+  el.box.classList.add('hide');
+}
+
+/** 开屏那一次：只在装了应用（有原生桥）、填过电脑地址、而且不在「以后再说」名单里时问。 */
+function autoCheckUpdate() {
+  if (!(window.AndroidBridge && AndroidBridge.buildTag && AndroidBridge.checkUpdate)) return false;
+  if (!S.server) return false;
+  GATE.auto = true;
+  try { AndroidBridge.checkUpdate(S.server); } catch (e) { /* 原生不在就安静地算了 */ }
+  return true;
 }
 
 function checkUpdate() {
@@ -3663,6 +3738,14 @@ function bindUpdate() {
   const el = updateEls();
   if (el.check) el.check.onclick = checkUpdate;
   if (el.install) el.install.onclick = doUpdate;
+  const g = gateEls();
+  if (g.now) g.now.onclick = () => doUpdate();
+  if (g.later) g.later.onclick = () => {
+    // 记下「这一版先不装」，同一版本下次开屏就不再弹
+    try { localStorage.setItem(GATE.skipKey, String((GATE.info || {}).build || '')); } catch (e) { /* 无痕模式 */ }
+    closeUpdateGate();
+    toast('好，这一版先跳过；想装就去「我的 → 检查更新」');
+  };
 }
 
 function bindAccount() {
@@ -3712,6 +3795,8 @@ function bindMe() {
     const ok = await checkOnline();
     toast(ok ? '连接正常，电脑端工作台可用' : '连不上，检查地址与 WiFi', !ok);
     render();
+    // 刚连上就当一次「开屏」：第一次填对地址的人也能马上知道有没有新版
+    if (ok) setTimeout(() => { try { autoCheckUpdate(); } catch (e) { /* 静默 */ } }, 600);
   };
   $('#scanQrBtn').onclick = () => {
     $('#qrBox').classList.toggle('hide');
@@ -3974,6 +4059,9 @@ async function boot() {
   // 离线优先：先渲染本地库，联网检查在后台进行（不要让它挡住首屏）
   checkOnline().then(() => { render(); refreshAccount(); });
 
+  // 开屏检测新版本：等首屏画完再问，别和首次引导抢屏幕
+  setTimeout(() => { try { autoCheckUpdate(); } catch (e) { /* 静默 */ } }, 1500);
+
   if (ENV.canUseServiceWorker) {
     navigator.serviceWorker.register('/m/sw.js').then(() => {
       $('#swPill').textContent = '离线外壳已就绪';
@@ -4014,6 +4102,26 @@ window.vswQrResult = function (text) {
 
 window.addEventListener('DOMContentLoaded', boot);
 </script>
+
+<!-- 开屏发现新版本：一进来就盖在最上面，不用去「我的」里翻 -->
+<div class="gate hide" id="updGate">
+  <div class="gatecard">
+    <div class="row"><b id="updTitle">有新版本</b><div class="spacer"></div>
+      <button class="btn sm ghost" id="updLater">以后再说</button></div>
+    <div class="small" id="updMeta" style="margin:6px 0"></div>
+    <div class="small" id="updNotes" style="margin:6px 0"></div>
+    <div id="updBar" class="hide" style="margin:10px 0">
+      <div style="height:6px;border-radius:3px;background:var(--bg2);overflow:hidden">
+        <div id="updBarFill" style="height:100%;width:0%;background:var(--accent);transition:width .2s"></div>
+      </div>
+      <div class="small" id="updBarText" style="margin-top:4px">准备中…</div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary wide" id="updNow">立即更新</button>
+    </div>
+    <p class="small" style="margin-top:8px">装的时候系统会弹一次安装框 —— 安卓不允许应用自己偷偷装，那一下得你点。</p>
+  </div>
+</div>
 
 <!-- 全屏面板：详情与框选共用 -->
 <aside class="sheet" id="sheet">
