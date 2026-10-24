@@ -70,6 +70,15 @@ main{padding:12px 12px calc(var(--safe-b) + 84px)}
   padding:12px;margin-bottom:10px}
 /* 合并相册：勾中的批次卡片换边色，一眼看出合并了什么 */
 .card.is-picked{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+/* 归档批次：默认折叠，只留标题行 */
+.card.fold{padding:10px 12px}
+.card.fold .foldhead{cursor:pointer;align-items:center;gap:8px;flex-wrap:nowrap}
+.card.fold .foldmain{flex:1 1 auto;min-width:0}
+.card.fold .foldname{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card.fold .foldmeta{margin-top:2px}
+.card.fold .chev{flex:0 0 auto;opacity:.7;font-size:12px;width:12px;text-align:center}
+.card.fold .cardbody{display:none;margin-top:8px}
+.card.fold.open .cardbody{display:block}
 .pickbox{display:flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 22px}
 .pickbox input{width:18px;height:18px;accent-color:var(--accent)}
 .btn{padding:9px 14px;border-radius:10px;border:1px solid var(--line);background:var(--bg2);
@@ -87,7 +96,7 @@ main{padding:12px 12px calc(var(--safe-b) + 84px)}
 .spacer{flex:1}
 .small{font-size:12px;color:var(--mute)}
 .mono{font-family:ui-monospace,Consolas,monospace}
-input[type=text],input[type=password],input[type=number],select,textarea{
+input[type=text],input[type=password],input[type=number],input[type=search],select,textarea{
   width:100%;padding:10px;background:var(--bg2);color:var(--fg);
   border:1px solid var(--line);border-radius:10px}
 input[type=password]{letter-spacing:1px}
@@ -297,6 +306,14 @@ z-index:2}
         <button class="btn primary" id="archiveSelectedBtn">归档选中</button>
         <button class="btn" id="archiveAllBtn">整批归档</button>
       </div>
+    </div>
+    <div class="card" style="margin-bottom:10px">
+      <div class="row">
+        <input type="search" id="archiveQuery" placeholder="搜批次名 / 备注 / 编号">
+        <button class="btn sm ghost" id="archiveExpandAll">全展开</button>
+        <button class="btn sm ghost" id="archiveFoldAll">全收起</button>
+      </div>
+      <div class="small" style="margin-top:6px">最近归档的排在最上面；点标题那一行展开看细节。</div>
     </div>
     <div id="archiveMergeBar" class="card" style="margin-bottom:10px">
       <div class="row"><b>合并相册</b><div class="spacer"></div>
@@ -529,6 +546,8 @@ const S = {
   archived: [],      // 归档对象（按 archive_id 归入批次）
   archives: [],
   albumPick: new Set(),   // 合并相册：勾中的批次 id
+  archiveOpen: new Set(), // 归档页：展开着的批次 id（默认都折起来）
+  archiveQuery: '',       // 归档页：按批次名 / 备注 / 编号过滤
   jobs: [],
   seeds: [],
   variants: [],
@@ -2525,36 +2544,64 @@ function renderArchive() {
   const stats = (snap.stats) || {};
   $('#archiveMetrics').innerHTML = [
     ['活动对象', live.length],
-    ['已归档', S.archived.length],
+    ['已归档', S.archives.reduce((n, a) => n + Number(a.findings || 0), 0)],
     ['批次', S.archives.length],
     ['回收站', S.trash.length],
   ].map(([l, n]) => `<div class="metric"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
 
-  $('#archiveList').innerHTML = S.archives.map((a) => {
+  // 倒序 + 可折叠（用户要按「最近归档的」找，不要再从最老的往下翻）
+  const q = (S.archiveQuery || '').trim().toLowerCase();
+  const list = S.archives.slice().sort((x, y) => (Number(y.created_at || 0) - Number(x.created_at || 0))
+    || (Number(y.id) - Number(x.id)));
+  const shown = q ? list.filter((a) => `${a.name || ''} ${a.note || ''} ${a.id}`.toLowerCase().includes(q)) : list;
+  $('#archiveList').innerHTML = shown.map((a) => {
     const items = S.archived.filter((f) => Number(f.archive_id) === Number(a.id));
     const picked = S.albumPick.has(Number(a.id));
+    const open = S.archiveOpen.has(Number(a.id));
     return `
-    <div class="card ${picked ? 'is-picked' : ''}" data-batch="${a.id}">
-      <div class="row">
+    <div class="card fold ${picked ? 'is-picked' : ''}${open ? ' open' : ''}" data-batch="${a.id}">
+      <div class="row foldhead" data-toggle="${a.id}">
         <label class="pickbox" title="勾选后可以合并">
           <input type="checkbox" data-pick="${a.id}"${picked ? ' checked' : ''}>
         </label>
-        <b>${esc(a.name)}</b><div class="spacer"></div>
-        <span class="small">${new Date((a.created_at || 0) * 1000).toLocaleDateString('zh-CN')}</span></div>
-      <div class="small">对象 ${a.findings}${a.trashed ? `（+${a.trashed} 回收站）` : ''} · 来源 ${a.shownSources} · 平台 ${a.platforms} ·
-        ${esc(a.date_from || '-')} ~ ${esc(a.date_to || '-')}${a.empty ? ' · <b style="color:#ffb020">空批次</b>' : ''}</div>
-      ${a.note ? `<div class="small">${esc(a.note)}</div>` : ''}
-      <div class="row tight" style="margin-top:8px">
-        <button class="btn sm primary" data-open="${a.id}">查看（${items.length}）</button>
-        <button class="btn sm" data-save="${a.id}"
-          ${S.online ? '' : 'disabled'}>保存到手机</button>
-        <button class="btn sm ghost" data-folder="${a.id}"
-          ${S.online ? '' : 'disabled'}>在电脑上打开</button>
-        ${S.online ? `<button class="btn sm ghost" data-undo="${a.id}">取消归档</button>` : ''}
+        <div class="foldmain">
+          <div class="foldname">${esc(a.name)}</div>
+          <div class="small foldmeta">${a.empty ? '空批次 · ' : ''}${a.findings}${a.trashed ? `+${a.trashed}` : ''} 个 · ${new Date((a.created_at || 0) * 1000).toLocaleDateString('zh-CN')}</div>
+        </div>
+        <span class="chev">${open ? '▾' : '▸'}</span>
       </div>
-      <div class="small" id="archivePath-${a.id}" style="margin-top:6px"></div>
+      <div class="cardbody">
+        <div class="small">对象 ${a.findings}${a.trashed ? `（+${a.trashed} 回收站）` : ''} · 来源 ${a.shownSources} · 平台 ${a.platforms} ·
+          ${esc(a.date_from || '-')} ~ ${esc(a.date_to || '-')}${a.empty ? ' · <b style="color:#ffb020">空批次</b>' : ''}</div>
+        ${a.note ? `<div class="small">${esc(a.note)}</div>` : ''}
+        <div class="row tight" style="margin-top:8px">
+          <button class="btn sm primary" data-open="${a.id}">查看（${items.length}）</button>
+          <button class="btn sm" data-save="${a.id}"
+            ${S.online ? '' : 'disabled'}>保存到手机</button>
+          <button class="btn sm ghost" data-folder="${a.id}"
+            ${S.online ? '' : 'disabled'}>在电脑上打开</button>
+          ${S.online ? `<button class="btn sm ghost" data-undo="${a.id}">取消归档</button>` : ''}
+        </div>
+        <div class="small" id="archivePath-${a.id}" style="margin-top:6px"></div>
+      </div>
     </div>`;
-  }).join('') || '<div class="empty">还没有归档批次</div>';
+  }).join('') || `<div class="empty">${q ? '没有匹配的批次' : '还没有归档批次'}</div>`;
+  const qEl = $('#archiveQuery');
+  if (qEl && qEl.value !== (S.archiveQuery || '')) qEl.value = S.archiveQuery || '';
+
+  // 点标题行展开 / 收起（复选框自己处理，不要误触）
+  $$('#archiveList [data-toggle]').forEach((head) => {
+    head.onclick = (ev) => {
+      if (ev.target && ev.target.closest('input,button,label')) return;
+      const id = Number(head.dataset.toggle);
+      const card = head.closest('[data-batch]');
+      const open = !(card && card.classList.contains('open'));
+      if (open) S.archiveOpen.add(id); else S.archiveOpen.delete(id);
+      if (card) card.classList.toggle('open', open);
+      const chev = head.querySelector('.chev');
+      if (chev) chev.textContent = open ? '▾' : '▸';
+    };
+  });
 
   // 合并相册的勾选
   $$('#archiveList [data-pick]').forEach((box) => {
@@ -3878,6 +3925,23 @@ async function boot() {
     $$('#archiveList [data-pick]').forEach((box) => { box.checked = false; });
     $$('#archiveList [data-batch]').forEach((card) => card.classList.remove('is-picked'));
     syncAlbumBar();
+  };
+  // 归档页：搜索 + 全展开 / 全收起
+  let archiveQTimer = 0;
+  $('#archiveQuery').oninput = (ev) => {
+    const v = ev.target.value;
+    clearTimeout(archiveQTimer);
+    archiveQTimer = setTimeout(() => { S.archiveQuery = v; renderArchive(); }, 200);
+  };
+  $('#archiveExpandAll').onclick = () => {
+    (S.archiveQuery ? S.archives.filter((a) => `${a.name || ''} ${a.note || ''} ${a.id}`
+      .toLowerCase().includes(S.archiveQuery.trim().toLowerCase())) : S.archives)
+      .forEach((a) => S.archiveOpen.add(Number(a.id)));
+    renderArchive();
+  };
+  $('#archiveFoldAll').onclick = () => {
+    S.archiveOpen.clear();
+    renderArchive();
   };
   $('#archiveAllBtn').onclick = async () => {
     if (!S.online) return toast('离线中：整批归档要在电脑上执行', true);
