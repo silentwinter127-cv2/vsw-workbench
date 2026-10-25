@@ -953,3 +953,10 @@ uninstall_watchdog.bat                       :: 拆
 
 实测：`taskkill /PID 12352 /F` → 约 8 秒后 `/api/health` 恢复（新 PID 7512、`restarts: 2`）。
 探针 `../scripts/vsw-probe-watchdog.py`（24 项）覆盖全部这些行为。
+
+### 电脑屏幕上老闪黑窗口（r47，跟手机端无关但你会看到）
+
+手机上每同步一次，电脑屏幕上就闪一个黑框 —— 那是电脑端 `_is_local()` 触发的 `ipconfig` 子进程：
+服务由看门狗用 pythonw 拉起（没有控制台），而 `ipconfig` 没带 `CREATE_NO_WINDOW`，Windows 就给它新开窗口。
+已在 `vsw/server.py` 修掉（带 flag + 结果缓存 20 秒），并顺手把计划任务改成直接跑 `pythonw.exe`
+（不再经 `cmd.exe` 跑 .bat）、`StopOnIdleEnd=False`。验证：`scripts/vsw-probe-no-popup.py` 14 项。

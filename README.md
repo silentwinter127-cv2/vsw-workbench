@@ -909,3 +909,43 @@ install_watchdog.bat system   :: 注册 ONSTART + SYSTEM 的那个任务
 
 实测（这台机器）：注册任务 → `schtasks /Run` → 服务从零拉起（vision true）；`taskkill /PID 12352 /F` →
 短暂不通 → **约 8 秒后**恢复（新 PID 7512，`restarts: 2`）。探针 `scripts/vsw-probe-watchdog.py` 24 项把这些都钉住了。
+
+## 屏幕上「经常跳出黑色弹窗」——是 `ipconfig`（r47）
+
+用户报「现在屏幕上经常会跳出黑色弹窗，阻碍视线」。不是病毒，也不是别家的程序：
+**是工作台自己每来一个请求就起一次 `ipconfig`。**
+
+链条是这样的：
+
+```
+手机（192.168.x.x）→ /api/auth  →  _is_local()  →  lan_addresses()
+                                              →  _adapter_ips()  →  subprocess.run(["ipconfig"])
+```
+
+而 `_adapter_ips()` 起 `ipconfig` 时**没带 `CREATE_NO_WINDOW`**。以前没暴露，是因为服务跑在
+cmd/PowerShell 里，子进程挂到同一个控制台，看不见窗口；r46 把服务交给看门狗用 **pythonw** 拉起之后，
+`pythonw` 本身没有控制台，于是每个控制台子进程都被 Windows **新开一个窗口** —— 手机上每同步一次，
+电脑屏幕上就闪一个黑框。
+
+两处修：
+
+| 修法 | 位置 |
+| --- | --- |
+| 起子进程时加 `CREATE_NO_WINDOW`（`_no_window_flags()`） | `vsw/server.py` |
+| `lan_addresses()` 结果缓存 20 秒（`_LAN_CACHE` / `_LAN_TTL`） | `vsw/server.py` |
+
+顺带把「开机自启」也修了：原来用 `schtasks /Create /SC ONLOGON` 注册，它写进去的是
+`<StopOnIdleEnd>true</StopOnIdleEnd>`（你一坐下来用电脑，任务就被停），而且动作是 `cmd.exe<--watchdog_run.bat`，
+**每次触发都要开一个 cmd 控制台**。现在改成 PowerShell 直接注册：
+
+```bat
+install_watchdog.bat          :: 动作 = pythonw.exe 本体（没有 cmd 这个中间层）
+install_watchdog.bat system   :: ONSTART + SYSTEM
+install_watchdog.bat remove   :: 注销
+```
+
+`scripts/vsw-install-task.ps1` 显式写死这些设置：`StopOnIdleEnd=False`、`DisallowStartIfOnBatteries=False`、
+`StartWhenAvailable=True`、`ExecutionTimeLimit=PT0S`、`MultipleInstances=IgnoreNew`、`Hidden=True`。
+
+验证：`python scripts/vsw-probe-no-popup.py`（14 项）—— ipconfig 带不带 `CREATE_NO_WINDOW`、
+20 秒内连问 5 次只读一次网卡、局域网来源仍不会被误判成本机、活着的服务 20 个请求中位数 1.2 ms（修前每个请求都在起进程）。

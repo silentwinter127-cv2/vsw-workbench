@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import urllib.parse
 import webbrowser
@@ -1962,6 +1963,19 @@ def _private_rank(addr: str) -> int:
     return 3
 
 
+def _no_window_flags() -> Dict[str, int]:
+    """起控制台子进程时用的 creationflags：有它才不会在你屏幕上闪黑框。
+
+    服务现在多半是 **pythonw**（看门狗拉起的，本身没有控制台）。这种进程再 spawn
+    ``ipconfig`` 之类控制台程序时，Windows 会给它**新开一个控制台窗口** —— 用户看到
+    的就是「经常会跳出黑色弹窗」。以前服务跑在 cmd 里时子进程挂到同一个控制台，
+    所以这个坑一直没露出来（r46 换了看门狗才暴露）。
+    """
+    if os.name != "nt":
+        return {}
+    return {"creationflags": 0x08000000}          # CREATE_NO_WINDOW
+
+
 def _adapter_ips() -> List[str]:
     """读网卡列表（Windows 用 ipconfig，其它平台退回 hostname 解析）。"""
     found: List[str] = []
@@ -1969,7 +1983,8 @@ def _adapter_ips() -> List[str]:
         import subprocess  # noqa: PLC0415
         if os.name == "nt":
             out = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=8,
-                                 encoding="utf-8", errors="ignore").stdout
+                                 encoding="utf-8", errors="ignore",
+                                 **_no_window_flags()).stdout
             for line in out.splitlines():
                 if "IPv4" in line and ":" in line:
                     # ipconfig 的尾巴可能是 "(首选)" / "(Preferred)"，按后缀切而不是 rstrip
@@ -1993,8 +2008,16 @@ def _adapter_ips() -> List[str]:
     return found
 
 
-def lan_addresses() -> List[str]:
+_LAN_CACHE: Dict[str, Any] = {"at": 0.0, "value": []}
+_LAN_TTL = 20.0
+
+
+def lan_addresses(*, force: bool = False) -> List[str]:
     """本机在局域网里的可用 IPv4 地址，**按"手机最可能连得上"排序**。
+
+    结果缓存 20 秒：``_is_local()`` 每个请求都要问它一次（判断「是不是本机」），
+    不缓存就等于**每个请求都去跑一次 ipconfig** —— 换网句柄不说，在 pythonw 下
+    每次都会闪一个黑窗口（而且每次还要几十到几百毫秒）。
 
     排序依据（踩过坑才知道重要性）：
       1. 家用私有网段优先（192.168 > 10 > 172.16-31）；
@@ -2004,6 +2027,11 @@ def lan_addresses() -> List[str]:
     只打印第一个是不够的：这台机器上同时有 WLAN、以太网、Docker、Tailscale，
     手机在哪个网段取决于它连的 WiFi，所以启动日志会把候选地址都列出来。
     """
+    now = time.time()
+    cached = _LAN_CACHE.get("value") or []
+    if not force and cached and now - float(_LAN_CACHE.get("at") or 0.0) < _LAN_TTL:
+        return list(cached)
+
     seen: List[str] = []
     try:
         import socket as _socket
@@ -2025,6 +2053,8 @@ def lan_addresses() -> List[str]:
         head = seen[0]
         rest = sorted(seen[1:], key=_private_rank)
         seen = [head] + rest
+    _LAN_CACHE["at"] = now
+    _LAN_CACHE["value"] = list(seen)
     return seen
 
 

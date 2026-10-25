@@ -824,3 +824,13 @@ uninstall_watchdog.bat        :: 拆干净
 
 状态 `vsw\data\logs\watchdog-status.json`，日志 `watchdog.log` / `server.log`。
 探针 `scripts/vsw-probe-watchdog.py`（24 项）在临时目录里把上面每条都跑一遍，包括「taskkill 之后自己回来」。
+
+### 屏幕上老闪黑窗口？那是 `ipconfig`（r47）
+
+`_is_local()` 每个请求都要问一次 `lan_addresses()`，而它 Windows 下靠 `ipconfig`；这个子进程以前没带
+`CREATE_NO_WINDOW`，服务又是 pythonw 拉起的（没有控制台），于是 Windows 每次都给 `ipconfig` 开一个新控制台窗口。
+修法：子进程带 `CREATE_NO_WINDOW`，`lan_addresses()` 结果缓存 20 秒。探针
+`scripts/vsw-probe-no-popup.py`（14 项）钉住这两条，并顺带确认「局域网来源不会被误判成本机」。
+
+计划任务那边也一起改了：`install_watchdog.bat` 现在调到 `scripts/vsw-install-task.ps1`，动作直接指向
+`pythonw.exe`（不再经 `cmd.exe` 跑 .bat），并把 `StopOnIdleEnd` 置为 `False` —— 否则你一动电脑，看门狗就被停。
