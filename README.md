@@ -478,7 +478,8 @@ python scripts/vsw-probe-access.py      # 45 项：密钥、角色分级、限�
 python scripts/vsw-probe-accounts.py    # 67 项：建号、邀请码、工作区隔离、协作、会话头、共用语义引擎、本机/远程判定
 python scripts/vsw-probe-tunnel.py      # 35 项：公网通道解析、XFF 优先、只有主人能开、没门槛时拒绝开
 python scripts/vsw-probe-auto.py       # 24 项：自动搜图的候选挑选、串行跑批、失败不中断、谁能开跑
-python scripts/vsw-probe-update.py     # 43 项：版本比较、下载与 SHA256、匿名可取、GitHub 兜底、坏 version.json
+python scripts/vsw-probe-update.py     # 43 项
+python scripts/vsw-probe-watchdog.py   # 24 项：拉起服务、被 taskkill 后自己续跑、单实例锁、接管模式、硬杀不留孤儿：版本比较、下载与 SHA256、匿名可取、GitHub 兜底、坏 version.json
 ```
 
 ### 加了身份之后，每条"绕开请求头"的通道都要过一遍
@@ -872,3 +873,39 @@ r41 加了「上一层」，用户装上一试：**按到结束抓图，上一�
 探针 `scripts/vsw-probe-update-gate.js`（24 项）钉住的就是上面这些：
 浏览器不问、没地址不问、开屏问一次且问的是填过的地址、弹层文案、跳过记版本、
 同一版不再弹而下一版还弹、立即更新把地址交给原生、进度与失败回填、已是最新不弹。
+
+## 开机自启 + 挂了自动续跑（看门狗）
+
+服务会自己挂，这不是意外：昨天晚上 8799 就是空的，手机上无论如何都连不上。
+所以加了 `scripts/vsw-watchdog.py`，它只管一件事 —— **让 8799 上永远有一个健康的服务**。
+
+```bat
+install_watchdog.bat          :: 注册计划任务（登录时启动，当前用户，最高权限）
+schtasks /Run /TN "VSW Workbench Watchdog"   :: 现在就跑起来
+uninstall_watchdog.bat        :: 全部拆掉（任务 + 进程 + 锁）
+```
+
+它做的事：
+
+| 情况 | 结果 |
+| --- | --- |
+| 服务进程退出（崩了 / 被 `taskkill`） | 1、2、4、8、15、30、60 秒退避后重拉；跑满 120 秒就把退避清零 |
+| 进程还在但 `/api/health` 连续 3 次不通 | 杀掉重拉（启动后 90 秒内不判死，SigLIP2 加载要十几秒） |
+| 端口上已经有一个健康服务（你手动开的） | **不自起**，只接管监控（`state: adopted`），它倒下之后再自己拉起 |
+| 同时开第二个看门狗 | 拿不到 `<root>/logs/watchdog.lock`，退出码 3，不抢端口 |
+| 看门狗自己被硬杀 | 服务被 Job Object 一起收掉 —— 不留孤儿占着端口 |
+
+状态和日志（都在 `vsw\data\logs\`）：`watchdog-status.json`（`state/child_pid/restarts/...`）、`watchdog.log`、
+`server.log`（服务的标准输出）。计划任务用 `pythonw.exe` 跑，不会弹黑框。
+
+**「开机启动」现在是登录触发**（`ONLOGON`）。想不登录也起：
+
+```bat
+install_watchdog.bat system   :: 注册 ONSTART + SYSTEM 的那个任务
+```
+
+这个模式我在临时目录里验过（服务能起、`vision: true`、模型照样从 `D:\siglip2-base-patch16-224` 加载），
+但没在 SYSTEM 会话里跑过「浏览器自动搜图」—— 无头浏览器在会话 0 的权限模型和桌面上不一样，所以默认没给你开。
+
+实测（这台机器）：注册任务 → `schtasks /Run` → 服务从零拉起（vision true）；`taskkill /PID 12352 /F` →
+短暂不通 → **约 8 秒后**恢复（新 PID 7512，`restarts: 2`）。探针 `scripts/vsw-probe-watchdog.py` 24 项把这些都钉住了。

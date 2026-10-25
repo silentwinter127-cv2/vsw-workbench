@@ -807,3 +807,20 @@ r41 的「上一层」把压栈写在了轮询线程里、用的是 `web.getUrl(
 同一版不再烦你，下一版照样弹。浏览器里、没填电脑地址时都不问；连上电脑那一下也会顺手问一次。
 
 `scripts/vsw-probe-update-gate.js --page vsw/static/mobile/index.html`（24 项）覆盖这些行为。
+
+### 开机自启 + 挂了自动续跑（看门狗）
+
+`scripts/vsw-watchdog.py` 让 8799 上永远有一个健康的服务：进程退出就退避重拉（1/2/4/8/15/30/60 秒），
+进程活着但 `/api/health` 连续 3 次不通就杀掉重拉（启动后 90 秒内不判死，SigLIP2 加载要十几秒）；
+端口上已经有你手动起的健康服务时不自起，只接管监控（`adopted`）；
+同一个数据目录只允许一个看门狗（`logs/watchdog.lock`，第二个退出码 3）；
+看门狗被硬杀时 Job Object 会把服务一起收掉，不留孤儿占端口。
+
+```bat
+install_watchdog.bat          :: 登录时启动（pythonw，无黑框）
+install_watchdog.bat system   :: 改用 ONSTART + SYSTEM（不登录也起；无头浏览器在会话 0 里没验过）
+uninstall_watchdog.bat        :: 拆干净
+```
+
+状态 `vsw\data\logs\watchdog-status.json`，日志 `watchdog.log` / `server.log`。
+探针 `scripts/vsw-probe-watchdog.py`（24 项）在临时目录里把上面每条都跑一遍，包括「taskkill 之后自己回来」。

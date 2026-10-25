@@ -933,3 +933,23 @@ r43 = 747,562 字节，SHA256 `C42065766DB3C76B94F2C4F404040BAFCF20CC64337E41C19
 - 已是最新 / 被跳过时顺手收掉残留弹层，避免留一个假的「发现新版本」。
 
 验证：`node scripts/vsw-probe-update-gate.js --apk vsw-workbench.apk` → **24/24**。
+
+### 让 8799 永远有人看着（看门狗，r46 之后）
+
+手机端所有「搜图」「推回电脑」都依赖电脑上的 8799。它挂了，手机上就是转圈或直接报错 ——
+所以补了 `scripts/vsw-watchdog.py`：开机（登录）自动起、挂了自动续跑、被硬杀不留孤儿。
+
+```bat
+install_watchdog.bat                         :: 注册计划任务 + 立刻跑一次
+schtasks /Run /TN "VSW Workbench Watchdog"   :: 之后手动启一次也行
+uninstall_watchdog.bat                       :: 拆
+```
+
+- 退避重拉：1、2、4、8、15、30、60 秒；健康跑满 120 秒就清零。
+- 巡检：`/api/health` 连续 3 次不通 → 杀掉重拉；启动后 90 秒内不判死（SigLIP2 要十几秒加载）。
+- 接管：端口已有你手动起的服务时只监控（`state: adopted`），它倒下后再自己拉起。
+- 单实例：`vsw\data\logs\watchdog.lock`，第二个看门狗退出码 3。
+- Job Object：看门狗被 `taskkill /F` 时服务一起收掉，不会留孤儿进程占着端口。
+
+实测：`taskkill /PID 12352 /F` → 约 8 秒后 `/api/health` 恢复（新 PID 7512、`restarts: 2`）。
+探针 `../scripts/vsw-probe-watchdog.py`（24 项）覆盖全部这些行为。
