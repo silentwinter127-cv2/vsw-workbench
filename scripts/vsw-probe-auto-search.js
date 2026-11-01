@@ -165,6 +165,25 @@ print(json.dumps({'bytes': len(data)}))
     check('按钮带出可跑的任务数（7）', /（7）/.test(ready.text || ''), ready && ready.text);
     check('有任务时按钮可点', ready && ready.disabled === false, JSON.stringify(ready));
 
+    // 用户报的那个 bug：导入完第一次进队列，按钮是灰的，必须切走再回来才可点。
+    // 根因是按钮先渲染、preview 后到，而到货后没人重画它。
+    const firstArrive = await evaluate(`(async () => {
+      S.autoPreview = null;
+      renderQueue();
+      const btn = document.querySelector('#autoRunBtn');
+      const before = { text: btn ? btn.textContent.trim() : '', disabled: btn ? btn.disabled : null };
+      await new Promise((r) => setTimeout(r, 400));
+      const btn2 = document.querySelector('#autoRunBtn');
+      return { before: before,
+        after: { text: btn2 ? btn2.textContent.trim() : '', disabled: btn2 ? btn2.disabled : null } };
+    })()`);
+    check('第一次进队列、preview 还没回来时，按钮先按「没得跑」处理',
+      firstArrive && firstArrive.before.disabled === true,
+      JSON.stringify(firstArrive && firstArrive.before));
+    check('preview 一回来按钮自己就变可点，不用切走再回来',
+      firstArrive && firstArrive.after.disabled === false && /（7）/.test(firstArrive.after.text || ''),
+      JSON.stringify(firstArrive && firstArrive.after));
+
     const asked = await evaluate(`(() => {
       const calls = window.__CALLS.filter((c) => c[0] === 'GET' && c[1].indexOf('/api/auto/preview') === 0);
       return { preview: calls.map((c) => c[1]), state: window.__CALLS.some((c) => c[1] === '/api/auto/state') };

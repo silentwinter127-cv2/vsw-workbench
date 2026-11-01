@@ -71,10 +71,6 @@ public class WebSearchActivity extends Activity {
     private static final long LIMIT_MS = 20 * 60 * 1000L;
     /** 一次抓图最多累计几张：再多页面也画不下，intent 也扛不住。 */
     private static final int CAPTURE_MAX = 160;
-    /** 深挖一层：最多对前几张相似图各自再搜一次（每张都要开一次页面，慢，所以有上限）。 */
-    private static final int DEPTH_MAX = 8;
-    /** 深挖时每张图给多久出结果：到点还没结果就换下一张。 */
-    private static final long DEPTH_IMAGE_MS = 12000;
     private static final long TAP_GRACE_MS = 2500;
     /** 最多内嵌几张结果图：再多 JSON 就太大了，交付给页面的 intent 有大小上限。 */
     private static final int THUMB_MAX = 24;
@@ -132,20 +128,6 @@ public class WebSearchActivity extends Activity {
     private final java.util.LinkedHashSet<String> accUrls = new java.util.LinkedHashSet<String>();
     /** 最近一次提取的完整结果（保留 products/sources/diag 等字段）。 */
     private JSONObject accLatest = null;
-    /** 深挖阶段：待挖的图地址、挖到第几张、每张的开始时间。 */
-    private final java.util.ArrayList<String> depthUrls = new java.util.ArrayList<String>();
-    private int depthIndex = -1;
-    private Button backBtn;
-    /** 深挖时走过的页面，用于「回到上一层」。 */
-    private final java.util.ArrayDeque<String> backStack = new java.util.ArrayDeque<String>();
-    /** 当前页面地址。只在 onPageFinished（UI 线程）里更新 —— 后台线程调 web.getUrl() 不可靠，
-     *  这也正是「上一层」一直灰着的根因：push 的位置在轮询线程里，拿到的是 null。 */
-    private String currentUrl = "";
-    /** 用户手动回到上一层后，正在重新看的那一页（避免深挖计时把它立刻又换掉）。 */
-    private boolean goingBack = false;
-    private long depthStartedAt = 0;
-    private boolean depthPhase = false;
-    private int depthBase = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -211,28 +193,23 @@ public class WebSearchActivity extends Activity {
             }
         });
 
-        Button deep = new Button(this);
-        deep.setText("深挖一层");
-        deep.setAllCaps(false);
-        deep.setTextSize(12f);
-        deep.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                startDepthCrawl();
-            }
-        });
-
         Button back = new Button(this);
         back.setText("上一层");
-        back.setAllCaps(false);
-        back.setTextSize(12f);
-        // 不禁用：栈空时点它会回搜索首页（见 goBackOneLevel），比一个死按钮有用
+        // 就是浏览器后退：深挖那条「拿 URL 再搜」的路百度已经不认了，这里只保留最朴素的返回
         back.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                goBackOneLevel();
+                if (web != null && web.canGoBack()) {
+                    web.goBack();
+                    setHint("回到上一页");
+                } else {
+                    setHint("已经在最前面了，没有上一页");
+                }
             }
         });
+        back.setAllCaps(false);
+        back.setTextSize(12f);
+
 
         Button close = new Button(this);
         close.setText("关闭");
@@ -268,14 +245,12 @@ public class WebSearchActivity extends Activity {
         bar.addView(titles, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         bar.addView(back);
-        backBtn = back;
         startCapBtn = startCap;
         stopCapBtn = stopCap;
         stopCap.setEnabled(false);
         startCap.setTextSize(12f);
         stopCap.setTextSize(12f);
         close.setTextSize(12f);
-        bar.addView(deep);
         bar.addView(startCap);
         bar.addView(stopCap);
         bar.addView(close);
@@ -309,8 +284,6 @@ public class WebSearchActivity extends Activity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
-                // 只在这儿（UI 线程）记地址：深挖时要用它当「上一层」
-                if (url != null && url.startsWith("http")) currentUrl = url;
                 if (startAt == 0) {
                     startAt = System.currentTimeMillis();
                     handler.postDelayed(new Runnable() {
@@ -564,13 +537,7 @@ public class WebSearchActivity extends Activity {
                     if (capturing) {
                         // 还没把图交给识图之前，页面上只有首页样图 —— 那些不是搜索结果，别收。
                         if (offered || !captured.isEmpty()) {
-                            accumulate(obj);
-                            // 继续往下滚：结果是一屏一屏懒加载的，不滚就只有首屏那几张
-                            web.evaluateJavascript(VSW_SCROLL_JS, null);
-                            if (depthPhase
-                                    && System.currentTimeMillis() - depthStartedAt > DEPTH_IMAGE_MS) {
-                                nextDepthImage();
-                            }
+
                         } else {
                             setHint("还没把图交给识图：先点页底「点这里…」，等出结果再点「开始抓图」");
                         }
@@ -591,7 +558,7 @@ public class WebSearchActivity extends Activity {
      */
     private void startCapture() {
         capturing = true;
-        setHint("抓图中：会自动往下滚，抓够了点「结束抓图」；⚠️ 别点「关闭」——关掉这一轮就白抓了（已抓 " + accSimilar.length() + " 张）");
+        setHint("抓图中：自己往下滑，滑到哪抓到哪；抓够了点「结束抓图」；⚠️ 别点「关闭」——关掉这一轮就白抓了（已抓 " + accSimilar.length() + " 张）");
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -628,120 +595,6 @@ public class WebSearchActivity extends Activity {
             android.util.Log.w("vsw-websearch", "stopCapture: " + exc);
         }
         finishWithThumbs(base.toString(), "你点了结束抓图，累计 " + accSimilar.length() + " 张");
-    }
-
-    /**
-     * 深挖一层：对已经抓到的前几张相似图，各自再「以图搜图」一次。
-     *
-     * 做法是把每张图的地址喂给引擎的「按图搜」入口
-     * （百度：`graph.baidu.com/details?...&image=<url>`），等于用户手动点进那张相似图
-     * 再看它自己的相似结果 —— 只是自动串行跑，一次一张，抓到的都并进同一份累计。
-     * 上限 DEPTH_MAX 张：每张都要开一次页面，太多会等到天荒地老。
-     */
-    private void startDepthCrawl() {
-        if (depthPhase) {
-            setHint("正在深挖，等这一轮跑完");
-            return;
-        }
-        if (accSimilar.length() == 0) {
-            setHint("先点「开始抓图」抓一轮，再深挖");
-            return;
-        }
-        if (!"baidu".equals(engine)) {
-            setHint("深挖目前只支持百度识图（按图搜的地址是百度那套）");
-            return;
-        }
-        depthUrls.clear();
-        for (int i = 0; i < accSimilar.length() && depthUrls.size() < DEPTH_MAX; i++) {
-            JSONObject item = accSimilar.optJSONObject(i);
-            if (item == null) continue;
-            String u = safe(item.optString("u", ""));
-            if (u.isEmpty() || u.startsWith("data:")) continue;
-            depthUrls.add(u);
-        }
-        if (depthUrls.isEmpty()) {
-            setHint("没拿到可深挖的图地址");
-            return;
-        }
-        depthBase = accSimilar.length();
-        depthIndex = -1;
-        depthPhase = true;
-        capturing = true;
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (startCapBtn != null) startCapBtn.setEnabled(false);
-                if (stopCapBtn != null) stopCapBtn.setEnabled(true);
-            }
-        });
-        nextDepthImage();
-    }
-
-
-    /** 深挖容易挖进百度「这张图没结果」的页面 —— 给一条明确的退路。 */
-    private void goBackOneLevel() {
-        if (backStack.isEmpty()) {
-            // 没得退（比如深挖还没开始，或者已经退到顶）：直接回引擎首页。
-            // 一个永远灰着的按钮等于没有这个按钮 —— 用户第一次看到的就是这种。
-            depthPhase = false;
-            goingBack = true;
-            setHint("回到搜索首页（没有更上一层了）");
-            web.loadUrl(searchUrl);
-            handler.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    goingBack = false;
-                }
-            }, 4000);
-            return;
-        }
-        String prev = backStack.pop();
-        depthPhase = false;          // 先停掉深挖的自动换页，否则刚退回去就被换走
-        goingBack = true;
-        setHint("回到上一层…（还剩 " + backStack.size() + " 层可退）");
-        web.loadUrl(prev);
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                goingBack = false;
-            }
-        }, 4000);
-    }
-
-    private void refreshBackButton() {
-        final boolean can = !backStack.isEmpty();
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (backBtn != null) backBtn.setEnabled(can);
-            }
-        });
-    }
-
-    private void nextDepthImage() {
-        if (!depthPhase || finished) return;
-        depthIndex += 1;
-        if (depthIndex >= depthUrls.size()) {
-            depthPhase = false;
-            refreshBackButton();
-            int added = accSimilar.length() - depthBase;
-            setHint("深挖完成：多抓到 " + added + " 张（累计 " + accSimilar.length() + " 张），点「结束抓图」交回");
-            stopCapture();
-            return;
-        }
-        String target = depthUrls.get(depthIndex);
-        String url = "https://graph.baidu.com/details?isfromtusoupc=1&tn=pc&carousel=0&image="
-                + java.net.URLEncoder.encode(target);
-        depthStartedAt = System.currentTimeMillis();
-        String here = currentUrl;
-        if (here != null && here.startsWith("http") && !here.equals(url)) {
-            // 同一层不重复压栈（页面自己跳转时会连着来几次）
-            if (backStack.isEmpty() || !here.equals(backStack.peek())) backStack.push(here);
-        }
-        refreshBackButton();
-        setHint("深挖 " + (depthIndex + 1) + "/" + depthUrls.size()
-                + "：正在看这张相似图自己的结果…（已多抓 " + Math.max(0, accSimilar.length() - depthBase) + " 张）");
-        web.loadUrl(url);
     }
 
     /** 把这一次提取到的相似图并入累计表（按 URL 去重，最多 CAPTURE_MAX 张）。 */
@@ -881,32 +734,6 @@ public class WebSearchActivity extends Activity {
             }
         }, "vsw-thumb-fetch").start();
     }
-
-    /**
-     * 抓图期间每隔一次轮询往下滚一屏，并在到底时点一次「查看更多 / 下一页」。
-     *
-     * 我们不是在「抓这一张图的结果」这件事上偷懒 —— 是引擎把结果一屏一屏懒加载，
-     * 不滚就只有首屏那 8 张。滚下去，更多相关图才会被渲染出来，提取脚本才看得到。
-     */
-    private static final String VSW_SCROLL_JS =
-            "(function(){"
-            + "var before=window.scrollY||0;"
-            + "try{window.scrollBy(0,Math.round((window.innerHeight||800)*0.85));}catch(e){}"
-            + "var doc=document.documentElement||document.body;"
-            + "var h=doc?doc.scrollHeight:0;"
-            + "var atBottom=((window.scrollY||0)+(window.innerHeight||0))>=(h-60);"
-            + "var clicked='';"
-            + "if(atBottom){"
-            + "var re=/查看更多|加载更多|展开更多|更多结果|下一页|下页/;"
-            + "var els=document.querySelectorAll('button,a,div,span');"
-            + "for(var i=0;i<els.length;i++){var e=els[i];var t=(e.innerText||'').trim();"
-            + "if(!t||t.length>8||!re.test(t))continue;"
-            + "var r=e.getBoundingClientRect();if(!r||r.width<20||r.height<10)continue;"
-            + "try{e.click();clicked=t;}catch(x){}break;}"
-            + "if(!clicked){try{window.scrollTo(0,0);}catch(x){}}"   // 到底又没按钮：回到顶部再来一轮
-            + "}"
-            + "return JSON.stringify({y:window.scrollY,moved:(window.scrollY||0)>before,h:h,atBottom:atBottom,clicked:clicked});"
-            + "})()";
 
     /** 把提取脚本的 diag 读成一句人话：捕获到几条 pcsimi、页面里都有哪些图主机。 */
     private static String diagnose(JSONObject diag) {

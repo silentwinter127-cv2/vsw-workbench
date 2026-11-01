@@ -286,6 +286,36 @@ print(json.dumps({'bytes': len(data)}))
     check('统计里说清有几张存成了本地小图', embedded && /1 张已存成本地小图/.test(embedded.body || ''),
       JSON.stringify(embedded && embedded.body));
 
+    // 「再搜这张」：百度已经不认「用图片地址按图搜」了（旧地址全落到 errpage），
+    // 唯一还能走通的是把这张图当成新图再交一次。
+    const research = await evaluate(`(async () => {
+      window.__SEARCH = null;   // 探针里的假桥把结果存成对象，不是数组
+      window.vswWebSearchResult(JSON.stringify({
+        guess: '橘猫',
+        similar: [{ u: 'https://t7.baidu.com/research-1.jpg', d: 'data:image/jpeg;base64,QUJD' }],
+        sources: [], goods: [], note: '',
+      }));
+      await new Promise((r) => setTimeout(r, 220));
+      const btn = document.querySelector('[data-research="0"]');
+      const has = !!btn;
+      const label = btn ? btn.textContent : '';
+      if (btn) btn.click();
+      for (let i = 0; i < 30 && !window.__SEARCH; i++) await new Promise((r) => setTimeout(r, 100));
+      return { has: has, label: label, call: window.__SEARCH || null,
+        toastText: (document.querySelector('#toast') || {}).innerText || '' };
+    })()`);
+    check('每张相似图上都有「再搜这张」按钮',
+      research && research.has && /再搜这张/.test(research.label || ''),
+      JSON.stringify(research && research.label));
+    check('点「再搜这张」会把这张图本身交给引擎（不是拿 URL 去深挖）',
+      research && research.call && Number(research.call.imageLen) > 0,
+      JSON.stringify(research && research.call
+        ? { label: research.call.label, imageLen: research.call.imageLen, head: research.call.imageHead }
+        : null));
+    check('再搜时把手上的图传下去、标签写明「再搜」',
+      research && research.call && /再搜/.test(research.call.label || ''),
+      JSON.stringify(research && research.call && research.call.label));
+
     // 「存进结果板」：手机搜到的图要能收进工作台，否则结果板里永远没有这些图
     const saved = await evaluate(`(async () => {
       S.server = 'http://probe.local';

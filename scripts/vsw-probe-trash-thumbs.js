@@ -205,6 +205,18 @@ async function main() {
       const withSrc = imgs.filter((i) => i && i.getAttribute('src')).length;
       const srcSample = imgs.find((i) => i && i.getAttribute('src'));
       const sourceTexts = cards.map((c) => (c.querySelector('.ln') || {}).textContent || '');
+      // 真实数据里确实有一批回收站条目「一个来源都没有」（别人 sweep 进来的图），
+      // 所以不能要求「一行 0 源都不许有」—— 只要求显示的和数据一致。
+      const shownIds = cards.map((c) => Number((c.dataset && c.dataset.tid) || 0)).filter(Boolean);
+      const zeroTexts = cards.filter((c) => {
+        const f = S.trash.find((z) => Number(z.id) === Number(c.dataset.tid)) || {};
+        const n = Array.isArray(f.sources) ? f.sources.length : Number(f.source_count || 0);
+        return !n;
+      }).map((c) => ((c.querySelector('.ln') || {}).textContent || '<no .ln>').trim().slice(0, 40));
+      // 和页面里的 sourceCount() 同一套口径：有 source_count 用它，否则退回 sources 数组
+      const cnt = (f) => (f.source_count != null ? Number(f.source_count) : ((f.sources || []).length));
+      const expectedZero = S.trash.filter((f) => shownIds.indexOf(Number(f.id)) >= 0
+        && !cnt(f)).length;
       // 诊断：为什么没补上
       const first = S.trash[0] || {};
       const stored = first.id ? await local.get('assets', KEY.trashThumb(first.id)) : null;
@@ -224,7 +236,14 @@ async function main() {
         blobSrc: srcSample ? srcSample.getAttribute('src').slice(0, 12) : '',
         loadedSample: srcSample ? (srcSample.naturalWidth || 0) : 0,
         sourceTexts: sourceTexts.slice(0, 3),
-        blank: sourceTexts.filter((t) => /·\\s*0 源/.test(t)).length,
+        blank: sourceTexts.filter((t) => /·\s*0 源/.test(t)).length,
+        expectedZero: expectedZero,
+        zeroShown: cards.filter((c) => (((c.querySelector('.ln') || {}).textContent) || '').indexOf('0 源') >= 0).length,
+        zeroTexts: zeroTexts.slice(0, 5),
+        diagCounts: { cards: cards.length, trash: S.trash.length,
+          zerosByPage: S.trash.filter((f) => shownIds.indexOf(Number(f.id)) >= 0
+            && !(Array.isArray(f.sources) ? f.sources.length : Number(f.source_count || 0))).length,
+          withSourcesArr: S.trash.filter((f) => Array.isArray(f.sources)).length },
         diag: {
           server: S.server, online: S.online,
           firstId: first.id, firstThumb: first.thumb_path,
@@ -244,8 +263,13 @@ async function main() {
     check('补回来的是真实图片数据（objectURL 且 naturalWidth > 0）',
           rendered && rendered.blobSrc.startsWith('blob:') && rendered.loadedSample > 0,
           JSON.stringify({ src: rendered && rendered.blobSrc, w: rendered && rendered.loadedSample }));
-    check('「N 源」显示真实来源数（不再恒为 0 源）',
-          rendered && rendered.blank === 0, JSON.stringify(rendered && rendered.sourceTexts));
+    check('「N 源」显示的和服务端给的一致（该 0 的才是 0）',
+          rendered && rendered.zeroShown === rendered.expectedZero,
+          JSON.stringify({ zeroShown: rendered && rendered.zeroShown,
+            expectedZero: rendered && rendered.expectedZero,
+            counts: rendered && rendered.diagCounts,
+            zeroTexts: rendered && rendered.zeroTexts,
+            texts: rendered && rendered.sourceTexts }));
 
     // 收拾干净：探针造出来的回收站条目要还原回结果板
     if (prepared && prepared.ids && prepared.ids.length) {

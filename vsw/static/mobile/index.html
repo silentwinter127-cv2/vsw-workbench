@@ -1528,6 +1528,43 @@ async function startPhoneSearch(jobId) {
   }
 }
 
+/**
+ * 「再搜这张」：把这张相似图当成新图再交一次。
+ *
+ * 为什么不是「深挖一层」：百度早就不认「用图片地址按图搜」了 —— details?image=…、
+ * s?tn=pc&image=… 全都落到 graph.baidu.com/errpage（"未找到相关结果"）。所以深挖那条
+ * 路线（拿 URL 一个个重开）走不通，唯一还成立的是把图**再上传一次**。
+ */
+async function researchWithImage(item, ctx) {
+  const engine = (ctx && ctx.engine) || 'baidu';
+  const cfg = PHONE_SEARCH[engine];
+  if (!cfg) return toast('这个引擎还不支持再搜', true);
+  const url = item.d || item.u;
+  if (!url) return toast('这张图没有地址，搜不了', true);
+  let b64 = '';
+  try {
+    if (String(url).startsWith('data:')) {
+      b64 = String(url).split(',')[1] || '';
+    } else {
+      const resp = await netFetch(url, { cache: 'force-cache' });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      b64 = await blobToBase64(await resp.blob());
+    }
+  } catch (e) {
+    return toast('这张图取不回来：' + e.message, true);
+  }
+  if (!b64) return toast('这张图取不回来，搜不了', true);
+  const label = `${cfg.label} · 再搜`;
+  closeSheet();
+  S.phoneSearch = { jobId: (ctx && ctx.jobId) || 0, engine: engine, label: label };
+  toast('用这张图再搜一次：在打开的页面里点一下「上传图片」');
+  try {
+    AndroidBridge.webSearch(engine, label, cfg.url, cfg.extract, b64);
+  } catch (e) {
+    toast('起不来：' + e.message, true);
+  }
+}
+
 /* 原生把结果（JSON 字符串）回传到这里。 */
 window.vswWebSearchResult = function (payload) {
   let data = payload;
@@ -1787,11 +1824,12 @@ function openPhoneSearchResult(data, ctx) {
     ${!shownSimilar.length && diagText ? `<div class="small">${esc(diagText)}</div>` : ''}
     ${data.guess ? `<div class="t1">识别结论：<b>${esc(data.guess)}</b></div>` : ''}
     <div class="small">相似图 ${shownSimilar.length}${shownEmbedded ? `（其中 ${shownEmbedded} 张已存成本地小图）` : ''} · 图源：${diag && diag.source === 'pcsimi' ? '引擎接口' : '页面里捡的'} · 来源网页 ${shownSources.length}${shownGoods.length ? ` · 商品 ${shownGoods.length}` : ''}</div>
-    ${shownSimilar.length ? `<div class="flist" style="margin-top:10px">${shownSimilar.slice(0, 12).map((x) => `
+    ${shownSimilar.length ? `<div class="flist" style="margin-top:10px">${shownSimilar.slice(0, 12).map((x, xi) => `
       <div class="fcard">
         <img src="${esc(x.d || x.u)}" alt="" loading="lazy"${x.d ? '' : ' referrerpolicy="no-referrer"'} onerror="this.dataset.broken='1';this.style.visibility='hidden'">
         <div class="meta2"><div class="ln"><span class="mono">${x.w || '?'}×${x.h || '?'}</span>
-          ${x.page ? `<a href="${esc(x.page)}" target="_blank" rel="noopener">来源</a>` : ''}</div></div>
+          ${x.page ? `<a href="${esc(x.page)}" target="_blank" rel="noopener">来源</a>` : ''}
+          <button class="btn sm ghost" data-research="${xi}">再搜这张</button></div></div>
       </div>`).join('')}</div>
       ${shownSimilar.length > 12 ? `<div class="small" style="margin-top:8px">上面只画了前 12 张；存进结果板会带上全部 ${shownSimilar.length} 张。</div>` : ''}` : '<div class="empty">没抓到相似图（引擎页面结构可能变了，或者还没出结果）</div>'}
     ${shownGoods.length ? `<div class="small" style="margin-top:10px">商品：${shownGoods.slice(0, 6).map((g) => `${esc(g.platform || '')} ¥${esc(g.price)} ${esc(g.title)}`).join(' · ')}</div>` : ''}
@@ -1821,6 +1859,14 @@ function openPhoneSearchResult(data, ctx) {
   }, 2000);
   const saveBtn = $('#saveResults');
   if (saveBtn) saveBtn.onclick = () => savePhoneResults(shownSimilar, ctx, data.guess || '');
+  // 「再搜这张」：拿这张相似图当新图再搜一次 —— 这就是「深挖」唯一还能走通的路
+  // （百度已经不认「用图片链接按图搜」了，旧地址全落到 errpage）。
+  $$('[data-research]').forEach((btn) => {
+    btn.onclick = () => {
+      const item = shownSimilar[Number(btn.dataset.research) || 0];
+      if (item) researchWithImage(item, ctx);
+    };
+  });
   const a = $('#copyImgLinks'); if (a) a.onclick = () => copyText(links, '图片链接已复制');
   const b = $('#copyPageLinks'); if (b) b.onclick = () => copyText(pages, '来源链接已复制');
   $$('[data-close-sheet]').forEach((btn) => { btn.onclick = () => closeSheet(); });
@@ -2048,6 +2094,20 @@ async function loadAutoPreview() {
   } catch (e) {
     S.autoPreview = null;
   }
+  // 关键：按钮是「先渲染、后拿数据」的，所以拿到数据必须原地改一次 ——
+  // 以前没这一步，导入完第一次进队列按钮一直是灰的，切走再回来才可点。
+  refreshAutoRunButton();
+}
+
+/** 只更新「自动搜图」那个按钮，不重画整个队列（重画会丢滚动位置和展开状态）。 */
+function refreshAutoRunButton() {
+  const btn = $('#autoRunBtn');
+  if (!btn) return;
+  const p = S.autoPreview || { count: 0, running: false, done: 0, total: 0 };
+  const running = !!p.running;
+  const n = Number(p.count) || 0;
+  btn.textContent = running ? `自动搜图中 ${p.done}/${p.total}` : (n ? `自动搜图（${n}）` : '自动搜图');
+  btn.disabled = !(S.online && n > 0 && !running);
 }
 
 function renderAutoState(st) {
@@ -3299,6 +3359,7 @@ async function importOne(entry) {
         // 关键：导入完必须把队列同步下来，否则队列页看不到刚生成的任务。
         // 因为一次导入会为每个变体 × 引擎各建一条任务（默认 16 条），用户很容易以为"没进队列"。
         await refreshQueueFromServer({ silent: true });
+        loadAutoPreview();
       } else {
         const why = (res.errors && res.errors[0] && res.errors[0].error) || '电脑端没有接受这张图';
         entry.status = 'failed';

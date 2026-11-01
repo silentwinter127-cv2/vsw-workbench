@@ -8,7 +8,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `vsw-workbench.apk` | 可直接安装的 release 包（约 602 KB，用你自己的密钥库自签；当前 r16 为 620,589 字节） |
+| `vsw-workbench.apk` | 可直接安装的 release 包（约 602 KB，用你自己的密钥库自签；当前 r48 为 768,042 字节） |
 | `vsw-workbench-debug.apk` | 带调试签名的版本（`build_apk.bat` 不带参数时的产物） |
 
 包名 `com.vsw.workbench` · 应用名「视觉搜索工作台」· minSdk 24（Android 7.0+）· targetSdk 34。
@@ -460,7 +460,7 @@ min-content 被撑到上千像素，右边「自动识图 / 打开识图 / 回�
 - 跑完的提示放在队列/快照刷新**之后** —— 否则「同步完成」会把结论盖掉，用户只看得到同步。
 
 回归探针：`scripts/vsw-probe-auto.py`（24 项，服务端逻辑与权限）、
-`scripts/vsw-probe-auto-search.js`（17 项，手机界面，支持 `--page` 直接测源码、
+`scripts/vsw-probe-auto-search.js`（19 项，手机界面，支持 `--page` 直接测源码、
 `--apk` 测打包后的页面）。
 
 ### 不在同一个局域网的人打不开 → 公网通道（r16）
@@ -953,6 +953,16 @@ uninstall_watchdog.bat                       :: 拆
 
 实测：`taskkill /PID 12352 /F` → 约 8 秒后 `/api/health` 恢复（新 PID 7512、`restarts: 2`）。
 探针 `../scripts/vsw-probe-watchdog.py`（24 项）覆盖全部这些行为。
+
+### 导入完搜图点不动、深挖没结果、抓图自己滚动（r48）
+
+**「导入图片后搜图按钮按不动，必须重进才可以」** —— 不是权限也不是网络：队列页是「先把按钮画成灰色，再去问电脑有多少条能自动跑」，异步结果回来后没人更新那个按钮。切走再回来时数据已经在内存里，画出来才是亮的。修：`loadAutoPreview()` 末尾调 `refreshAutoRunButton()`，导入完成后也补一次。
+
+**「深挖一层往往都是没找到结果」** —— 实测证明这条路已经走不通：把相似图地址拼成 `graph.baidu.com/details?...&image=<url>` 的四种写法（`isfromtouspc`/`isfromtusoupc`/`details?image=`/`s?tn=pc&image=`）全部落到 `graph.baidu.com/errpage`，只有「未找到相关结果」。百度不允许用图片 URL 直接按图搜了，改参数没用。所以 `WebSearchActivity` 里整套深挖（`startDepthCrawl`、`nextDepthImage`、`depthPhase`、`DEPTH_MAX`、回退栈）删掉了，顶栏不再有「深挖一层」；「上一层」保留，改成 `web.goBack()`。取而代之的是结果面板里**每张相似图下面一个「再搜这张」** —— 把那张图取回本地重新上传一次，这是唯一还能走通的方式。
+
+**「请务必把自动下滚去除」** —— 以前 `pollTask` 每 1.5 秒注入 `VSW_SCROLL_JS`（往下滚 0.85 屏、到底点「查看更多/下一页」、再回顶）。提示语里写着「会自动往下滚」。现在整段删除，提示改成「自己往下滑，滑到哪抓到哪」。删除的代码：`VSW_SCROLL_JS` 常量与其注释、`pollTask` 里的一次调用、`startCapture()` 里的文案。
+
+`vsw-verify-apk.py` 42 项仍全过（它不引用这些符号）。
 
 ### 电脑屏幕上老闪黑窗口（r47，跟手机端无关但你会看到）
 

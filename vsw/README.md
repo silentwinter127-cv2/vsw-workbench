@@ -825,6 +825,16 @@ uninstall_watchdog.bat        :: 拆干净
 状态 `vsw\data\logs\watchdog-status.json`，日志 `watchdog.log` / `server.log`。
 探针 `scripts/vsw-probe-watchdog.py`（24 项）在临时目录里把上面每条都跑一遍，包括「taskkill 之后自己回来」。
 
+### 导入完按钮点不动 / 深挖没结果 / 抓图自动滚（r48）
+
+**按钮是「先画后问」的。** `renderQueue()` 先 `renderQueueActions()` 再把 `loadAutoPreview()` 的结果等回来，异步回来时没人重画 `#autoRunBtn` → 第一次进队列永远是灰的，切走再回来才亮（因为那时 `S.autoPreview` 已有值）。修：`loadAutoPreview()` 末尾 `refreshAutoRunButton()` 只改按钮本身；`importOne()` 在线分支同步完队列再补一次 `loadAutoPreview()`。
+
+**深挖下线了。** 旧做法把相似图地址喂给 `graph.baidu.com/details?...&image=<url>`；实测四种拼法全部落到 `errpage` —— 百度关掉了「用图片 URL 按图搜」。所以删掉 `startDepthCrawl`/`nextDepthImage`/`depthPhase`/回退栈，改成结果面板里每张图一个「再搜这张」：取回那张图 → base64 → 重新走一次真上传（`AndroidBridge.webSearch`）。「上一层」保留，改成 `web.goBack()`。
+
+**抓图不再自动下滚。** `pollTask` 里那段 `VSW_SCROLL_JS`（滚一屏 + 到底点「查看更多」）整段删除，`startCapture()` 文案改成「自己往下滑，滑到哪抓到哪」。
+
+探针：`vsw-probe-phone-search.js` 42 项、`vsw-probe-auto-search.js` 19 项；`vsw-probe-trash-thumbs.js` 修掉一条恒真断言（`/·\s*0 源/` 里的反斜杠让正则匹配不到任何东西，所以那条断言一直「通过」）。
+
 ### 屏幕上老闪黑窗口？那是 `ipconfig`（r47）
 
 `_is_local()` 每个请求都要问一次 `lan_addresses()`，而它 Windows 下靠 `ipconfig`；这个子进程以前没带

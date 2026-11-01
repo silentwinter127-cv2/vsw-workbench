@@ -672,7 +672,7 @@ r39 把它挪进 `.sheet` 自己的固定底栏（`#sheetFoot`，`flex:0 0 auto`
 `openSheet()` 还会顺手收掉首次说明那层全屏遮罩 —— 它 z-index 70 高于面板的 60，
 开着的时候面板上点任何东西都没反应，是同一个症状的另一个来源。
 
-探针 `scripts/vsw-probe-phone-search.js` 从 34 项加到 39 项：按钮在底栏里、30 张时不滚动也能看见、
+探针 `scripts/vsw-probe-phone-search.js` 从 34 项加到 39 项（r48 再补到 42 项）：按钮在底栏里、30 张时不滚动也能看见、
 按钮中心点命中它自己（用 `document.elementFromPoint` 真的做命中测试）、预览最多 12 张、关面板清空底栏。
 
 ## 手机自己就是个相册（r40）
@@ -909,6 +909,41 @@ install_watchdog.bat system   :: 注册 ONSTART + SYSTEM 的那个任务
 
 实测（这台机器）：注册任务 → `schtasks /Run` → 服务从零拉起（vision true）；`taskkill /PID 12352 /F` →
 短暂不通 → **约 8 秒后**恢复（新 PID 7512，`restarts: 2`）。探针 `scripts/vsw-probe-watchdog.py` 24 项把这些都钉住了。
+
+## 导入完按钮点不动、深挖老是「没找到」、抓图自己往下滚（r48）
+
+三个都是用户报的，查下来只有一个是「参数写错了」，另外两个得换做法。
+
+### 1. 导入完「自动搜图」是灰的，必须切走再回来
+
+`renderQueue()` 是「先把按钮画出来、再去问电脑有多少条能自动跑」：
+
+```js
+const rows = queueRows();
+renderQueueFilters(rows);
+renderQueueActions(rows);   // 这时候 S.autoPreview 还是空 → 按「没得跑」画成 disabled
+loadAutoPreview();          // 异步回来以后，没人重画那个按钮
+```
+
+所以第一次进队列永远是灰的；切走再回来时 `S.autoPreview` 已经有值，画出来才是亮的 —— 这正是「必须重进才可以」。
+
+修法：`loadAutoPreview()` 末尾调 `refreshAutoRunButton()`，只改那一个按钮的文案和 `disabled`，不重画整个队列（重画会丢滚动位置和展开状态）。另外 `importOne()` 在线分支在 `refreshQueueFromServer()` 之后也补一次 `loadAutoPreview()`，因为导入会新生成十几条任务。
+
+### 2. 「深挖一层」为什么总是「未找到相关结果」
+
+旧做法是把相似图的**地址**喂给百度：`graph.baidu.com/details?...&image=<url>`。实测四种写法（`isfromtouspc` / `isfromtusoupc` / `details?image=` / `s?tn=pc&image=`）**全部落到 `graph.baidu.com/errpage?pron=details`**（「未找到相关结果 / 请重新拍摄图片」）。百度已经把「用图片 URL 直接按图搜」这条路关了，改参数救不回来。
+
+对照：桌面无头浏览器**真上传**同一张图完全正常（32 张结果，主机 `mms0/1/2.baidu.com`）。差别只在「交图」这一步。
+
+所以深挖这条路下线了（`startDepthCrawl` / `nextDepthImage` / `depthPhase` / 回退栈全删），换成**结果面板里每张相似图一个「再搜这张」**：把那张图取回本地、转成 base64，重新走一次「真上传」—— 也就是唯一还能走通的方式。顶部「上一层」保留，改成朴素的 `web.goBack()`。
+
+### 3. 抓图期间不要再自动往下滚
+
+`pollTask` 每 1.5 秒会注入一段 `VSW_SCROLL_JS`（滚 0.85 屏、到底点「查看更多」、再回顶）。本意是让懒加载的结果多出来几张，实际效果是用户自己在看的时候页面乱跳。按用户要求整段删掉，`startCapture()` 的提示也改成「自己往下滑，滑到哪抓到哪」。
+
+## 探针
+
+新增/加严：`vsw-probe-phone-search.js` **42 项**（+3：「每张图上都有『再搜这张』」「点了会把这张图本身交给引擎」「标签写明再搜」）、`vsw-probe-auto-search.js` **19 项**（+2：「preview 没回来时先按没得跑处理」「preview 一回来按钮自己变可点，不用切走再回来」）、`vsw-probe-trash-thumbs.js` 修掉一条**恒真**断言（正则写成 `/·\s*0 源/`，匹配的是反斜杠，所以永远通过；现在比的是「页面显示 0 源的条数」与「数据里真是 0 源的条数」相等）。
 
 ## 屏幕上「经常跳出黑色弹窗」——是 `ipconfig`（r47）
 
