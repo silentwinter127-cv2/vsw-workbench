@@ -26,6 +26,7 @@ from . import engines as engines_mod
 from . import imaging
 from . import release as release_mod
 from . import tunnel as tunnel_mod
+from . import sso as sso_mod
 from .access import (AccessStore, ROLE_EDIT, ROLE_LABEL, ROLE_OWNER, ROLE_RANK,
                      ROLE_VIEW, ensure_owner_key, looks_like_code)
 from .accounts import (AccountError, AccountStore, SESSION_COOKIE, SESSION_DAYS,
@@ -1386,6 +1387,170 @@ class Handler(BaseHTTPRequestHandler):
         payload.update(extra)
         self._send(status, payload)
 
+    # ------------------------------------------------------------ 第三方应用免登录
+    def _public_base(self) -> str:
+        """这个服务对外叫什么地址 —— 绑定令牌换票据时要拼完整 URL 给第三方。"""
+        proto = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip()
+        host = (self.headers.get("X-Forwarded-Host") or "").split(",")[0].strip()
+        if not host:
+            host = self.headers.get("Host") or ""
+        if not proto:
+            proto = "https" if host and not host.startswith(("127.0.0.1", "localhost")) else "http"
+        if not host:
+            host = f"127.0.0.1:{bound_port()}"
+        return f"{proto}://{host}".rstrip("/")
+
+    def _handle_sso(self, method: str, path: str) -> None:
+        """第三方应用（HYW 之类）的绑定与免登录。
+
+        这里所有接口都不带会话 —— 第一个是「第三方用账号密码换令牌」，
+        第二个是「第三方用令牌换一次性票据」，第三个要在已登录时管自己的绑定。
+        """
+        tail = path[len("/api/sso"):].strip("/")
+        parts = [p for p in tail.split("/") if p]
+        self._bind(self._resolve())
+
+        if self.auth is None:
+            self._deny(400, "这个工作台没开账号功能：先在电脑上建第一个账号，"
+                            "第三方应用才有东西可绑")
+            return
+
+        body = getattr(self, "_body_cache", None)
+        if body is None:
+            try:
+                body, _ = self._read_body()
+            except ServiceError as exc:
+                self._deny(400, str(exc))
+                return
+            self._body_cache = body
+
+        if method == "GET" and parts[:1] == ["links"]:
+            ctx = getattr(self, "_ctx", None) or {}
+            user = ctx.get("user") or None
+            if ctx.get("mode") != "user" or not user:
+                self._deny(401, "需要登录才能看自己的绑定", need_login=True,
+                           accounts=self.auth.has_users())
+                return
+            rows = (self.auth.sso_links() if user.get("is_admin")
+                    else self.auth.sso_links(int(user["id"])))
+            self._send(200, {"links": rows, "server": self._public_base(),
+                             "ttl": sso_mod.TICKET_TTL})
+            return
+
+        if method == "POST" and parts[:1] == ["bind"]:
+            # 第三方后端调这一支：拿到长期令牌（明文只在这里出现一次）
+            ip = self._client_ip()
+            wait = self.auth.blocked_for(ip)
+            if wait > 0:
+                self._send(429, {"error": f"试错太多次了，{int(wait) + 1} 秒后再试",
+                                 "retry_after": int(wait) + 1})
+                return
+            name = str(body.get("name") or body.get("user") or "").strip()
+            password = str(body.get("password") or "")
+            label = str(body.get("label") or "").strip()
+            user = self.auth.verify_login(name, password)
+            if not user:
+                left = self.auth.note_failure(ip)
+                self._send(401, {"error": "名字或密码不对", "attempts_left": left})
+                return
+            self.auth.note_success(ip)
+            link = self.auth.create_sso_link(int(user["id"]), label)
+            self.auth.mark_login(int(user["id"]))
+            self._send(200, {"ok": True, "key": link["key"], "id": link["id"],
+                             "user": {"id": int(user["id"]), "name": user.get("name")},
+                             "server": self._public_base()})
+            return
+
+        if method == "POST" and parts[:1] == ["ticket"]:
+            # 第三方后端调这一支：拿令牌换一张 60 秒、用一次就作废的票据
+            key = str(body.get("key") or body.get("token") or "").strip()
+            user = self.auth.sso_link_user(key)
+            if not user:
+                self._deny(401, "绑定已失效：去工作台「共享 / 账号」里看是不是被撤销了，"
+                                "或者重新绑定一次")
+                return
+            ticket = sso_mod.TICKETS.issue(int(user["id"]), note=str(body.get("label") or ""))
+            nxt = str(body.get("next") or "/")
+            self._send(200, {"ok": True, "url": sso_mod.ticket_url(self._public_base(), ticket, nxt),
+                             "ticket": ticket, "expires_in": int(sso_mod.TICKET_TTL),
+                             "user": {"id": int(user["id"]), "name": user.get("name")}})
+            return
+
+        if method == "POST" and parts[:1] in (["revoke"], ["links"]) and len(parts) >= 2:
+            ctx = getattr(self, "_ctx", None) or {}
+            user = ctx.get("user") or None
+            if ctx.get("mode") != "user" or not user:
+                self._deny(401, "需要登录", need_login=True)
+                return
+            try:
+                link_id = int(parts[1] if parts[0] == "revoke" else body.get("id") or 0)
+            except (TypeError, ValueError):
+                self._deny(400, "绑定编号不对")
+                return
+            mine = None if user.get("is_admin") else int(user["id"])
+            if not self.auth.revoke_sso_link(link_id, mine):
+                self._deny(404, "这条绑定不在了（可能已经撤销过）")
+                return
+            self._send(200, {"ok": True, "links": self.auth.sso_links(mine)})
+            return
+
+        if method == "POST" and parts[:1] == ["unbind-all"]:
+            ctx = getattr(self, "_ctx", None) or {}
+            user = ctx.get("user") or None
+            if ctx.get("mode") != "user" or not user:
+                self._deny(401, "需要登录", need_login=True)
+                return
+            n = self.auth.revoke_user_sso_links(int(user["id"]))
+            self._send(200, {"ok": True, "revoked": n})
+            return
+
+        if method == "GET" and not parts:
+            self._send(200, {
+                "ok": True, "server": self._public_base(),
+                "accounts": self.auth.has_users(),
+                "endpoints": ["POST /api/sso/bind", "POST /api/sso/ticket",
+                              "GET /api/sso/links", "POST /api/sso/revoke/<id>"],
+                "ttl": sso_mod.TICKET_TTL,
+            })
+            return
+
+        self._deny(404, "没有这个接口")
+
+    def _sso_landing(self, method: str, path: str) -> None:
+        """``/sso?ticket=...``：换票 → 种会话 cookie → 302 到主页。
+
+        浏览器跳过来时带的是票据而不是密码，所以这一支必须免登录进来；
+        票据用掉立刻作废，历史记录里那条 URL 再点一次也不会登录。
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        ticket = (query.get("ticket") or [""])[0]
+        nxt = (query.get("next") or ["/"])[0] or "/"
+        if not nxt.startswith("/"):
+            nxt = "/"
+        self._bind(self._resolve())
+        if self.auth is None:
+            self._redirect("/?sso=failed")
+            return
+        user_id = sso_mod.TICKETS.redeem(ticket)
+        if not user_id:
+            self._redirect(nxt + ("&" if "?" in nxt else "?") + "sso=expired")
+            return
+        user = self.auth.user(user_id)
+        if not user:
+            self._redirect(nxt + ("&" if "?" in nxt else "?") + "sso=failed")
+            return
+        token = self.auth.create_session(int(user["id"]), self._client_ip(),
+                                         self.headers.get("User-Agent") or "")
+        self.auth.mark_login(int(user["id"]))
+        self._set_session(token)
+        auto = self.auth.default_workspace(int(user["id"])) or {}
+        if auto:
+            self._set_ws_cookie(int(auto["id"]))
+        self._redirect(nxt)
+
+    def _redirect(self, target: str) -> None:
+        self._send(302, {"ok": True, "redirect": target}, extra={"Location": target})
+
     def _handle_auth(self, method: str, path: str) -> None:
         """登录 / 注册 / 工作区 / 成员 / 邀请码。
 
@@ -1656,9 +1821,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(parsed.path)
-        if path.startswith("/api/access") or path.startswith("/api/auth"):
+        if path.startswith("/api/access") or path.startswith("/api/auth") \
+                or path.startswith("/api/sso"):
             self._safely(self._handle_access if path.startswith("/api/access")
-                         else self._handle_auth, "GET", path)
+                         else (self._handle_sso if path.startswith("/api/sso")
+                               else self._handle_auth), "GET", path)
+            return
+        if path == "/sso" or path.startswith("/sso?"):
+            # 第三方应用跳过来的免登录入口：凭一次性票据换会话，然后 302 到主页。
+            self._safely(self._sso_landing, "GET", path)
             return
         if not self._guard("GET", path):
             return
@@ -1689,6 +1860,10 @@ class Handler(BaseHTTPRequestHandler):
         # 体已经读完了：后面自己接管请求的处理器（/api/tunnel）要用同一份，
         # 再调一次 _read_body() 会卡在那里等永远不会到来的数据，直到超时。
         self._body_cache = body
+        # /api/sso 要在 _guard 之前接管：第三方后端来换令牌时手里没有会话。
+        if path.startswith("/api/sso"):
+            self._safely(self._handle_sso, "POST", path)
+            return
         if not self._guard("POST", path):
             return
         if path.startswith("/api/tunnel"):
@@ -1703,9 +1878,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         parsed = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(parsed.path)
-        if path.startswith("/api/access") or path.startswith("/api/auth"):
+        if path.startswith("/api/access") or path.startswith("/api/auth") \
+                or path.startswith("/api/sso"):
             self._safely(self._handle_access if path.startswith("/api/access")
-                         else self._handle_auth, "DELETE", path)
+                         else (self._handle_sso if path.startswith("/api/sso")
+                               else self._handle_auth), "DELETE", path)
             return
         if not self._guard("DELETE", path):
             return

@@ -169,6 +169,35 @@ python -m vsw.server --root vsw/data --host 0.0.0.0 --port 8799 --tunnel
    都会被当成"跑服务的那台电脑"，谁都能抢先建出主人账号。
 3. **关掉它**：重启加 `--no-tunnel`，或在面板里点「关闭公网通道」。
 
+## 让 HYW 的账号直接等于工作台账号（第三方免登录）
+
+HYW（`https://hyw.coreart.cn`）那边的人已经是登录状态了，看工作台不该再登一次。
+两段式，令牌永远不下发到浏览器：
+
+1. **绑定一次**：用户在 HYW 里填工作台地址 + 账号密码，HYW 后端调 `POST /api/sso/bind`
+   换回长期令牌 `VSWL-XXXX-XXXX-XXXX`。密码只用这一次，工作台库里只存令牌哈希。
+2. **点一下就进**：HYW 后端拿令牌调 `POST /api/sso/ticket` 换一张 **60 秒一次性票据**，
+   浏览器跳 `/sso?ticket=...`，工作台认票、种 `vsw_sid`、302 回主页面。
+
+| 接口 | 谁能调 | 说明 |
+| --- | --- | --- |
+| `POST /api/sso/bind` | 任何人（要账号密码） | 密码换绑定令牌 |
+| `POST /api/sso/ticket` | 拿着绑定令牌的人 | 换一次性票据（**免登录、免密钥**，所以这条路必须在密钥检查之前） |
+| `GET /api/sso/links` | 登录用户 | 自己有哪些绑定（主人看全部） |
+| `POST /api/sso/revoke/<id>` | 登录用户 | 撤销一条，撤销立刻生效 |
+| `GET /sso?ticket=...` | 浏览器 | 换票种 cookie 并跳转 |
+
+三个刻意的取舍：
+
+* **令牌不能当会话令牌用**：`VSWL-…` 只能换票，直接拿它读数据是 401。
+* **票据只在内存里**：60 秒、取出即删；工作台重启后没兑换的票据失效，HYW 再要一张就行。
+* **撤销真的立刻生效**：撤销后再换票 401，HYW 那边收到 409 `{needBind:true}` 并清掉本地记录。
+
+HYW 侧要给它那个单文件服务端打一个补丁（`hyw/patch_vsw_link.py`，可重复执行）加四条
+`/vsw/*` 接口，再加一个前端卡片（`hyw/vsw-link-ui.js`）。**一个硬限制**：HYW 的服务器在公网，
+所以填的工作台地址必须是公网可达的 —— 用 Tailscale Funnel 的 `https://xxx.ts.net`，
+填 `192.168.1.46` 它连不上。完整说明见 [`hyw/README.md`](hyw/README.md)。
+
 ## 快速开始
 
 ```bat
@@ -477,6 +506,7 @@ node scripts/vsw-probe-archive-view.js --apk vsw-workbench.apk      --origin htt
 python scripts/vsw-probe-access.py      # 45 项：密钥、角色分级、限速、页面壳子免检
 python scripts/vsw-probe-accounts.py    # 67 项：建号、邀请码、工作区隔离、协作、会话头、共用语义引擎、本机/远程判定
 python scripts/vsw-probe-tunnel.py      # 35 项：公网通道解析、XFF 优先、只有主人能开、没门槛时拒绝开
+python scripts/vsw-probe-sso.py         # 39 项：绑定令牌只存哈希、一次性票据、/sso 落地页、撤销立刻生效
 python scripts/vsw-probe-auto.py       # 24 项：自动搜图的候选挑选、串行跑批、失败不中断、谁能开跑
 python scripts/vsw-probe-update.py     # 43 项
 python scripts/vsw-probe-watchdog.py   # 24 项：拉起服务、被 taskkill 后自己续跑、单实例锁、接管模式、硬杀不留孤儿：版本比较、下载与 SHA256、匿名可取、GitHub 兜底、坏 version.json
@@ -509,11 +539,17 @@ vsw/                  桌面工作台 + 手机端页面（同一份手机页面�
   tunnel.py           公网通道（Tailscale Funnel）：状态解析、开/关、节点名
   hub.py              工作区句柄表：一个工作区 = 一个数据目录，按请求绑定
   access.py           访客密钥：加盐哈希、角色、失败限速
+  sso.py              第三方免登录：绑定令牌形状、一次性票据表（60 秒、取出即删）
   release.py          应用自更新：本地 dist/ 与 GitHub Releases 两个源、版本比较、APK 直发
   static/             桌面端 index.html / app.css / app.js（无框架）
   static/mobile/      手机端 PWA（单文件内联全部代码）+ manifest + service worker
   cdp_driver.js       无头 Chromium + CDP 驱动：上传变体 → 等结果 → 提取结构化 JSON
   NOTES-engines.md    实测笔记：各引擎还能不能自动识图、Bing 为何失效、百度给的边界
+hyw/                  把「HYW 账号 = 工作台账号」接起来的那一层（不含 HYW 自己的服务端）
+  patch_vsw_link.py   给 HYW 的 api.node.js 打补丁（四条 /vsw/* 接口，可重复执行）
+  vsw-link-ui.js      HYW 页面上的「视觉工作台」卡片（绑定 / 打开 / 解绑）
+  test_vsw_link.js    16 项自测：假 Database + 假 document，对着临时工作台跑
+  README.md           时序图、接口表、部署注意（工作台必须公网可达）
 vsw-android/          安卓 APK 工程（WebView 外壳 + 原生扫码 + 自更新，不需要 Gradle）
   java/.../ApkProvider.java   只读 ContentProvider：把 APK / 待搜图片以 content:// 交出去
   java/.../WebSearchActivity.java  手机自己搜：WebView + onShowFileChooser + 结果提取

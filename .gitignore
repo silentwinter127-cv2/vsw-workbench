@@ -40,3 +40,7 @@ probe-*.log
 album_password.txt
 ngrok.yml
 tools/ngrok-config/
+
+# HYW 那边的单文件服务端（含他们自己的 AUTH0 密钥，绝不能进这个公开仓库）
+hyw/api.node.js
+hyw/api.node.*.js

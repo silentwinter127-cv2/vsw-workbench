@@ -2213,11 +2213,71 @@ function renderShare(info) {
   if (foot) foot.textContent = '';
 
   renderPublic(info);
+  loadSso();
 
   loadWorkspaceBits();
 }
 
 /** 公网通道（Tailscale Funnel）：不在同一局域网的人靠这条地址进来。 */
+function renderSso(target) {
+  const box = $('#shareSso');
+  if (!box) return;
+  const rows = (target && target.links) || [];
+  const head = `
+    <div class="meta">别的站点（比如 HYW）可以拿「账号名 + 密码」在这里换一把绑定令牌，
+      之后那边的用户点「打开工作台」就直接进来，不用再登一次。
+      令牌只存在对方服务器上，随时可以在这里撤销。</div>`;
+  if (!rows.length) {
+    box.innerHTML = `${head}
+      <p class="hint small">还没有绑定。绑定的做法：对方后端调
+        <code>POST /api/sso/bind</code>（账号名 + 密码 + 一个标记），
+        拿到 <code>VSWL-…</code> 存起来；要进工作台时调
+        <code>POST /api/sso/ticket</code> 换一次性链接。</p>`;
+    return;
+  }
+  box.innerHTML = `${head}
+    <div class="keylist">${rows.map((r) => `
+      <div class="keyrow">
+        <code>${esc(r.label || '未命名')}</code>
+        <span class="meta">${esc(r.user)} · 用过 ${r.uses} 次 ·
+          ${r.last_used ? '最近 ' + new Date(r.last_used * 1000).toLocaleString('zh-CN') : '还没用过'}</span>
+        <button class="btn ghost sm" data-ssorevoke="${r.id}">撤销</button>
+      </div>`).join('')}</div>`;
+  $$('[data-ssorevoke]').forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        const res = await fetch(`/api/sso/revoke/${btn.dataset.ssorevoke}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '撤销失败');
+        toast('这条绑定已经作废：对方再点「打开工作台」会要求重新绑定');
+        renderSso(data);
+      } catch (err) {
+        btn.disabled = false;
+        toast(String(err.message || err), true);
+      }
+    };
+  });
+}
+
+async function loadSso() {
+  const box = $('#shareSso');
+  if (!box) return;
+  if (!(ME && ME.logged_in)) {
+    box.innerHTML = '<div class="meta">第三方绑定要账号登录之后才能管。</div>';
+    return;
+  }
+  try {
+    const res = await fetch('/api/sso/links');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '读不到绑定');
+    renderSso(data);
+  } catch (err) {
+    box.innerHTML = `<div class="meta">${esc(String(err.message || err))}</div>`;
+  }
+}
+
 function renderPublic(info) {
   const box = $('#sharePublic');
   if (!box) return;

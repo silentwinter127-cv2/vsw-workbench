@@ -34,6 +34,7 @@ SESSION_DAYS = 30
 # 手打友好：去掉 I / O / 0 / 1
 _ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _PBKDF2_ROUNDS = 120_000
+_rng = __import__("random").SystemRandom()
 _MIN_PASSWORD = 6
 
 SCHEMA = """
@@ -81,6 +82,15 @@ CREATE TABLE IF NOT EXISTS invites (
     expires_at REAL    NOT NULL,
     used_at    REAL    NOT NULL DEFAULT 0,
     used_by    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sso_links (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    key_hash   TEXT    NOT NULL UNIQUE,   -- 只存 sha256，明文只在生成那一次出现
+    label      TEXT    NOT NULL DEFAULT '',  -- 「HYW」「别的站点」，方便在界面上分清
+    created_at REAL    NOT NULL,
+    last_used  REAL    NOT NULL DEFAULT 0,
+    uses       INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS login_fails (
     ip         TEXT PRIMARY KEY,
@@ -463,6 +473,64 @@ class AccountStore:
                 (time.time(), int(user_id), row["code_hash"]))
         ws = self.workspace(int(row["ws_id"])) or {}
         return {"ws_id": int(row["ws_id"]), "workspace": ws, "role": row["role"]}
+
+    # ------------------------------------------------------- 第三方应用绑定
+    # HYW 这类站点上已经登录的人，不该再登一次工作台。绑定时第三方后端拿
+    # 账号密码换一把长期令牌（只给哈希入库），之后每次打开都拿它换一张
+    # 一次性票据。撤销立刻生效 —— 第三方那边存的明文就成了废纸。
+    def create_sso_link(self, user_id: int, label: str = "", key: str = "") -> Dict[str, Any]:
+        """生成一把绑定令牌。``key`` 由调用方生成（探针要可控），空则自己造。"""
+        plain = key or ("VSWL-" + "-".join(
+            "".join(_ALPHABET[_rng.randrange(len(_ALPHABET))] for _ in range(4))
+            for _ in range(3)))
+        now = time.time()
+        self._x("INSERT INTO sso_links(user_id, key_hash, label, created_at, last_used, uses)"
+                " VALUES(?,?,?,?,?,?)",
+                (int(user_id), _hash_token(plain), str(label or "")[:60], now, 0.0, 0))
+        row = self._q("SELECT * FROM sso_links WHERE key_hash=?", (_hash_token(plain),))[0]
+        return {"id": int(row["id"]), "key": plain, "label": row["label"],
+                "user_id": int(row["user_id"]), "created_at": now}
+
+    def sso_link_user(self, key: str) -> Optional[Dict[str, Any]]:
+        """拿绑定令牌换人；顺手记一次使用时间。令牌无效返回 None。"""
+        plain = str(key or "").strip()
+        if not plain:
+            return None
+        rows = self._q("SELECT * FROM sso_links WHERE key_hash=?", (_hash_token(plain),))
+        if not rows:
+            return None
+        row = rows[0]
+        self._x("UPDATE sso_links SET last_used=?, uses=uses+1 WHERE id=?",
+                (time.time(), int(row["id"])))
+        return self.user(int(row["user_id"]))
+
+    def sso_links(self, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        if user_id is None:
+            rows = self._q("SELECT * FROM sso_links ORDER BY id DESC")
+        else:
+            rows = self._q("SELECT * FROM sso_links WHERE user_id=? ORDER BY id DESC",
+                           (int(user_id),))
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            user = self.user(int(row["user_id"])) or {}
+            out.append({"id": int(row["id"]), "user_id": int(row["user_id"]),
+                        "user": user.get("name") or "?", "label": row["label"],
+                        "created_at": float(row["created_at"]),
+                        "last_used": float(row["last_used"] or 0),
+                        "uses": int(row["uses"] or 0)})
+        return out
+
+    def revoke_sso_link(self, link_id: int, user_id: Optional[int] = None) -> bool:
+        if user_id is None:
+            cur = self._x("DELETE FROM sso_links WHERE id=?", (int(link_id),))
+        else:
+            cur = self._x("DELETE FROM sso_links WHERE id=? AND user_id=?",
+                          (int(link_id), int(user_id)))
+        return cur.rowcount > 0
+
+    def revoke_user_sso_links(self, user_id: int) -> int:
+        cur = self._x("DELETE FROM sso_links WHERE user_id=?", (int(user_id),))
+        return cur.rowcount
 
     # -------------------------------------------------------------------- 限速
     def blocked_for(self, ip: str) -> float:

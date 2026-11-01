@@ -808,6 +808,32 @@ r41 的「上一层」把压栈写在了轮询线程里、用的是 `web.getUrl(
 
 `scripts/vsw-probe-update-gate.js --page vsw/static/mobile/index.html`（24 项）覆盖这些行为。
 
+### 第三方应用免登录：HYW 账号 = 工作台账号
+
+HYW（`https://hyw.coreart.cn`）的用户不该为了看工作台再登一次。做法是两段式的：
+
+1. **绑定**：用户在 HYW 里填一次工作台的地址 + 账号密码，HYW 后端拿它调
+   `POST /api/sso/bind`，换回一把长期令牌 `VSWL-XXXX-XXXX-XXXX`。密码只用于这一次校验，
+   不留在 HYW 那边；工作台库里**只存令牌的哈希**。
+2. **打开**：点「打开工作台」时 HYW 后端拿令牌调 `POST /api/sso/ticket`，换一张
+   **60 秒一次性票据**，把浏览器跳到 `/sso?ticket=...`。工作台认票、种 `vsw_sid`、302 回主页面。
+
+令牌永远不下发到浏览器，用户在工作台「共享 / 账号 → 第三方应用绑定」里能随时撤销，
+撤销立刻生效。票据只在内存里、取出即删 —— 历史记录里那条 URL 再点一次只会看到「票过期」。
+
+| 接口 | 谁能调 | 说明 |
+| --- | --- | --- |
+| `POST /api/sso/bind` | 任何人（要账号密码） | 密码换绑定令牌 |
+| `POST /api/sso/ticket` | 拿着绑定令牌的人 | 换一次性票据（**免登录、免密钥**） |
+| `GET /api/sso/links` | 登录用户 | 自己有哪些绑定（主人看全部） |
+| `POST /api/sso/revoke/<id>` | 登录用户 | 撤销一条 |
+| `GET /sso?ticket=...` | 浏览器 | 换票种 cookie 并跳转 |
+
+HYW 那一侧需要给它的 `api.node.js` 打一个补丁（加四条 `/vsw/*` 接口），
+完整步骤、时序图、部署注意（**HYW 是公网服务，工作台地址必须填公网可达的地址，
+比如 Tailscale Funnel 的 `https://xxx.ts.net`，填 `192.168.1.x` 它连不上**）
+和前端卡片组件都在 [`hyw/README.md`](../hyw/README.md)。
+
 ### 开机自启 + 挂了自动续跑（看门狗）
 
 `scripts/vsw-watchdog.py` 让 8799 上永远有一个健康的服务：进程退出就退避重拉（1/2/4/8/15/30/60 秒），
