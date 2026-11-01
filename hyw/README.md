@@ -9,7 +9,7 @@
 | 文件 | 作用 |
 | --- | --- |
 | `patch_vsw_link.py` | 给 HYW 的 `api.node.js` 打补丁，加四条 `/vsw/*` 接口（可重复执行） |
-| `api.node.js` | 打完补丁的结果（161 KB，`node --check` 通过） |
+| `api.node.js` | 打补丁用的**样本**，不随仓库发布（里面是 HYW 自己的服务端与密钥，`.gitignore` 里排除了） |
 | `vsw-link-ui.js` | HYW 页面上的「视觉工作台」卡片（绑定表单 / 打开按钮 / 解绑） |
 | `test_vsw_link.js` | 本地自测：假 Database + 假 document，16 项断言 |
 
@@ -64,7 +64,8 @@ HYW 后端                      视觉工作台
 
 ```powershell
 python hyw\patch_vsw_link.py "C:\path\to\api.node.js"
-node --check "C:\path\to\api.node.js"
+#   → 产物是旁边那个 api.node.vsw.js，原文件不动（想直接覆盖就把目标路径作为第二个参数）
+node --check "C:\path\to\api.node.vsw.js"
 ```
 
 补丁插在 `return err(404, '接口不存在');` 之前，用 `// ===== 视觉工作台绑定…` 包裹，
