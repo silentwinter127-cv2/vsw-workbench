@@ -1447,7 +1447,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             name = str(body.get("name") or body.get("user") or "").strip()
             password = str(body.get("password") or "")
-            label = str(body.get("label") or "").strip()
+            label = str(body.get("label") or "").strip()[:40] or "第三方应用"
             user = self.auth.verify_login(name, password)
             if not user:
                 left = self.auth.note_failure(ip)
