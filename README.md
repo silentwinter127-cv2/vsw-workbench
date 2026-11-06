@@ -1018,5 +1018,29 @@ install_watchdog.bat remove   :: 注销
 `scripts/vsw-install-task.ps1` 显式写死这些设置：`StopOnIdleEnd=False`、`DisallowStartIfOnBatteries=False`、
 `StartWhenAvailable=True`、`ExecutionTimeLimit=PT0S`、`MultipleInstances=IgnoreNew`、`Hidden=True`。
 
-验证：`python scripts/vsw-probe-no-popup.py`（14 项）—— ipconfig 带不带 `CREATE_NO_WINDOW`、
-20 秒内连问 5 次只读一次网卡、局域网来源仍不会被误判成本机、活着的服务 20 个请求中位数 1.2 ms（修前每个请求都在起进程）。
+验证：`python scripts/vsw-probe-no-popup.py`（17 项）—— ipconfig 带不带 `CREATE_NO_WINDOW`、
+20 秒内连问 5 次只读一次网卡、局域网来源仍不会被误判成本机、活着的服务 20 个请求中位数 15 ms（修前每个请求都在起进程）。
+
+### 再复查一次：vsw 自己在起窗口吗（r48 之后）
+
+r47 修完还是有人反馈「又闪了」，于是把「谁在起控制台窗口」按三层查了一遍，vsw 侧是干净的：
+
+- **静态**：`vsw/*.py` 里 `subprocess.run` / `Popen` 一共 6 处 —— 3 处是「打开文件夹」
+  （`explorer /select,`、`open`、`xdg-open`，本来就是给人看的窗口），剩下 3 处（`ipconfig`、Node CDP 驱动、
+  `tailscale`）全部带 `CREATE_NO_WINDOW` 或走 `_no_window_flags()`。没有 `os.system`、没有 `multiprocessing`、
+  没有 `schtasks` / `cmd.exe`。
+- **自启动**：计划任务只有 `VSW Workbench Watchdog` 一个，动作是 `pythonw.exe`（没有控制台）；启动文件夹里只有
+  `Tailscale.lnk`；`HKCU`/`HKLM` 的 `Run` 项里没有 vsw。
+- **动态**：60 秒里打 **160 次** `/api/auth`（每次都走 `_is_local()` → `lan_addresses()`，20 秒 TTL 会真跑 2–3 次
+  `ipconfig`），服务**没有新增任何 conhost、也没有新增任何子进程**；被动盯 3 分钟，新起的控制台进程全都来自别的程序
+  （`wsl.exe` ← `E:\AstrBotQQAgent\watchdog\online-alert.py`、`OpenConsole.exe` ← `svchost`、`msedge.exe`）。
+  注意：用 `Start-Job` 做压测会自己起 powershell 控制台，测「有没有闪窗」时测量工具不能分配控制台。
+
+探针因此多了 3 项源码级扫描（14 → 17 项）：每个 `subprocess.*(...)` 调用（跨行括号拼起来）要么带
+`creationflags` / `_no_window_flags()`，要么只能是「打开文件夹」那三个白名单程序；外加一项「至少扫到 6 处」，
+防止正则写错变成恒真。
+
+顺手治了一个日志噪音：浏览器提前掐断连接时，`socketserver` 会把 `ConnectionAbortedError [WinError 10053]` 的
+整段 traceback 打进 `logs/server.log`（用户随手关个页面就刷十几行，真出错时反而找不着）。`build_server` 现在用
+`_QuietServer`：`ConnectionAbortedError` / `ConnectionResetError` / `BrokenPipeError` 静默，其它异常照旧打。
+实测 3 次「读完一小段就 RST」：日志 **0 行新增**（修前每次十几行）。

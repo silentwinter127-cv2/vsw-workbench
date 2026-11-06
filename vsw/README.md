@@ -866,7 +866,7 @@ uninstall_watchdog.bat        :: 拆干净
 `_is_local()` 每个请求都要问一次 `lan_addresses()`，而它 Windows 下靠 `ipconfig`；这个子进程以前没带
 `CREATE_NO_WINDOW`，服务又是 pythonw 拉起的（没有控制台），于是 Windows 每次都给 `ipconfig` 开一个新控制台窗口。
 修法：子进程带 `CREATE_NO_WINDOW`，`lan_addresses()` 结果缓存 20 秒。探针
-`scripts/vsw-probe-no-popup.py`（14 项）钉住这两条，并顺带确认「局域网来源不会被误判成本机」。
+`scripts/vsw-probe-no-popup.py`（17 项）钉住这两条，并顺带确认「局域网来源不会被误判成本机」；另加 3 项**源码级扫描**：`vsw/*.py` 里每个 `subprocess.*(...)` 调用要么带 `creationflags`/`_no_window_flags()`，要么只能是「打开文件夹」那三个白名单程序（`explorer` / `open` / `xdg-open`）。
 
 计划任务那边也一起改了：`install_watchdog.bat` 现在调到 `scripts/vsw-install-task.ps1`，动作直接指向
 `pythonw.exe`（不再经 `cmd.exe` 跑 .bat），并把 `StopOnIdleEnd` 置为 `False` —— 否则你一动电脑，看门狗就被停。

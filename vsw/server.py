@@ -2013,6 +2013,21 @@ def open_in_file_manager(path: str) -> bool:
         return False
 
 
+class _QuietServer(ThreadingHTTPServer):
+    """浏览器中途关标签页时别打 traceback。
+
+    socketserver 默认的 ``handle_error`` 会把 ``ConnectionAbortedError`` 整段
+    traceback 打出来；用户随手关个页面就在 ``logs/server.log`` 里留一大坨，
+    真出问题时反而找不着。客户端主动断连不算错误，静默；其它异常照旧。
+    """
+
+    def handle_error(self, request: Any, client_address: Any) -> None:  # noqa: D102
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def build_server(service: Workbench, host: str = "127.0.0.1", port: int = 8787,
                  access: Optional[AccessStore] = None,
                  auth: Optional[AccountStore] = None,
@@ -2038,7 +2053,7 @@ def build_server(service: Workbench, host: str = "127.0.0.1", port: int = 8787,
     BoundHandler.root = getattr(fallback, "root", "")  # type: ignore[attr-defined]
     BoundHandler.share = staticmethod(  # type: ignore[attr-defined]
         lambda: _share_info(host, fallback))
-    server = ThreadingHTTPServer((host, port), BoundHandler)
+    server = _QuietServer((host, port), BoundHandler)
     server.daemon_threads = True
     _BOUND["port"] = server.server_address[1]
     _BOUND["host"] = host

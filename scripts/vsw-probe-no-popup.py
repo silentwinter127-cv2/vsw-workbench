@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import io
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -199,6 +201,53 @@ def part_c(origin: str) -> None:
     check("中位数很快（< 40ms）", med < 40.0, f"{med:.1f} ms")
 
 
+
+SPAWN_ALLOW = ("explorer", "open", "xdg-open")
+SPAWN_PATTERN = r"subprocess\.(run|Popen|call|check_output|check_call)\s*\("
+
+
+def _spawn_calls(text: str) -> List[str]:
+    """把每个 subprocess.*(...) 调用整段抠出来（括号可能跨行）。"""
+    out: List[str] = []
+    for m in re.finditer(SPAWN_PATTERN, text):
+        i = m.end()
+        depth = 1
+        while i < len(text) and depth:
+            ch = text[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            i += 1
+        out.append(text[m.start():i])
+    return out
+
+
+def part_e() -> None:
+    print("\n[E] 源码级扫描：vsw/*.py 里起子进程的地方都要关窗")
+    pkg = os.path.join(REPO_ROOT, "vsw")
+    noisy: List[str] = []
+    allowed: List[str] = []
+    total = 0
+    for fn in sorted(os.listdir(pkg)):
+        if not fn.endswith(".py"):
+            continue
+        text = io.open(os.path.join(pkg, fn), encoding="utf-8").read()
+        for call in _spawn_calls(text):
+            total += 1
+            flat = " ".join(call.split())
+            if any(name in call for name in SPAWN_ALLOW):
+                allowed.append(f"{fn}: {flat[:70]}")
+                continue
+            # 直接写 creationflags，或者走 _no_window_flags() 都算关窗
+            if "creationflags" not in call and "_no_window_flags()" not in call:
+                noisy.append(f"{fn}: {flat[:90]}")
+    check("扫到的子进程调用不少于 6 处（防止正则写错恒真）", total >= 6, total)
+    check("除了「打开文件夹」那三处，全部带 creationflags（关窗）", not noisy, noisy)
+    check("白名单里只有「打开文件夹」这类本来就是给人看的窗口", len(allowed) == 3,
+          allowed)
+
+
 def main(argv: List[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="确认服务不会往屏幕上闪黑窗口")
     ap.add_argument("--origin", default=os.environ.get("VSW_ORIGIN", "http://127.0.0.1:8799"))
@@ -207,6 +256,7 @@ def main(argv: List[str] | None = None) -> int:
 
     print(f"仓库：{REPO_ROOT}")
     part_a_b()
+    part_e()
     part_d()
     if args.skip_live:
         print("\n[C] 跳过（--skip-live）")
